@@ -99,9 +99,11 @@ Earthly's floating-with-coupling model is the documented anti-pattern.
 
 - **Don't weaken smoke tests** in either workflow's `smoke` job. They cover
   real security guarantees: `EXEC=0` on the socket-proxy, the `.env`
-  PreToolUse hook block, scoped sudo (no arbitrary `chown`), and the
-  `gitconfig.local` root-444 lock. If a test fails legitimately, fix the
-  regression, not the assertion.
+  PreToolUse hook block, scoped sudo (no arbitrary `chown`), the
+  `gitconfig.local` root-444 lock, and the npm-quarantine sanity check
+  (`NPM_CONFIG_MIN_RELEASE_AGE` ≤ 30 days, so npx-based MCPs stay
+  installable). If a test fails legitimately, fix the regression, not the
+  assertion.
 - **Don't add untrusted GitHub event fields directly into `run:` blocks**
   (issue titles, PR titles, commit messages, branch refs). Use `env:` with
   proper quoting. See the GitHub Security Lab guide on workflow injection.
@@ -110,6 +112,13 @@ Earthly's floating-with-coupling model is the documented anti-pattern.
 - **Don't add files to `template/`** that the user shouldn't get a copy of.
   `apply_template()` is the gatekeeper; anything that lands there gets
   copied into every project's `.devcontainer/`.
+- **Don't try to edit `.devcontainer/` from inside the container.** The
+  PreToolUse hook (`template/hooks/pre-tool-use.sh`) blocks writes there —
+  it's part of the sandbox boundary, since an AI that can rewrite its own
+  devcontainer config can disable every other protection. Edit
+  `template/devcontainer.json` (and the rest of `template/`) instead; users
+  pick up changes via `aic sync`. The dogfood `.devcontainer/` at the repo
+  root regenerates the same way.
 - **Don't bump `package.json` in a feature PR.** Version bumps are their own
   commit (created by `npm version`) so the tag points at a clean release
   commit.
@@ -151,6 +160,8 @@ AIC_HOME=/path/to/aicontainer-checkout /path/to/aicontainer-checkout/aic init --
 devcontainer up --workspace-folder .
 devcontainer exec --workspace-folder . claude --version
 devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/_ping
+# npm quarantine sanity (must be ≤ 30 days or npx-based MCPs fail to install)
+devcontainer exec --workspace-folder . bash -lc 'echo "$NPM_CONFIG_MIN_RELEASE_AGE"'
 ```
 
 For CLI-only changes, exercising `aic init` against a temp directory and

@@ -71,6 +71,21 @@ jobs:
             -X POST http://socket-proxy:2375/exec/none/start)
           set -e
           [ "$out" = "403" ] || { echo "expected 403 from socket-proxy /exec, got $out"; exit 1; }
+      - name: Smoke test - npm quarantine window is sane (npx-based MCPs installable)
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . bash -lc '
+            val="${NPM_CONFIG_MIN_RELEASE_AGE-}"
+            echo "NPM_CONFIG_MIN_RELEASE_AGE=$val"
+            [ -n "$val" ] || { echo "FAIL: NPM_CONFIG_MIN_RELEASE_AGE unset"; exit 1; }
+            [ "$val" -ge 0 ] 2>/dev/null || { echo "FAIL: not a non-negative integer"; exit 1; }
+            # npm interprets this value in DAYS. Anything > 30 makes most active
+            # npx-based MCP plugins unusable; almost certainly a unit mistake
+            # (e.g. believing 1440 means 24h in minutes — it means 1440 days).
+            [ "$val" -le 30 ] || { echo "FAIL: $val days is too restrictive; npx MCPs will fail with ENOVERSIONS"; exit 1; }
+            echo "OK: npm quarantine is ${val} day(s)"
+          '
+
       - name: Smoke test - PreToolUse hook blocks .env
         working-directory: /tmp/proj
         run: |

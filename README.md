@@ -123,7 +123,7 @@ You can still use `aic` from a separate terminal at the same time — `aic rebui
 
 **Security-driven defaults** (don't change casually — many are the actual sandbox boundary):
 
-- **npm hardening**: `NPM_CONFIG_IGNORE_SCRIPTS=true` blocks `postinstall` RCE, the most common supply-chain vector. `NPM_CONFIG_MIN_RELEASE_AGE=1440` rejects any package published in the last 24h (mitigates fast-moving malicious releases). `audit=true`, `fund=false`.
+- **npm hardening**: `NPM_CONFIG_IGNORE_SCRIPTS=true` blocks `postinstall` RCE, the most common supply-chain vector. `NPM_CONFIG_MIN_RELEASE_AGE=1` rejects any package published in the last 24h (mitigates fast-moving malicious releases — npm interprets the value in days). `audit=true`, `fund=false`.
 - **Locked git config**: `~/.gitconfig.local` is chowned `root:root 0444` after first run, so a compromised AI session can't inject `credential.helper` or `core.sshCommand` to capture tokens during in-container `git push` / `gh` flows. Host `~/.gitconfig` is included read-only.
 - **PreToolUse hook** (Claude + Codex, fires even with bypass/auto-approve on) blocks:
   - reads/writes of `.env*` files (allowing `.env.example|.sample|.template|.defaults`),
