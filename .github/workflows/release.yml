@@ -177,6 +177,8 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
       - name: Publish to npm
+        # Auth via npm OIDC Trusted Publishers (configured at npmjs.com).
+        # The job already has `id-token: write`; npm CLI exchanges the GitHub
+        # OIDC token for a short-lived publish token at runtime, so no
+        # NODE_AUTH_TOKEN env var is needed.
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
