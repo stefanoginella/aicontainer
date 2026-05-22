@@ -1,19 +1,19 @@
 # =============================================================================
 # aicontainer — pull-mode compose (uses the prebuilt GHCR image)
 # =============================================================================
-# Pulls ghcr.io/stefanoginella/aicontainer:v0.0.4 instead of building locally.
+# Pulls ghcr.io/stefanoginella/aicontainer:v0.0.5 instead of building locally.
 # All helper scripts (post-create.py, aic-firewall, hooks, etc.) are baked
 # into the image — see template/Dockerfile in the aicontainer repo for the
 # source of truth.
 #
 # If a project needs extra apt packages or language tooling, run `aic init
 # --build` to switch to the local-build template (or add a Dockerfile.project
-# that does `FROM ghcr.io/stefanoginella/aicontainer:v0.0.4`).
+# that does `FROM ghcr.io/stefanoginella/aicontainer:v0.0.5`).
 # =============================================================================
 
 services:
   devcontainer:
-    image: ghcr.io/stefanoginella/aicontainer:v0.0.4
+    image: ghcr.io/stefanoginella/aicontainer:v0.0.5
     pull_policy: missing
     command: sleep infinity
     # NET_ADMIN + NET_RAW let the opt-in `sudo aic-firewall` script set up
