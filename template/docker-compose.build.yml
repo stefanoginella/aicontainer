@@ -96,7 +96,7 @@ services:
       - aic-auth-global:/home/vscode/.config/aic-auth
 
   socket-proxy:
-    image: tecnativa/docker-socket-proxy:0.4.2
+    image: tecnativa/docker-socket-proxy:v0.4.2
     restart: unless-stopped
     privileged: false
     read_only: true
