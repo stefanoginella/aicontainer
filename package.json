@@ -1,6 +1,6 @@
 {
   "name": "aicontainer",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Sandboxed devcontainer for running Claude Code and Codex in bypass / auto-approve mode.",
   "bin": {
     "aic": "./aic",
