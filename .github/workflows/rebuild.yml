@@ -68,7 +68,7 @@ jobs:
           devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/_ping
           set +e
           out=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
-            -X POST http://socket-proxy:2375/containers/none/exec)
+            -X POST http://socket-proxy:2375/exec/none/start)
           set -e
           [ "$out" = "403" ] || { echo "expected 403 from socket-proxy /exec, got $out"; exit 1; }
       - name: Smoke test - PreToolUse hook blocks .env
