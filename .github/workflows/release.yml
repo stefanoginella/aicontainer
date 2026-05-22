@@ -176,6 +176,12 @@ jobs:
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
+      - name: Upgrade npm (Trusted Publishers requires npm >= 11.5)
+        # Node 20 ships with npm 10.x, which doesn't know how to exchange
+        # the GitHub OIDC token for a short-lived npm publish token.
+        run: |
+          npm install -g npm@latest
+          npm --version
       - name: Publish to npm
         # Auth via npm OIDC Trusted Publishers (configured at npmjs.com).
         # The job already has `id-token: write`; npm CLI exchanges the GitHub
