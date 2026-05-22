@@ -1,13 +1,11 @@
 # aicontainer
 
 [![npm version](https://img.shields.io/npm/v/aicontainer?logo=npm)](https://www.npmjs.com/package/aicontainer)
-[![npm downloads](https://img.shields.io/npm/dm/aicontainer?logo=npm&color=blue)](https://www.npmjs.com/package/aicontainer)
 [![release](https://github.com/stefanoginella/aicontainer/actions/workflows/release.yml/badge.svg)](https://github.com/stefanoginella/aicontainer/actions/workflows/release.yml)
 [![rebuild](https://github.com/stefanoginella/aicontainer/actions/workflows/rebuild.yml/badge.svg)](https://github.com/stefanoginella/aicontainer/actions/workflows/rebuild.yml)
 [![License: MIT](https://img.shields.io/npm/l/aicontainer?color=yellow)](LICENSE)
 [![Container: GHCR](https://img.shields.io/badge/container-ghcr.io-2188ff?logo=github)](https://github.com/stefanoginella/aicontainer/pkgs/container/aicontainer)
 [![Devcontainer spec](https://img.shields.io/badge/devcontainer-spec-blue?logo=visualstudiocode)](https://containers.dev/)
-[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-3.0-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
 A sandboxed devcontainer for running [Claude Code](https://claude.ai/code) and [Codex](https://github.com/openai/codex) in bypass / auto-approve mode safely across multiple projects.
 
