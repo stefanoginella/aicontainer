@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# =============================================================================
+# aic-firewall — opt-in outbound allowlist for aicontainer
+# =============================================================================
+# Restricts the container's outbound traffic to a curated list of domains.
+# Inspired by Trail of Bits' devcontainer README (but baked into a script so
+# you don't paste 30 iptables rules by hand).
+#
+# Usage (from inside the container):
+#   sudo aic-firewall enable          # apply allowlist (default DROP)
+#   sudo aic-firewall status          # show rules + resolved IPs
+#
+# There is no "disable" / "flush" command on purpose: once enabled, the only
+# way to widen the policy is `aic rebuild` from the host. That way the
+# scoped-sudo entry covering this script cannot be abused by AI to weaken
+# the firewall — calling it can only re-apply or strengthen it.
+#
+# Per-project extra domains: list one domain per line in
+#   /workspace/.devcontainer/firewall-allowlist
+# (comment lines starting with `#` are ignored).
+# =============================================================================
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "aic-firewall: must run via sudo (the scoped sudoers entry allows it)" >&2
+  exit 1
+fi
+
+DEFAULT_ALLOWLIST=(
+  # AI APIs
+  api.anthropic.com
+  statsig.anthropic.com
+  claude.ai
+  api.openai.com
+  auth.openai.com
+  chatgpt.com
+  # GitHub
+  api.github.com
+  github.com
+  raw.githubusercontent.com
+  objects.githubusercontent.com
+  codeload.github.com
+  # Package registries
+  registry.npmjs.org
+  pypi.org
+  files.pythonhosted.org
+  ghcr.io
+  pkg-containers.githubusercontent.com
+  # Docker registries (via socket-proxy, for image pulls)
+  registry-1.docker.io
+  auth.docker.io
+  production.cloudflare.docker.com
+)
+
+EXTRA_FILE="/workspace/.devcontainer/firewall-allowlist"
+
+resolve_into_ipset() {
+  local domain="$1" ip
+  while IFS= read -r ip; do
+    [ -n "$ip" ] && ipset add aic-allowed "$ip/32" -exist
+  done < <(
+    {
+      dig +short A "$domain" 2>/dev/null || true
+      getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}'
+    } | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u
+  )
+}
+
+cmd_enable() {
+  echo "==> aic-firewall: building allowlist..."
+
+  # Snapshot the upstream DNS resolvers BEFORE we flip the default policy,
+  # so we can keep DNS reachable after DROP is in effect.
+  local resolvers
+  resolvers=$(awk '/^nameserver/ {print $2}' /etc/resolv.conf | sort -u)
+
+  # Reset to permissive while we resolve domains.
+  iptables -F OUTPUT
+  iptables -F INPUT
+  iptables -P OUTPUT ACCEPT
+  iptables -P INPUT ACCEPT
+
+  ipset create aic-allowed hash:net -exist
+  ipset flush aic-allowed
+
+  for d in "${DEFAULT_ALLOWLIST[@]}"; do
+    resolve_into_ipset "$d"
+  done
+
+  if [ -f "$EXTRA_FILE" ]; then
+    echo "==> aic-firewall: loading extras from $EXTRA_FILE"
+    while IFS= read -r line || [ -n "$line" ]; do
+      d=$(sed 's/#.*//' <<<"$line" | xargs)
+      [ -n "$d" ] && resolve_into_ipset "$d"
+    done < "$EXTRA_FILE"
+  fi
+
+  local count
+  count=$(ipset list aic-allowed | awk '/Number of entries:/ {print $4}')
+  if ! [[ "${count:-0}" =~ ^[0-9]+$ ]] || [ "${count:-0}" -eq 0 ]; then
+    echo "aic-firewall: ERROR — resolved 0 IPs; refusing to enable DROP policy." >&2
+    exit 1
+  fi
+  echo "==> aic-firewall: $count IPs in allowlist"
+
+  # Build the rules.
+  iptables -N AIC_OUT 2>/dev/null || iptables -F AIC_OUT
+  iptables -A AIC_OUT -m set --match-set aic-allowed dst -j ACCEPT
+  iptables -A AIC_OUT -j RETURN
+
+  iptables -F OUTPUT
+  iptables -A OUTPUT -o lo -j ACCEPT
+  iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+  # DNS to the configured resolvers stays open so curl/dig keep working.
+  for r in $resolvers; do
+    iptables -A OUTPUT -p udp -d "$r" --dport 53 -j ACCEPT
+    iptables -A OUTPUT -p tcp -d "$r" --dport 53 -j ACCEPT
+  done
+  # Reach the socket-proxy on the compose-internal network.
+  iptables -A OUTPUT -p tcp --dport 2375 -j ACCEPT
+  iptables -A OUTPUT -j AIC_OUT
+  iptables -P OUTPUT DROP
+
+  iptables -F INPUT
+  iptables -A INPUT -i lo -j ACCEPT
+  iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+  iptables -P INPUT DROP
+
+  echo "==> aic-firewall: enabled (default DROP, allowlist active)"
+  echo "    To widen: 'aic rebuild' from the host."
+}
+
+cmd_status() {
+  echo "## iptables OUTPUT chain"
+  iptables -L OUTPUT -n --line-numbers
+  echo
+  echo "## ipset aic-allowed"
+  ipset list aic-allowed 2>/dev/null || echo "(not created yet — run: sudo aic-firewall enable)"
+}
+
+case "${1:-}" in
+  enable) cmd_enable ;;
+  status) cmd_status ;;
+  *) echo "Usage: sudo aic-firewall {enable|status}" >&2; exit 1 ;;
+esac

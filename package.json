@@ -1,0 +1,48 @@
+{
+  "name": "aicontainer",
+  "version": "0.0.1",
+  "description": "Sandboxed devcontainer for running Claude Code and Codex in bypass / auto-approve mode.",
+  "bin": {
+    "aic": "./aic",
+    "aicontainer": "./aic"
+  },
+  "files": [
+    "aic",
+    "template/",
+    "LICENSE",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stefanoginella/aicontainer.git"
+  },
+  "homepage": "https://github.com/stefanoginella/aicontainer#readme",
+  "bugs": {
+    "url": "https://github.com/stefanoginella/aicontainer/issues"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Stefano Ginella",
+    "url": "https://github.com/stefanoginella"
+  },
+  "keywords": [
+    "devcontainer",
+    "claude-code",
+    "codex",
+    "ai",
+    "sandbox",
+    "docker",
+    "vibecoding",
+    "vibe-coding"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "dependencies": {
+    "@devcontainers/cli": "^0.87.0"
+  }
+}

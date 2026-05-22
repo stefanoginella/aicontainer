@@ -1,0 +1,22 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard"],
+  "labels": ["dependencies"],
+  "schedule": ["before 6am on Monday"],
+  "packageRules": [
+    {
+      "matchManagers": ["dockerfile"],
+      "matchFileNames": ["template/Dockerfile"],
+      "commitMessageTopic": "{{depName}} (Dockerfile)"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["^template/Dockerfile$"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)(?: registryUrl=(?<registryUrl>.*?))?\\s+ARG \\w+_VERSION=(?<currentValue>.*)\\s"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,727 @@
+#!/usr/bin/env bash
+# =============================================================================
+# aic — host-side CLI for aicontainer
+# =============================================================================
+# Thin shim around `@devcontainers/cli`. Resolves the aicontainer files
+# relative to this script so both npm installs (npm install -g aicontainer)
+# and git checkouts (~/.aicontainer + install.sh) work without configuration.
+# Override with $AIC_HOME if you keep them somewhere unusual.
+# =============================================================================
+set -euo pipefail
+
+# Resolve the real script directory, following symlinks (npm install -g
+# creates one in the global bin dir). Works on macOS (BSD readlink, no -f)
+# and Linux.
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+  link_dir="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+  SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+  [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$link_dir/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+AIC_HOME="${AIC_HOME:-$SCRIPT_DIR}"
+TEMPLATE_DIR="$AIC_HOME/template"
+
+err()  { echo "aic: $*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# Prefer a devcontainer CLI bundled into our node_modules (when installed via
+# `npm install -g aicontainer`), fall back to one on PATH (manual install).
+resolve_devcontainer () {
+  if [ -x "$AIC_HOME/node_modules/.bin/devcontainer" ]; then
+    echo "$AIC_HOME/node_modules/.bin/devcontainer"
+  elif command -v devcontainer >/dev/null 2>&1; then
+    command -v devcontainer
+  else
+    die "devcontainer CLI not found. Install with: npm install -g @devcontainers/cli"
+  fi
+}
+
+project_name () {
+  basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_'
+}
+
+require_in_project () {
+  [ -f .devcontainer/devcontainer.json ] || die "no .devcontainer/ here — run 'aic init' first"
+}
+
+# ---------------------------------------------------------------------------
+# Per-project tool selection (claude-code, codex).
+#
+# Stored in .devcontainer/devcontainer.json as containerEnv.AIC_TOOLS, e.g.
+# "claude-code,codex". post-create.py reads it to gate setup_claude /
+# setup_codex; the VSCode extensions array is filtered to match.
+#
+# Default for old projects without AIC_TOOLS (and for non-TTY init without
+# --with) is both tools, preserving pre-flag behavior.
+# ---------------------------------------------------------------------------
+KNOWN_TOOLS="claude-code codex"
+
+# ---------------------------------------------------------------------------
+# Per-project shell selection (zsh, bash, fish).
+#
+# Stored in .devcontainer/devcontainer.json as containerEnv.AIC_SHELL. The
+# image bakes minimal configs for all three (history persistence + fnm).
+# zsh keeps oh-my-zsh + powerlevel10k; bash and fish are barebones. We also
+# patch terminal.integrated.defaultProfile.linux + fontFamily so the VS Code
+# terminal opens in the chosen shell with a font that fits (MesloLGS NF for
+# zsh's p10k icons, plain monospace otherwise).
+# ---------------------------------------------------------------------------
+KNOWN_SHELLS="zsh bash fish"
+DEFAULT_SHELL="zsh"
+
+validate_shell () {
+  local raw="${1:-}"
+  raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
+  [ -n "$raw" ] || die "no shell specified (valid: $KNOWN_SHELLS)"
+  case "$raw" in
+    zsh|bash|fish) echo "$raw" ;;
+    *) die "unknown shell '$1' (valid: $KNOWN_SHELLS)" ;;
+  esac
+}
+
+prompt_shell () {
+  # Single-select radio menu on /dev/tty. Falls back to the default shell
+  # when stdin isn't a TTY (CI, piped install).
+  if ! (exec 3</dev/tty 4>/dev/tty) 2>/dev/null; then
+    echo "$DEFAULT_SHELL"
+    return
+  fi
+
+  local opts=("zsh" "bash" "fish")
+  local descs=(
+    "zsh + oh-my-zsh + powerlevel10k (default)"
+    "bash (minimal, history + fnm)"
+    "fish (minimal, history + fnm)"
+  )
+  local n=3 cur=0 i mark prefix
+
+  exec 3</dev/tty 4>/dev/tty
+
+  trap 'printf "\033[?25h" >&4 2>/dev/null; exec 3<&- 4>&- 2>/dev/null; trap - INT TERM EXIT; exit 130' INT TERM
+
+  printf "Which shell should this project use?\n" >&4
+  printf "(↑/↓ move · enter confirms · q cancels)\n\n" >&4
+  printf "\033[?25l" >&4
+
+  draw_shell_menu () {
+    for i in 0 1 2; do
+      if [ "$i" = "$cur" ]; then prefix="❯ "; mark="●"; else prefix="  "; mark="○"; fi
+      printf "\033[K%s%s %-5s — %s\n" "$prefix" "$mark" "${opts[$i]}" "${descs[$i]}" >&4
+    done
+  }
+  draw_shell_menu
+
+  local k c1 c2
+  while true; do
+    IFS= read -rsn1 -u 3 k || k=""
+    if [ "$k" = $'\033' ]; then
+      IFS= read -rsn1 -u 3 c1 || c1=""
+      IFS= read -rsn1 -u 3 c2 || c2=""
+      if [ "$c1" = "[" ]; then
+        [ "$c2" = "A" ] && cur=$(( (cur - 1 + n) % n ))
+        [ "$c2" = "B" ] && cur=$(( (cur + 1) % n ))
+      fi
+    elif [ -z "$k" ]; then
+      break
+    elif [ "$k" = "q" ] || [ "$k" = "Q" ]; then
+      printf "\n\033[?25h" >&4
+      exec 3<&- 4>&-
+      trap - INT TERM
+      die "cancelled by user"
+    fi
+    printf "\033[%dA" "$n" >&4
+    draw_shell_menu
+  done
+
+  printf "\033[?25h" >&4
+  exec 3<&- 4>&-
+  trap - INT TERM
+
+  echo "${opts[$cur]}"
+}
+
+read_aic_shell () {
+  # Read containerEnv.AIC_SHELL from .devcontainer/devcontainer.json.
+  # Empty output if the field isn't set (older projects).
+  local file=".devcontainer/devcontainer.json"
+  [ -f "$file" ] || return 0
+  sed -n 's/.*"AIC_SHELL"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n1
+}
+
+# Read this aic's own version from package.json. Used to pin the GHCR image
+# tag in generated pull-mode compose files (so `aic@X.Y.Z` always pulls
+# `ghcr.io/stefanoginella/aicontainer:vX.Y.Z`, never a floating :latest that
+# could drift away from the CLI's filesystem expectations).
+read_aic_version () {
+  local pkg="$AIC_HOME/package.json"
+  [ -f "$pkg" ] || die "package.json not found at $pkg (set AIC_HOME or reinstall aic)"
+  local v
+  v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg" | head -n1)"
+  [ -n "$v" ] || die "could not read version from $pkg"
+  echo "$v"
+}
+
+validate_tools () {
+  # Normalize a user-supplied list ("codex,claude-code", "claude-code ,codex")
+  # to canonical "claude-code,codex" order. Dies on unknown tools or empty input.
+  local raw="$1"
+  raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
+  [ -n "$raw" ] || die "no tools selected (valid: $KNOWN_TOOLS)"
+  local has_claude=0 has_codex=0
+  case ",$raw," in *,claude-code,*) has_claude=1 ;; esac
+  case ",$raw," in *,codex,*)       has_codex=1 ;; esac
+  # Validate by elimination: strip known tokens and separators; anything left
+  # is an unknown tool (avoids touching IFS or spawning a subshell).
+  local rest="$raw"
+  rest="${rest//claude-code/}"
+  rest="${rest//codex/}"
+  rest="${rest//,/}"
+  [ -z "$rest" ] || die "unknown tool(s) in '$1' (valid: $KNOWN_TOOLS)"
+  local result=""
+  [ "$has_claude" = "1" ] && result="claude-code"
+  [ "$has_codex"  = "1" ] && result="${result:+$result,}codex"
+  [ -n "$result" ] || die "no tools selected (valid: $KNOWN_TOOLS)"
+  echo "$result"
+}
+
+prompt_tools () {
+  # Renders an interactive checkbox menu on /dev/tty and writes the
+  # comma-separated selection to stdout. Falls back to both tools when
+  # no controlling terminal is available (e.g. CI, piped install).
+  # The probe-open is the only reliable check: /dev/tty exists as a device
+  # node even in non-interactive contexts, but opening it fails. We probe
+  # in a subshell so the test never leaves stale fds in the parent.
+  if ! (exec 3</dev/tty 4>/dev/tty) 2>/dev/null; then
+    echo "claude-code,codex"
+    return
+  fi
+
+  local opts=("claude-code" "codex")
+  local sel=("1" "1")
+  local n=2 cur=0 i mark prefix
+
+  exec 3</dev/tty 4>/dev/tty
+
+  # Restore cursor + close fds on any exit path.
+  trap 'printf "\033[?25h" >&4 2>/dev/null; exec 3<&- 4>&- 2>/dev/null; trap - INT TERM EXIT; exit 130' INT TERM
+
+  printf "Which AI tools should this project use?\n" >&4
+  printf "(↑/↓ move · space toggles · enter confirms · q cancels)\n\n" >&4
+  printf "\033[?25l" >&4
+
+  draw_tools_menu () {
+    for i in 0 1; do
+      [ "${sel[$i]}" = "1" ] && mark="[✓]" || mark="[ ]"
+      [ "$i" = "$cur" ] && prefix="❯ " || prefix="  "
+      printf "\033[K%s%s %s\n" "$prefix" "$mark" "${opts[$i]}" >&4
+    done
+  }
+  draw_tools_menu
+
+  local k c1 c2 any
+  while true; do
+    IFS= read -rsn1 -u 3 k || k=""
+    if [ "$k" = $'\033' ]; then
+      IFS= read -rsn1 -u 3 c1 || c1=""
+      IFS= read -rsn1 -u 3 c2 || c2=""
+      if [ "$c1" = "[" ]; then
+        [ "$c2" = "A" ] && cur=$(( (cur - 1 + n) % n ))
+        [ "$c2" = "B" ] && cur=$(( (cur + 1) % n ))
+      fi
+    elif [ "$k" = " " ]; then
+      if [ "${sel[$cur]}" = "1" ]; then sel[$cur]="0"; else sel[$cur]="1"; fi
+    elif [ -z "$k" ]; then
+      any=0
+      for i in 0 1; do [ "${sel[$i]}" = "1" ] && any=1; done
+      if [ "$any" = "1" ]; then break; fi
+    elif [ "$k" = "q" ] || [ "$k" = "Q" ]; then
+      printf "\n\033[?25h" >&4
+      exec 3<&- 4>&-
+      trap - INT TERM
+      die "cancelled by user"
+    fi
+    printf "\033[%dA" "$n" >&4
+    draw_tools_menu
+  done
+
+  printf "\033[?25h" >&4
+  exec 3<&- 4>&-
+  trap - INT TERM
+
+  local result=""
+  [ "${sel[0]}" = "1" ] && result="claude-code"
+  [ "${sel[1]}" = "1" ] && result="${result:+$result,}codex"
+  echo "$result"
+}
+
+read_aic_tools () {
+  # Read containerEnv.AIC_TOOLS from .devcontainer/devcontainer.json.
+  # Empty output if the field isn't set (older projects).
+  local file=".devcontainer/devcontainer.json"
+  [ -f "$file" ] || return 0
+  sed -n 's/.*"AIC_TOOLS"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n1
+}
+
+patch_devcontainer_json () {
+  # Patch the freshly-copied devcontainer.json:
+  #   1. Inject "AIC_TOOLS" and "AIC_SHELL" inside containerEnv.
+  #   2. Drop "anthropic.claude-code" extension when claude-code not selected.
+  #   3. Drop "openai.chatgpt" extension when codex not selected.
+  #   4. Patch terminal.integrated.defaultProfile.linux to the chosen shell.
+  #   5. Patch terminal.integrated.fontFamily — MesloLGS NF for zsh (p10k icons),
+  #      plain monospace for bash/fish (no nerd font required on the host).
+  # Operates line-wise so JSONC comments don't trip us up.
+  local file="$1" tools="$2" shell="$3"
+  local hc=0 hx=0 tmp font
+  case ",$tools," in *,claude-code,*) hc=1 ;; esac
+  case ",$tools," in *,codex,*)       hx=1 ;; esac
+
+  case "$shell" in
+    zsh) font="'MesloLGS NF', monospace" ;;
+    *)   font="monospace" ;;
+  esac
+
+  tmp="$(mktemp "${file}.XXXXXX")"
+  awk -v tools="$tools" -v shell="$shell" -v font="$font" -v hc="$hc" -v hx="$hx" '
+    {
+      if ($0 ~ /^[[:space:]]*"anthropic\.claude-code",[[:space:]]*$/ && hc == 0) next
+      if ($0 ~ /^[[:space:]]*"openai\.chatgpt",[[:space:]]*$/        && hx == 0) next
+
+      # Per-shell terminal defaults (only act on the relevant lines so
+      # generic "zsh" tokens elsewhere in the file are untouched).
+      if ($0 ~ /"terminal\.integrated\.defaultProfile\.linux"/) {
+        sub(/"zsh"/, "\"" shell "\"")
+      }
+      if ($0 ~ /"terminal\.integrated\.fontFamily"/) {
+        sub(/:[[:space:]]*"[^"]*"/, ": \"" font "\"")
+      }
+
+      print
+      if ($0 ~ /^[[:space:]]*"containerEnv":[[:space:]]*\{[[:space:]]*$/) {
+        print "    \"AIC_TOOLS\": \"" tools "\","
+        print "    \"AIC_SHELL\": \"" shell "\","
+      }
+    }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+# Copy template files into .devcontainer/, picking the right compose variant
+# for $mode (pull or build) and only the files that mode needs. Idempotent:
+# overwrites any existing target files; safe to call from init or sync.
+apply_template () {
+  local mode="$1" src="$2" dst="$3"
+  [ -d "$src" ] || die "template not found at $src (set AIC_HOME or reinstall aic)"
+  mkdir -p "$dst"
+
+  cp "$src/devcontainer.json" "$dst/devcontainer.json"
+  case "$mode" in
+    pull)
+      cp "$src/docker-compose.pull.yml" "$dst/docker-compose.yml"
+      # Pin the image tag to this aic's version so the CLI and the container
+      # FS layout (hooks, sudoers, helper scripts) can't drift apart. Template
+      # ships `:latest` as the canonical placeholder; we rewrite at copy time.
+      local ver tmp
+      ver="$(read_aic_version)"
+      tmp="$(mktemp "$dst/docker-compose.yml.XXXXXX")"
+      sed "s|ghcr.io/stefanoginella/aicontainer:latest|ghcr.io/stefanoginella/aicontainer:v${ver}|g" \
+        "$dst/docker-compose.yml" > "$tmp" && mv "$tmp" "$dst/docker-compose.yml"
+      ;;
+    build)
+      cp "$src/docker-compose.build.yml" "$dst/docker-compose.yml"
+      cp "$src/Dockerfile"        "$dst/Dockerfile"
+      cp "$src/post-create.py"    "$dst/post-create.py"
+      cp "$src/aic-firewall"      "$dst/aic-firewall"
+      cp "$src/aic-chown-volumes" "$dst/aic-chown-volumes"
+      cp "$src/aic-lock-gitconfig" "$dst/aic-lock-gitconfig"
+      cp "$src/.zshrc"            "$dst/.zshrc"
+      rm -rf "$dst/hooks"
+      cp -R "$src/hooks"          "$dst/hooks"
+      ;;
+    *) die "internal error: unknown mode '$mode'" ;;
+  esac
+}
+
+cmd_init () {
+  local mode="pull" force="" tools="" shell=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --build) mode="build" ;;
+      --force) force="1" ;;
+      --with)  shift; tools="${1:-}" ;;
+      --with=*) tools="${1#--with=}" ;;
+      --shell) shift; shell="${1:-}" ;;
+      --shell=*) shell="${1#--shell=}" ;;
+      *) die "unknown init flag: $1 (try --build, --force, --with claude-code,codex, or --shell zsh|bash|fish)" ;;
+    esac
+    shift
+  done
+
+  if [ -e .devcontainer ] && [ -z "$force" ]; then
+    die ".devcontainer/ already exists. Re-run with --force to overwrite."
+  fi
+
+  if [ -z "$tools" ]; then
+    tools="$(prompt_tools)"
+  fi
+  tools="$(validate_tools "$tools")"
+
+  if [ -z "$shell" ]; then
+    shell="$(prompt_shell)"
+  fi
+  shell="$(validate_shell "$shell")"
+
+  apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer"
+  patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
+  echo "aic: copied $mode-mode template into .devcontainer/ (tools: $tools, shell: $shell)"
+  if [ "$mode" = "pull" ]; then
+    local ver; ver="$(read_aic_version)"
+    echo "aic: 'aic up' will pull ghcr.io/stefanoginella/aicontainer:v${ver} (pinned to this aic's version)"
+  else
+    echo "aic: 'aic up' will build the image locally from .devcontainer/Dockerfile"
+  fi
+  echo "aic: next: 'aic up' then 'aic shell'"
+}
+
+cmd_sync () {
+  require_in_project
+  local mode="" tools="" shell=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pull)  mode="pull" ;;
+      --build) mode="build" ;;
+      --with)  shift; tools="${1:-}" ;;
+      --with=*) tools="${1#--with=}" ;;
+      --shell) shift; shell="${1:-}" ;;
+      --shell=*) shell="${1#--shell=}" ;;
+      *) die "unknown sync flag: $1 (try --pull, --build, --with claude-code,codex, or --shell zsh|bash|fish)" ;;
+    esac
+    shift
+  done
+
+  # Auto-detect: presence of .devcontainer/Dockerfile means the project was
+  # initialized with --build; otherwise it's the pull-mode 2-file layout.
+  if [ -z "$mode" ]; then
+    if [ -f .devcontainer/Dockerfile ]; then
+      mode="build"
+    else
+      mode="pull"
+    fi
+  fi
+
+  # Preserve the existing tool selection across syncs unless overridden with
+  # --with. Projects created before AIC_TOOLS existed fall back to both tools.
+  if [ -z "$tools" ]; then
+    tools="$(read_aic_tools)"
+    [ -n "$tools" ] || tools="claude-code,codex"
+  fi
+  tools="$(validate_tools "$tools")"
+
+  # Same pattern for shell. Projects created before AIC_SHELL existed get
+  # the default (zsh), matching their pre-flag behavior.
+  if [ -z "$shell" ]; then
+    shell="$(read_aic_shell)"
+    [ -n "$shell" ] || shell="$DEFAULT_SHELL"
+  fi
+  shell="$(validate_shell "$shell")"
+
+  apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer"
+  patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
+  echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell)"
+  echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
+  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist) are untouched"
+}
+
+cmd_up () {
+  require_in_project
+  local devcontainer; devcontainer="$(resolve_devcontainer)"
+  "$devcontainer" up --workspace-folder . "$@"
+}
+
+cmd_rebuild () {
+  require_in_project
+  # Pull-mode compose pins `pull_policy: missing`, so `devcontainer up` reuses
+  # the cached image even with --remove-existing-container — meaning newer
+  # GHCR releases would be silently ignored. Force a pull so `aic rebuild`
+  # actually refreshes the image. In --build mode the devcontainer service
+  # has a `build:` block (no top-level `image:` on it), so we skip the pull
+  # branch entirely; --build-no-cache below does the refresh for that path.
+  # Detect mode via presence of Dockerfile, which apply_template only copies
+  # in --build mode.
+  if [ ! -f .devcontainer/Dockerfile ]; then
+    local image
+    image="$(awk '/^[[:space:]]*image:/ {sub(/^[[:space:]]*image:[[:space:]]*/, ""); sub(/[[:space:]]*#.*$/, ""); sub(/[[:space:]]+$/, ""); print; exit}' .devcontainer/docker-compose.yml 2>/dev/null || true)"
+    if [ -n "$image" ]; then
+      echo "aic: pulling $image"
+      docker pull "$image" || echo "aic: docker pull failed; continuing with cached image" >&2
+    fi
+  fi
+  local devcontainer; devcontainer="$(resolve_devcontainer)"
+  "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache "$@"
+}
+
+cmd_shell () {
+  require_in_project
+  local devcontainer shell
+  devcontainer="$(resolve_devcontainer)"
+  # Honor the per-project shell choice (AIC_SHELL in devcontainer.json).
+  # Older projects without the field fall back to zsh — that's what they had
+  # baked in pre-flag.
+  shell="$(read_aic_shell)"
+  [ -n "$shell" ] || shell="$DEFAULT_SHELL"
+  "$devcontainer" exec --workspace-folder . "$shell" -l "$@"
+}
+
+cmd_run () {
+  require_in_project
+  local devcontainer; devcontainer="$(resolve_devcontainer)"
+  "$devcontainer" exec --workspace-folder . "$@"
+}
+
+cmd_down () {
+  require_in_project
+  local project; project="$(project_name)"
+  docker compose -p "$project" -f .devcontainer/docker-compose.yml down
+}
+
+cmd_destroy () {
+  require_in_project
+  local project; project="$(project_name)"
+  echo "aic: stopping container and removing per-project volumes for '$project'"
+  echo "aic: (global volumes aic-auth-global and aic-shell-history are PRESERVED)"
+  docker compose -p "$project" -f .devcontainer/docker-compose.yml down --volumes --remove-orphans
+  docker volume rm "${project}_aic-sessions" 2>/dev/null || true
+}
+
+cmd_upgrade () {
+  if [ -d "$AIC_HOME/.git" ]; then
+    echo "aic: pulling latest aicontainer from $AIC_HOME"
+    git -C "$AIC_HOME" pull --ff-only
+  else
+    echo "aic: installed via npm. Upgrade with:"
+    echo "    npm update -g aicontainer"
+    echo "aic: then in each project: 'aic sync' (re-pin compose to new version)"
+    echo "aic: followed by 'aic rebuild' (pull the new image and recreate the container)"
+  fi
+}
+
+cmd_help () {
+  cat <<'EOF'
+aic — sandboxed devcontainer for running Claude Code + Codex in bypass mode
+
+Usage:
+  aic init [--build] [--force] [--with TOOLS] [--shell SHELL]
+                       Copy the aicontainer template into ./.devcontainer/.
+                       Default: pull ghcr.io/stefanoginella/aicontainer:vX.Y.Z
+                       where X.Y.Z is this aic's own version (pinned, not
+                       :latest — `npm update -g aicontainer` + `aic sync`
+                       is the upgrade path).
+                       --build: full local build from template/Dockerfile (slow
+                                first run, but you own the image).
+                       --with:  comma-separated tools to enable for this project
+                                (claude-code, codex, or both). Defaults to an
+                                interactive checkbox prompt; selecting both is
+                                the historical behavior. The choice is stored
+                                as containerEnv.AIC_TOOLS in devcontainer.json.
+                       --shell: interactive shell — zsh (default, with oh-my-zsh
+                                + powerlevel10k), bash, or fish. Defaults to an
+                                interactive radio prompt. Stored as
+                                containerEnv.AIC_SHELL; 'aic shell' and the
+                                VS Code default terminal profile honor it.
+  aic sync [--pull|--build] [--with TOOLS] [--shell SHELL]
+                       Re-copy the aicontainer template files into an existing
+                       ./.devcontainer/, overwriting them. Auto-detects the
+                       mode from whether .devcontainer/Dockerfile exists; pass
+                       --pull or --build to force one. Existing AIC_TOOLS /
+                       AIC_SHELL selections are preserved unless overridden.
+                       Project-owned files (Dockerfile.project, firewall-
+                       allowlist) are untouched. Useful after editing
+                       template/ in a checkout — saves you a manual cp -R.
+                       Review with 'git diff' afterward.
+  aic up               Pull/build and start the devcontainer for this project
+  aic shell            Open the configured interactive shell (AIC_SHELL) inside the devcontainer
+  aic run CMD ...      Run CMD inside the devcontainer
+  aic rebuild          Recreate the container from a fresh image
+  aic down             Stop the container (volumes preserved)
+  aic destroy          Stop + remove container + per-project volumes
+                       (global auth + shell history are preserved)
+  aic upgrade          Update aic itself (git pull or 'npm update -g')
+  aic completion SHELL Emit tab-completion script for bash, zsh, or fish.
+                       Install (one-shot, recommended):
+                         echo 'eval "$(aic completion zsh)"'  >> ~/.zshrc
+                         echo 'eval "$(aic completion bash)"' >> ~/.bashrc
+                         aic completion fish > ~/.config/fish/completions/aic.fish
+  aic help             Show this help
+
+Env:
+  AIC_HOME             Where the aicontainer files live (default: this script's dir)
+EOF
+}
+
+cmd_completion () {
+  local shell="${1:-}"
+  case "$shell" in
+    bash) _completion_bash ;;
+    zsh)  _completion_zsh  ;;
+    fish) _completion_fish ;;
+    "")   die "usage: aic completion <bash|zsh|fish>" ;;
+    *)    die "unsupported shell: $shell (supported: bash, zsh, fish)" ;;
+  esac
+}
+
+_completion_bash () {
+  cat <<'BASH_EOF'
+# aic bash completion. Install with:
+#   echo 'eval "$(aic completion bash)"' >> ~/.bashrc
+_aic_complete () {
+  local cur prev cmd
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  local commands="init sync up shell run rebuild down destroy upgrade completion help"
+  local tools="claude-code codex claude-code,codex"
+  local shells="zsh bash fish"
+
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+    return
+  fi
+
+  cmd="${COMP_WORDS[1]}"
+  case "$cmd" in
+    init)
+      case "$prev" in
+        --with)  COMPREPLY=( $(compgen -W "$tools"  -- "$cur") ); return ;;
+        --shell) COMPREPLY=( $(compgen -W "$shells" -- "$cur") ); return ;;
+      esac
+      COMPREPLY=( $(compgen -W "--build --force --with --shell" -- "$cur") )
+      ;;
+    sync)
+      case "$prev" in
+        --with)  COMPREPLY=( $(compgen -W "$tools"  -- "$cur") ); return ;;
+        --shell) COMPREPLY=( $(compgen -W "$shells" -- "$cur") ); return ;;
+      esac
+      COMPREPLY=( $(compgen -W "--pull --build --with --shell" -- "$cur") )
+      ;;
+    completion)
+      [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
+      ;;
+  esac
+}
+complete -F _aic_complete aic
+complete -F _aic_complete aicontainer
+BASH_EOF
+}
+
+_completion_zsh () {
+  cat <<'ZSH_EOF'
+#compdef aic aicontainer
+# aic zsh completion. Install with:
+#   echo 'eval "$(aic completion zsh)"' >> ~/.zshrc
+# Or save this output to a file named _aic in any directory on $fpath.
+_aic () {
+  local -a commands tools shells
+  commands=(
+    'init:Copy template into ./.devcontainer/'
+    'sync:Re-copy template into existing ./.devcontainer/'
+    'up:Pull/build and start the devcontainer'
+    'shell:Open an interactive shell inside the devcontainer'
+    'run:Run a command inside the devcontainer'
+    'rebuild:Recreate the container from a fresh image'
+    'down:Stop the container (volumes preserved)'
+    'destroy:Stop + remove container + per-project volumes'
+    'upgrade:Update aic itself'
+    'completion:Emit shell completion script'
+    'help:Show help'
+  )
+  tools=('claude-code' 'codex' 'claude-code,codex')
+  shells=('zsh' 'bash' 'fish')
+
+  _arguments -C \
+    '1: :->command' \
+    '*::arg:->args'
+
+  case $state in
+    command)
+      _describe -t commands 'aic command' commands
+      ;;
+    args)
+      case $words[1] in
+        init)
+          _arguments \
+            '--build[full local build from template/Dockerfile]' \
+            '--force[overwrite existing .devcontainer/]' \
+            '--with[comma-separated tools]:tools:('"${tools[*]}"')' \
+            '--shell[interactive shell]:shell:('"${shells[*]}"')'
+          ;;
+        sync)
+          _arguments \
+            '--pull[force pull-mode template]' \
+            '--build[force build-mode template]' \
+            '--with[comma-separated tools]:tools:('"${tools[*]}"')' \
+            '--shell[interactive shell]:shell:('"${shells[*]}"')'
+          ;;
+        completion)
+          _values 'shell' bash zsh fish
+          ;;
+      esac
+      ;;
+  esac
+}
+
+# Bind the function whether this script is eval'd or autoloaded from $fpath.
+compdef _aic aic aicontainer 2>/dev/null
+ZSH_EOF
+}
+
+_completion_fish () {
+  cat <<'FISH_EOF'
+# aic fish completion. Install with:
+#   aic completion fish > ~/.config/fish/completions/aic.fish
+set -l aic_cmds init sync up shell run rebuild down destroy upgrade completion help
+
+for cmd in aic aicontainer
+  complete -c $cmd -f
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a init     -d 'Copy template into ./.devcontainer/'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a sync     -d 'Re-copy template into existing ./.devcontainer/'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a up       -d 'Start the devcontainer'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a shell    -d 'Open the configured shell inside the devcontainer'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a run      -d 'Run a command inside the devcontainer'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a rebuild  -d 'Recreate the container from a fresh image'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a down     -d 'Stop the container'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a destroy  -d 'Stop + remove container + per-project volumes'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a upgrade  -d 'Update aic itself'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a completion -d 'Emit shell completion script'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a help     -d 'Show help'
+
+  complete -c $cmd -n "__fish_seen_subcommand_from init" -l build -d 'full local build from template/Dockerfile'
+  complete -c $cmd -n "__fish_seen_subcommand_from init" -l force -d 'overwrite existing .devcontainer/'
+  complete -c $cmd -n "__fish_seen_subcommand_from init" -l with  -d 'comma-separated tools' -xa 'claude-code codex claude-code,codex'
+  complete -c $cmd -n "__fish_seen_subcommand_from init" -l shell -d 'interactive shell' -xa 'zsh bash fish'
+
+  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l pull  -d 'force pull-mode template'
+  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l build -d 'force build-mode template'
+  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l with  -d 'comma-separated tools' -xa 'claude-code codex claude-code,codex'
+  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l shell -d 'interactive shell' -xa 'zsh bash fish'
+
+  complete -c $cmd -n "__fish_seen_subcommand_from completion" -a 'bash zsh fish'
+end
+FISH_EOF
+}
+
+case "${1:-help}" in
+  init)    shift; cmd_init "$@" ;;
+  sync)    shift; cmd_sync "$@" ;;
+  up)      shift; cmd_up "$@" ;;
+  shell)   shift; cmd_shell "$@" ;;
+  run)     shift; cmd_run "$@" ;;
+  rebuild) shift; cmd_rebuild "$@" ;;
+  down)    shift; cmd_down "$@" ;;
+  destroy) shift; cmd_destroy "$@" ;;
+  upgrade) shift; cmd_upgrade "$@" ;;
+  completion) shift; cmd_completion "$@" ;;
+  help|-h|--help) cmd_help ;;
+  *) err "unknown command: $1"; cmd_help; exit 1 ;;
+esac

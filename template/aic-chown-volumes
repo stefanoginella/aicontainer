@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# =============================================================================
+# aic-chown-volumes — re-own aicontainer's persistent volume mount points
+# =============================================================================
+# Called via scoped sudo from post-create.py on first container creation
+# (named volumes come up root-owned). Targets are hardcoded, and -h prevents
+# a symlink the AI may have planted in a persisted volume from redirecting
+# chown to /etc/sudoers.d/vscode or similar.
+#
+# Replaces the previous `NOPASSWD: /usr/bin/chown` sudoers entry, which let
+# any in-container process chown arbitrary paths and escalate to root.
+# =============================================================================
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "aic-chown-volumes: must run via sudo" >&2
+  exit 1
+fi
+
+for d in /home/vscode/.shell-history \
+         /home/vscode/.config/aic-auth \
+         /home/vscode/.claude-sessions \
+         /home/vscode/.claude \
+         /home/vscode/.codex \
+         /home/vscode/.config/gh \
+         /home/vscode/.config/npm; do
+  [ -d "$d" ] && chown -h -R vscode:vscode "$d"
+done

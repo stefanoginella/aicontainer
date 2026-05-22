@@ -1,0 +1,150 @@
+name: rebuild
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - template/Dockerfile
+      - template/docker-compose.yml
+      - template/post-create.py
+      - template/hooks/**
+      - .github/workflows/rebuild.yml
+  pull_request:
+    paths:
+      - template/Dockerfile
+      - template/docker-compose.yml
+      - template/post-create.py
+      - template/hooks/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build multi-arch (no push, validates build)
+        uses: docker/build-push-action@v6
+        with:
+          context: template
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: aicontainer:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install devcontainer CLI
+        run: npm install -g @devcontainers/cli@latest
+      - name: Stage a throwaway project (exercises `aic init --build`)
+        run: |
+          mkdir -p /tmp/proj
+          cd /tmp/proj && git init -q
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build
+      - name: Bring up the devcontainer
+        working-directory: /tmp/proj
+        run: devcontainer up --workspace-folder .
+      - name: Smoke test - AI CLIs resolve
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . claude --version
+          devcontainer exec --workspace-folder . bash -lc 'eval "$(fnm env)" && codex --version'
+          devcontainer exec --workspace-folder . gh --version
+          devcontainer exec --workspace-folder . uv --version
+      - name: Smoke test - socket-proxy reachable, EXEC blocked
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/_ping
+          set +e
+          out=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://socket-proxy:2375/containers/none/exec)
+          set -e
+          [ "$out" = "403" ] || { echo "expected 403 from socket-proxy /exec, got $out"; exit 1; }
+      - name: Smoke test - PreToolUse hook blocks .env
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . bash -lc '
+            cd /workspace
+            printf "SECRET=hunter2\n" > .env
+            payload='\''{"tool_name":"Read","tool_input":{"file_path":"/workspace/.env"}}'\''
+            if echo "$payload" | /etc/aic/hooks/pre-tool-use.sh; then
+              echo "hook FAILED to block .env"
+              exit 1
+            else
+              echo "hook correctly blocked .env"
+            fi
+          '
+
+      - name: Smoke test - scoped sudo cannot chown arbitrary paths
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . bash -lc '
+            sudo -n /usr/local/bin/aic-chown-volumes
+            if sudo -nl /usr/bin/chown 2>/dev/null | grep -q chown; then
+              echo "FAIL: /usr/bin/chown still in NOPASSWD sudoers"
+              exit 1
+            fi
+            echo "OK: arbitrary sudo chown is denied"
+          '
+
+      - name: Smoke test - gitconfig.local is root-owned 0444
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . bash -lc '
+            perms=$(stat -c "%U %a" /home/vscode/.gitconfig.local)
+            echo "gitconfig.local perms: $perms"
+            [ "$perms" = "root 444" ] || { echo "FAIL: expected root 444"; exit 1; }
+            if echo "x" >> /home/vscode/.gitconfig.local 2>/dev/null; then
+              echo "FAIL: vscode can still write to gitconfig.local"
+              exit 1
+            fi
+            echo "OK: gitconfig.local is locked"
+          '
+
+  publish:
+    # Refresh `:latest` and the weekly tag on every push to main that touches
+    # template files, the weekly cron, or manual dispatch — never on PRs (forks
+    # would otherwise be able to push to GHCR with the workflow's permissions).
+    # This is a *security refresh* track: it keeps base layers / hooks fresh
+    # for users pulling `:latest`, independent of npm releases. Release-time
+    # publishes (npm + `:vX.Y.Z`) live in release.yml and trigger on `v*` tags.
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: [build, smoke]
+    env:
+      OWNER: ${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute weekly tag
+        id: tag
+        run: echo "week=$(date -u +%Y-%V)" >> "$GITHUB_OUTPUT"
+      - name: Build and push to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: template
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ env.OWNER }}/aicontainer:latest
+            ghcr.io/${{ env.OWNER }}/aicontainer:weekly-${{ steps.tag.outputs.week }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
