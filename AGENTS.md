@@ -68,6 +68,12 @@ npm version patch        # or minor / major
 git push --follow-tags   # pushes the bump commit AND the v* tag
 ```
 
+- **Sync the dogfood devcontainer from the host before releasing.** Run `aic
+  sync` from the host (not from inside the container — the PreToolUse hook
+  blocks writes to `.devcontainer/`) so the repo's own `.devcontainer/`
+  reflects the latest `template/` and gets committed alongside any
+  template-affecting changes. Releasing without syncing leaves the dogfood
+  config drifted from what users will get via `aic init`.
 - The bump commit on `main` touches only `package.json`, which is **not** in
   `rebuild.yml`'s `paths:` filter — so `rebuild.yml` does **not** fire on
   release commits. Only `release.yml` runs.
