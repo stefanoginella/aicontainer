@@ -102,12 +102,14 @@ services:
     read_only: true
     tmpfs:
       - /run
+      # 0.4.x writes the rendered haproxy.cfg to /tmp/haproxy.cfg on startup.
+      - /tmp
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Anonymous volume so the entrypoint can regenerate haproxy.cfg from the
-      # image-baked template on every start. Tmpfs would shadow the template
-      # file; a volume is initialized from the image contents.
-      - /usr/local/etc/haproxy
+      # haproxy 3.x in 0.4.x loads /var/lib/haproxy/server-state on startup;
+      # an anonymous volume seeds it from the image (the file is pre-touched
+      # in the Dockerfile) while keeping the path writable.
+      - /var/lib/haproxy
     environment:
       # Reads — needed by `docker ps`, `docker compose ls`, image inspection,
       # testcontainers, etc.
