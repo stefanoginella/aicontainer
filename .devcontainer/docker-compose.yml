@@ -1,0 +1,156 @@
+# =============================================================================
+# aicontainer — pull-mode compose (uses the prebuilt GHCR image)
+# =============================================================================
+# Pulls ghcr.io/stefanoginella/aicontainer:v0.0.3 instead of building locally.
+# All helper scripts (post-create.py, aic-firewall, hooks, etc.) are baked
+# into the image — see template/Dockerfile in the aicontainer repo for the
+# source of truth.
+#
+# If a project needs extra apt packages or language tooling, run `aic init
+# --build` to switch to the local-build template (or add a Dockerfile.project
+# that does `FROM ghcr.io/stefanoginella/aicontainer:v0.0.3`).
+# =============================================================================
+
+services:
+  devcontainer:
+    image: ghcr.io/stefanoginella/aicontainer:v0.0.3
+    pull_policy: missing
+    command: sleep infinity
+    # NET_ADMIN + NET_RAW let the opt-in `sudo aic-firewall` script set up
+    # an iptables allowlist for outbound traffic. Capabilities are confined
+    # to this container's network namespace; they do not grant any access
+    # to the host's network configuration.
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      DOCKER_HOST: tcp://socket-proxy:2375
+    depends_on:
+      socket-proxy:
+        condition: service_healthy
+    volumes:
+      # Workspace (RW). `..` resolves to the project root since compose runs
+      # from .devcontainer/.
+      - ..:/workspace:cached
+
+      # Self-protection: AI cannot rewrite its own runArgs / hook script.
+      - ../.devcontainer:/workspace/.devcontainer:ro
+      - ../.git/config:/workspace/.git/config:ro
+      - ../.git/hooks:/workspace/.git/hooks:ro
+
+      # Host shell look-and-feel (read-only; initializeCommand touches the
+      # files so the mount succeeds even if they don't exist on the host).
+      - ${HOME}/.gitconfig:/home/vscode/.gitconfig:ro
+      - ${HOME}/.p10k.zsh:/home/vscode/.p10k.zsh:ro
+      - ${HOME}/.zshrc.local:/home/vscode/.zshrc.local:ro
+
+      # Host AI-config seeding (RO). post-create.py reads these to copy an
+      # allowlisted subset of fields into the container's settings, then
+      # forces security overrides (bypassPermissions, sandbox-off, our
+      # PreToolUse hook) on top. Mounts are scoped to the config files and
+      # the statusline directory specifically — chat history, auth tokens,
+      # plans, sessions, etc. under ~/.claude / ~/.codex are NOT mounted.
+      - ${HOME}/.claude/settings.json:/host-seed/claude/settings.json:ro
+      - ${HOME}/.claude/statusline:/host-seed/claude/statusline:ro
+      - ${HOME}/.codex/config.toml:/host-seed/codex/config.toml:ro
+
+      # Persistence — see README "Multi-project model".
+      - aic-shell-history:/home/vscode/.shell-history
+      - aic-sessions:/home/vscode/.claude-sessions
+
+      # Tool credential dirs mounted as subpaths of aic-auth-global. Critical
+      # detail: Claude and Codex write `.credentials.json` / `auth.json` via
+      # atomic rename(tmp, target), which replaces a leaf-file symlink with a
+      # regular file — that's why an earlier symlink-based approach lost the
+      # login on every rebuild. With the *parent dir* being the volume mount,
+      # the rename stays inside the volume and survives container recreation.
+      # Requires Docker 25+ / Compose 2.24+ (subpath support).
+      - type: volume
+        source: aic-auth-global
+        target: /home/vscode/.claude
+        volume:
+          subpath: claude
+      - type: volume
+        source: aic-auth-global
+        target: /home/vscode/.codex
+        volume:
+          subpath: codex
+      - type: volume
+        source: aic-auth-global
+        target: /home/vscode/.config/gh
+        volume:
+          subpath: gh
+      # NPM_CONFIG_USERCONFIG (set in devcontainer.json) points npm at
+      # /home/vscode/.config/npm/npmrc, so `npm login` tokens land in this
+      # volume subpath and survive rebuild. Same atomic-rename consideration
+      # as claude/codex above — we mount the parent dir, not the file.
+      - type: volume
+        source: aic-auth-global
+        target: /home/vscode/.config/npm
+        volume:
+          subpath: npm
+      # Kept for semgrep settings.yml (still symlink-managed) and as the
+      # stable path for any future shared-auth additions.
+      - aic-auth-global:/home/vscode/.config/aic-auth
+
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    restart: unless-stopped
+    privileged: false
+    read_only: true
+    tmpfs:
+      - /run
+      # 0.4.x writes the rendered haproxy.cfg to /tmp/haproxy.cfg on startup.
+      - /tmp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # haproxy 3.x in 0.4.x loads /var/lib/haproxy/server-state on startup;
+      # an anonymous volume seeds it from the image (the file is pre-touched
+      # in the Dockerfile) while keeping the path writable.
+      - /var/lib/haproxy
+    environment:
+      # Reads — needed by `docker ps`, `docker compose ls`, image inspection,
+      # testcontainers, etc.
+      CONTAINERS: 1
+      EVENTS: 1
+      IMAGES: 1
+      INFO: 1
+      NETWORKS: 1
+      VOLUMES: 1
+      VERSION: 1
+      PING: 1
+
+      # Writes — needed to start containers, build images, manage networks/
+      # volumes from within the devcontainer.
+      POST: 1
+      BUILD: 1
+
+      # Hard NO — blocks the cheap escapes.
+      EXEC: 0
+      AUTH: 0
+      SECRETS: 0
+      SWARM: 0
+      SYSTEM: 0
+      SERVICES: 0
+      TASKS: 0
+      CONFIGS: 0
+      PLUGINS: 0
+      NODES: 0
+      DISTRIBUTION: 0
+      SESSION: 0
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:2375/_ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  # Global — shared across all aicontainer projects on this host.
+  aic-shell-history:
+    name: aic-shell-history
+  aic-auth-global:
+    name: aic-auth-global
+  # Per-project — scoped to the compose project name, which devcontainer CLI
+  # sets to the host workspace folder basename.
+  aic-sessions:

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "aicontainer",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "init": true,
+  "overrideCommand": false,
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "eamodio.gitlens",
+        "openai.chatgpt",
+        "pflannery.vscode-versionlens",
+        "BracketPairColorDLW.bracket-pair-color-dlw",
+        "vincaslt.highlight-matching-tag",
+        "yzhang.markdown-all-in-one"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.profiles.linux": {
+          "zsh": { "path": "zsh" },
+          "bash": { "path": "bash" },
+          "fish": { "path": "fish" }
+        },
+        "terminal.integrated.fontFamily": "'MesloLGS NF', monospace",
+        "terminal.integrated.sendKeybindingsToShell": true,
+        "terminal.integrated.rightClickBehavior": "paste",
+        // Prevent file:/// OSC 8 links from triggering "No application found"
+        // in devcontainers (microsoft/vscode#211443). VS Code's built-in file
+        // link detection still works for opening workspace files in the editor.
+        "terminal.integrated.allowedLinkSchemes": ["http", "https", "mailto", "vscode", "vscode-insiders"],
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "files.trimFinalNewlines": true,
+        "claude-code.allowDangerouslySkipPermissions": true,
+        "claude-code.terminalArgs": ["--dangerously-skip-permissions"]
+      }
+    }
+  },
+
+  "containerEnv": {
+    "AIC_TOOLS": "claude-code,codex",
+    "AIC_SHELL": "zsh",
+    "DEVCONTAINER": "true",
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
+    "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+    "NPM_CONFIG_AUDIT": "true",
+    "NPM_CONFIG_FUND": "false",
+    "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+    "NPM_CONFIG_MIN_RELEASE_AGE": "1440",
+    "NPM_CONFIG_USERCONFIG": "/home/vscode/.config/npm/npmrc",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    "GIT_CONFIG_GLOBAL": "/home/vscode/.gitconfig.local"
+  },
+
+  // Host-side bootstrap that must run before `docker compose up`.
+  //   1. mkdir/touch the host paths bind-mounted RO into the container (mounts
+  //      fail if the source doesn't exist).
+  //   2. Ensure the aic-auth-global volume exists and contains every subpath
+  //      referenced by docker-compose.yml. Docker only auto-initializes a
+  //      named volume from the image's mountpoint on its very first mount; if
+  //      a new subpath is added later (e.g. npm), existing users' volumes are
+  //      already non-empty and the mount fails with "no such file or
+  //      directory". busybox is tiny (~5MB) and pulled once.
+  "initializeCommand": "mkdir -p \"$HOME/.claude/statusline\" \"$HOME/.codex\" && touch \"$HOME/.claude/settings.json\" \"$HOME/.codex/config.toml\" \"$HOME/.gitconfig\" \"$HOME/.zshrc.local\" \"$HOME/.p10k.zsh\" && docker volume create aic-auth-global >/dev/null && docker run --rm -v aic-auth-global:/v busybox mkdir -p /v/claude /v/codex /v/gh /v/npm",
+
+  "postCreateCommand": "uv run --no-project /opt/post-create.py"
+}
