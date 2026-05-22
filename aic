@@ -506,6 +506,10 @@ cmd_upgrade () {
   fi
 }
 
+cmd_version () {
+  echo "aic v$(read_aic_version)"
+}
+
 cmd_help () {
   cat <<'EOF'
 aic — sandboxed devcontainer for running Claude Code + Codex in bypass mode
@@ -552,6 +556,7 @@ Usage:
                          echo 'eval "$(aic completion zsh)"'  >> ~/.zshrc
                          echo 'eval "$(aic completion bash)"' >> ~/.bashrc
                          aic completion fish > ~/.config/fish/completions/aic.fish
+  aic version          Print this aic's version (also: --version, -v)
   aic help             Show this help
 
 Env:
@@ -580,7 +585,7 @@ _aic_complete () {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local commands="init sync up shell run rebuild down destroy upgrade completion help"
+  local commands="init sync up shell run rebuild down destroy upgrade completion version help"
   local tools="claude-code codex claude-code,codex"
   local shells="zsh bash fish"
 
@@ -634,6 +639,7 @@ _aic () {
     'destroy:Stop + remove container + per-project volumes'
     'upgrade:Update aic itself'
     'completion:Emit shell completion script'
+    'version:Print this aic'\''s version'
     'help:Show help'
   )
   tools=('claude-code' 'codex' 'claude-code,codex')
@@ -680,7 +686,7 @@ _completion_fish () {
   cat <<'FISH_EOF'
 # aic fish completion. Install with:
 #   aic completion fish > ~/.config/fish/completions/aic.fish
-set -l aic_cmds init sync up shell run rebuild down destroy upgrade completion help
+set -l aic_cmds init sync up shell run rebuild down destroy upgrade completion version help
 
 for cmd in aic aicontainer
   complete -c $cmd -f
@@ -694,6 +700,7 @@ for cmd in aic aicontainer
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a destroy  -d 'Stop + remove container + per-project volumes'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a upgrade  -d 'Update aic itself'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a completion -d 'Emit shell completion script'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a version  -d 'Print this aic\'s version'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a help     -d 'Show help'
 
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l build -d 'full local build from template/Dockerfile'
@@ -722,6 +729,7 @@ case "${1:-help}" in
   destroy) shift; cmd_destroy "$@" ;;
   upgrade) shift; cmd_upgrade "$@" ;;
   completion) shift; cmd_completion "$@" ;;
+  version|-v|--version) cmd_version ;;
   help|-h|--help) cmd_help ;;
   *) err "unknown command: $1"; cmd_help; exit 1 ;;
 esac
