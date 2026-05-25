@@ -170,11 +170,32 @@ def _is_empty_placeholder(p: Path) -> bool:
     return False
 
 
+def _ensure_link_target(src: Path) -> None:
+    """Create `src` (a symlink target) if it's missing, so the link never
+    dangles. Heuristic: paths with a suffix (.json, .jsonl) are files;
+    otherwise directories. Login/session flows that write through the symlink
+    then land on the persistent volume immediately."""
+    if src.exists():
+        return
+    src.parent.mkdir(parents=True, exist_ok=True)
+    if src.suffix:
+        src.touch()
+    else:
+        src.mkdir(parents=True, exist_ok=True)
+
+
 def link(src: Path, dst: Path) -> None:
     """Make `dst` a symlink pointing at `src`.
 
     Cases handled:
-    - dst already correctly points at src → no-op
+    - dst already correctly points at src → ensure src exists (heal a dangling
+      target), then no-op. This matters because the session symlinks live in
+      the SHARED aic-auth-global volume but point into the PER-PROJECT
+      aic-sessions volume: the first project to run creates both the symlink
+      and its target, but every *other* project mounts the same shared volume,
+      inherits the already-correct symlink, and would otherwise never create
+      its own target — leaving it dangling so `mkdir` of the transcript dir
+      fails ("File exists") and `/resume` finds nothing.
     - dst is a stale symlink → unlink and recreate
     - dst is an empty placeholder (0-byte file or empty dir) and src has real
       content → replace dst with the symlink (the rebuild case where the
@@ -192,6 +213,7 @@ def link(src: Path, dst: Path) -> None:
 
     if dst.is_symlink():
         if dst.resolve() == src.resolve():
+            _ensure_link_target(src)
             return
         dst.unlink()
     elif dst.exists():
@@ -210,14 +232,7 @@ def link(src: Path, dst: Path) -> None:
             # across filesystems.
             shutil.move(str(dst), str(src))
 
-    if not src.exists():
-        # Pre-create so login flows that write into the symlinked path land
-        # on the persistent volume immediately. Heuristic: paths with a
-        # suffix (.json, .jsonl) are files; otherwise directories.
-        if src.suffix:
-            src.touch()
-        else:
-            src.mkdir(parents=True, exist_ok=True)
+    _ensure_link_target(src)
 
     dst.symlink_to(src)
     log(f"linked {dst} -> {src}")
@@ -293,6 +308,18 @@ def setup_claude() -> None:
     # target is an absolute path string that resolves into aic-sessions at
     # access time, so different projects see distinct project directories.
     link(SESSIONS / "claude-projects", claude_dir / "projects")
+    # prompt history: ~/.claude/history.jsonl → per-project volume, so up-arrow
+    # recall is scoped per project. Without this it lives in the shared
+    # aic-auth-global:claude mount, and because every container's cwd is
+    # /workspace, Claude's per-cwd history filter (entry.project === cwd) matches
+    # *every* project's entries — so up-arrow bleeds across all projects.
+    # A leaf-file symlink is safe here: Claude appends to history.jsonl (the
+    # append follows the symlink to the target). The only rewrite-via-atomic-
+    # rename is the explicit, confirmation-gated "delete project data" command;
+    # if a user runs it the symlink is replaced by a regular file on the shared
+    # mount (no data lost — just reverts to shared scope until the next rebuild
+    # re-links). Mirrors the codex-history.jsonl handling in setup_codex().
+    link(SESSIONS / "claude-history.jsonl", claude_dir / "history.jsonl")
     # Note: we deliberately do NOT symlink ~/.claude.json into the per-project
     # volume. Claude reads/writes that file via atomic rename, which would
     # replace any symlink with a regular file on first write — so the data

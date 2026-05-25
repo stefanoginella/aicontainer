@@ -24,6 +24,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   safe to allow ("outside the sandbox" = normally inside the container). Also
   warns against "fixing" bwrap by granting `SYS_ADMIN` / userns.
 
+### Fixed
+
+- Claude `/resume` and Codex session history now persist in **every** project,
+  not just the first one initialized on a host. The session symlinks
+  (`~/.claude/projects`, `~/.codex/sessions`, `~/.codex/history.jsonl`) live in
+  the shared `aic-auth-global` volume but point into the per-project
+  `aic-sessions` volume; `post-create.py`'s `link()` early-returned when the
+  inherited symlink already resolved correctly, so the first project created
+  its target dir but later projects were left with a **dangling symlink** —
+  `mkdir` of the transcript dir failed with `File exists` and transcripts were
+  never written. `link()` now creates the per-project target whenever it's
+  missing, healing existing containers on the next `aic rebuild`.
+- Claude's prompt history (`~/.claude/history.jsonl`, the up-arrow recall) is now
+  scoped per project, matching Codex. It previously lived in the shared
+  `aic-auth-global` volume; since every container's cwd is `/workspace`, Claude's
+  per-cwd history filter matched *every* project's entries, so up-arrow recall
+  bled across all aicontainer projects. It's now symlinked into the per-project
+  `aic-sessions` volume. (Normal writes are appends and follow the symlink; only
+  the explicit, confirmation-gated "delete project data" command rewrites via
+  atomic rename, which harmlessly reverts to shared scope until the next rebuild.)
+
 ## [0.0.9] - 2026-05-25
 
 ### Added
