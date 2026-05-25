@@ -441,10 +441,11 @@ From a clean `main`:
 
 ```bash
 git checkout main && git pull
-# 1. Edit CHANGELOG.md: rename ## [Unreleased] -> ## [X.Y.Z] - <date>, add its
-#    compare link, commit it.
-npm version patch         # 2. or: minor / major. Creates the bump commit + v* tag.
-git push --follow-tags    # 3. pushes both the commit and the tag
+# Release notes should already be under ## [Unreleased] in CHANGELOG.md (add
+# them as you work). `npm version` promotes that section to the new version.
+npm version patch         # or: minor / major. Promotes the changelog, bumps,
+                          # commits, and creates the v* tag.
+git push --follow-tags    # pushes both the commit and the tag
 ```
 
 `release.yml` then fires on the tag and ships, in one atomic flow:
@@ -455,7 +456,7 @@ git push --follow-tags    # 3. pushes both the commit and the tag
 
 A guard step rejects the run if the `v*` tag doesn't match `package.json`'s `version` — so `npm version` is the only sane way to mint a release tag.
 
-`CHANGELOG.md` is **hand-maintained** ([Keep a Changelog](https://keepachangelog.com/) format). Add notes under `## [Unreleased]` as you work; at release time, rename that heading to the new version and add its compare link. The GitHub Release notes are the matching `## [X.Y.Z]` section, pulled verbatim. **A release is blocked unless that section exists** — `release.yml` greps for it before any publish, so you can't ship a version with no changelog entry. The `.githooks/pre-push` hook enforces the same check locally; enable it once per clone with `git config core.hooksPath .githooks`.
+`CHANGELOG.md` is **hand-maintained** ([Keep a Changelog](https://keepachangelog.com/) format) — you write the prose; nothing is auto-generated from commits. Add notes under `## [Unreleased]` as you work. At release time `npm version` does the mechanical promotion for you: a `version` lifecycle script (`scripts/promote-changelog.mjs`) relabels `## [Unreleased]` to `## [X.Y.Z] - <date>`, opens a fresh empty `[Unreleased]`, and fixes the compare links — all from notes you authored. A `preversion` check aborts the bump if `[Unreleased]` is empty, so you can't release nothing. The GitHub Release notes are the resulting `## [X.Y.Z]` section, pulled verbatim, and `release.yml` greps for that section before any publish as a backstop. The `.githooks/pre-push` hook enforces the same check locally; enable it once per clone with `git config core.hooksPath .githooks`.
 
 ### Day-to-day pushes vs. releases
 

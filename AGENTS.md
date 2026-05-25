@@ -30,10 +30,14 @@ agent-facing notes go here, not in `CLAUDE.md`.
     provenance attestation.
 - `package.json` — npm metadata. Its `version` field is the source of truth
   for the GHCR image tag pinned by `aic init`. Do not edit it by hand for a
-  release; use `npm version`.
+  release; use `npm version`, whose `preversion`/`version` scripts promote the
+  changelog (see "Releasing").
 - `CHANGELOG.md` — hand-maintained ([Keep a Changelog](https://keepachangelog.com/)
   format). Source of the GitHub Release notes, and a release precondition (see
   "Releasing").
+- `scripts/promote-changelog.mjs` — zero-dep release helper run by `npm
+  version`: promotes the hand-written `## [Unreleased]` section to the new
+  version (date + compare links). It does **not** generate content.
 - `.githooks/pre-push` — local mirror of the CI changelog gate; opt-in via
   `git config core.hooksPath .githooks`.
 
@@ -116,38 +120,55 @@ from coming up.
 
 ## Releasing
 
-See README.md's "Releasing" section for the user-visible flow. Internal notes:
+See README.md's "Releasing" section for the user-visible flow. **When asked to
+cut/trigger a release, do exactly this:**
 
-```bash
-# From a clean main:
-# 0. Update CHANGELOG.md: rename ## [Unreleased] -> ## [X.Y.Z] - <date> + link
-npm version patch        # or minor / major
-git push --follow-tags   # pushes the bump commit AND the v* tag
-```
+1. **Clean, current `main`:** `git checkout main && git pull`; working tree
+   clean. Releases go from `main`.
+2. **Ensure this release's notes are under `## [Unreleased]` in CHANGELOG.md.**
+   They should already be there (added as changes landed). If `[Unreleased]` is
+   empty or stale, write them **by hand** from `git log <last-tag>..HEAD`,
+   grouped under Keep-a-Changelog headings (Added/Changed/Fixed/Removed), and
+   commit. Do **not** rename the heading or add the date — `npm version` does
+   that. Never auto-generate the prose from commits (tried, reverted, disliked).
+3. **Pick the bump** (patch/minor/major) per README's "Picking the bump".
+4. **If `template/` changed since the last release, sync the dogfood
+   devcontainer:** run `aic sync` **from the host** (never inside the container —
+   the PreToolUse hook blocks `.devcontainer/` writes) and commit the resulting
+   `.devcontainer/` changes. The dogfood is build-mode, so `.devcontainer/`
+   holds copies of `template/`; skipping this leaves it drifted.
+5. **Cut it:** `npm version <bump> && git push --follow-tags`.
 
-- **Sync the dogfood devcontainer from the host before releasing.** Run `aic
-  sync` from the host (not from inside the container — the PreToolUse hook
-  blocks writes to `.devcontainer/`) so the repo's own `.devcontainer/`
-  reflects the latest `template/` and gets committed alongside any
-  template-affecting changes. Releasing without syncing leaves the dogfood
-  config drifted from what users will get via `aic init`.
-- The bump commit on `main` touches only `package.json`, which is **not** in
-  `rebuild.yml`'s `paths:` filter — so `rebuild.yml` does **not** fire on
-  release commits. Only `release.yml` runs.
+`npm version` runs two lifecycle scripts (see `package.json`):
+
+- `preversion` → `promote-changelog.mjs --check`: aborts the bump *before*
+  package.json is touched if `[Unreleased]` is empty — you can't release
+  nothing, and a failed attempt leaves the tree clean.
+- `version` → `promote-changelog.mjs`: promotes the hand-written `[Unreleased]`
+  section to `## [X.Y.Z] - <date>`, opens a fresh empty `[Unreleased]`, fixes
+  the compare links, and `git add`s CHANGELOG.md so it lands in the bump commit
+  and ships on the tag.
+
+`release.yml` then fires on the tag: builds + pushes GHCR `:vX.Y.Z`/`:latest`,
+publishes npm with provenance, and (the `github-release` job) creates the GitHub
+Release from the tag's `## [X.Y.Z]` CHANGELOG section.
+
+Internal notes:
+
+- The bump commit on `main` touches only `package.json` + `CHANGELOG.md` —
+  neither in `rebuild.yml`'s `paths:` filter — so `rebuild.yml` does **not** fire
+  on release commits. Only `release.yml` runs.
 - `release.yml`'s "Verify tag matches package.json" step fails fast if you
   mint a tag manually that doesn't match. Use `npm version`.
 - Do not run `npm publish` locally. CI uses `--provenance`; manual publishes
   skip the supply-chain attestation users can verify.
-- **`CHANGELOG.md` is hand-maintained, and updating it is a release
-  precondition.** Edit the file before bumping: rename `## [Unreleased]` to
-  `## [X.Y.Z] - <date>` and add the compare link at the bottom. `release.yml`'s
-  "Verify CHANGELOG.md has an entry" step greps for `^## [X.Y.Z]` *before* any
-  GHCR/npm push and fails the whole release if it's missing — so a forgotten
-  changelog burns a tag, it doesn't ship. `.githooks/pre-push` runs the same
-  check locally (opt-in: `git config core.hooksPath .githooks`); it's
-  convenience only — bypassable with `--no-verify` and per-clone, so **CI is
-  the real gate; don't weaken that step.** Keep the `## [X.Y.Z]` heading format:
-  both the gate's grep and the release-notes extraction key on it.
+- **CHANGELOG.md content is hand-written, never generated.** You author notes
+  under `## [Unreleased]`; `scripts/promote-changelog.mjs` only relabels them at
+  release time. The CI gate (`release.yml` "Verify CHANGELOG.md has an entry")
+  greps for `^## [X.Y.Z]` before any GHCR/npm push and fails the release if it's
+  missing; `.githooks/pre-push` mirrors it locally (opt-in, bypassable — **CI is
+  the real gate; don't weaken that step**). Keep the `## [X.Y.Z]` heading format:
+  the gate, the promotion script, and the release-notes extraction all key on it.
 - **The GitHub Release is automatic.** `release.yml`'s `github-release` job
   (`needs: [publish]`, so it only runs after GHCR + npm succeed) extracts the
   tag's `## [X.Y.Z]` section from `CHANGELOG.md` and creates the Release via
