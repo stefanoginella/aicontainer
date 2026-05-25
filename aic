@@ -277,14 +277,25 @@ patch_devcontainer_json () {
   #      `environment:`, extra_hosts, build.dockerfile) survive `aic sync`. The
   #      override file itself is never copied or overwritten by apply_template;
   #      this only re-applies the reference, which the template ships without.
+  #   7. Rewrite "name" to "<project folder>-aicontainer" so each project shows a
+  #      distinct label in VS Code's remote indicator. Re-derived from $PWD every
+  #      run (like AIC_TOOLS/AIC_SHELL), so it's recomputed on each init/sync and
+  #      the template can keep the bare "aicontainer" placeholder.
   # Operates line-wise so JSONC comments don't trip us up.
   local file="$1" tools="$2" shell="$3"
-  local hc=0 hx=0 ov=0 tmp font dir
+  local hc=0 hx=0 ov=0 tmp font dir pname cname
   case ",$tools," in *,claude-code,*) hc=1 ;; esac
   case ",$tools," in *,codex,*)       hx=1 ;; esac
 
   dir="$(dirname "$file")"
   [ -f "$dir/docker-compose.override.yml" ] && ov=1
+
+  # Project label from the cwd (project root for both init and sync). JSON-escape
+  # backslashes and double-quotes so an odd folder name still yields valid JSON.
+  pname="$(basename "$PWD")"
+  pname="${pname//\\/\\\\}"
+  pname="${pname//\"/\\\"}"
+  cname="$pname-aicontainer"
 
   case "$shell" in
     zsh) font="'MesloLGS NF', monospace" ;;
@@ -292,8 +303,16 @@ patch_devcontainer_json () {
   esac
 
   tmp="$(mktemp "${file}.XXXXXX")"
+  AIC_DEVCONTAINER_NAME="$cname" \
   awk -v tools="$tools" -v shell="$shell" -v font="$font" -v hc="$hc" -v hx="$hx" -v ov="$ov" '
     {
+      # Rewrite the top-level "name" to the per-project label. Read from ENVIRON
+      # (not -v) so awk does not re-interpret backslashes in the folder name.
+      if ($0 ~ /^[[:space:]]*"name"[[:space:]]*:/) {
+        print "  \"name\": \"" ENVIRON["AIC_DEVCONTAINER_NAME"] "\","
+        next
+      }
+
       if ($0 ~ /^[[:space:]]*"anthropic\.claude-code",[[:space:]]*$/ && hc == 0) next
       if ($0 ~ /^[[:space:]]*"openai\.chatgpt",[[:space:]]*$/        && hx == 0) next
 

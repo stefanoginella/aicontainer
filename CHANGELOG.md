@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survives `aic sync`, and its non-zero exit is logged without failing
   container creation.
 
+### Changed
+
+- `aic init` / `aic sync` now name the devcontainer `<project folder>-aicontainer`
+  (derived from the project directory) instead of the static `aicontainer`, so
+  each project shows a distinct label in VS Code's remote indicator. Re-derived
+  on every run; the name is not hand-editable (it's overwritten on sync).
+
 ### Fixed
 
 - `aic sync` now exits `0` on success. It previously returned the status of its
