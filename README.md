@@ -202,6 +202,39 @@ Then `aic rebuild`. The tools survive `aic destroy` and are versioned with the p
 
 **Rule of thumb:** if you'd be annoyed to reinstall it after every container rebuild, put it in `Dockerfile.project`. If you're just trying something, install ad-hoc.
 
+#### Recipe: Playwright (browser tests / automation / MCP)
+
+A browser is the one tool you *can't* add ad-hoc here: Chromium needs apt system libraries (and runtime `sudo apt` is blocked), and if you've enabled the [firewall](#opt-in-network-allowlist) the browser-download CDN isn't on the allowlist. `Dockerfile.project` sidesteps both — image builds run with full network, so Chromium is baked into the image and works offline afterward, even with the firewall on.
+
+```dockerfile
+# .devcontainer/Dockerfile.project
+FROM ghcr.io/stefanoginella/aicontainer:vX.Y.Z   # match your pinned tag
+
+# Pin to the Playwright version your project uses (the @playwright/test in
+# package.json), so the baked browser revision matches what resolves at runtime.
+ARG PLAYWRIGHT_VERSION=1.50.0
+
+USER root
+# Chromium's system libraries. apt is root-only and runtime `sudo apt` is
+# blocked, so this step has to live in the image.
+RUN export PATH="$FNM_DIR:$PATH" && eval "$(fnm env)" \
+    && npx --yes playwright@${PLAYWRIGHT_VERSION} install-deps chromium
+
+USER vscode
+# Download Chromium into ~/.cache/ms-playwright, baked into the image layer.
+# This explicit step is REQUIRED: the base image sets NPM_CONFIG_IGNORE_SCRIPTS
+# =true, so `npm i @playwright/test` won't auto-download the browser via its
+# postinstall — you have to run `playwright install` yourself.
+RUN export PATH="$FNM_DIR:$PATH" && eval "$(fnm env)" \
+    && npx --yes playwright@${PLAYWRIGHT_VERSION} install chromium
+```
+
+Swap the compose `image:` line for the `build:` block shown above, then `aic rebuild`.
+
+- **If Chromium won't launch, disable its sandbox.** Depending on your Docker runtime's capability/seccomp setup, Chromium's own sandbox may fail to start inside the container. If you hit launch errors, set `chromiumSandbox: false` in `playwright.config.ts` (or pass `--no-sandbox` for ad-hoc launches) — the standard Chromium-in-Docker fix.
+- **Testing `localhost` needs no firewall change** — loopback is always allowed, so driving your own dev server works even with the allowlist enabled. Only pointing the browser at the public internet (with the firewall on) means adding hosts to `.devcontainer/firewall-allowlist`.
+- **Playwright [MCP](https://github.com/microsoft/playwright-mcp)** (`@playwright/mcp`) reuses the same baked Chromium — just add it to `mcpServers` (it's seeded from your host config like any other MCP). One recipe covers both `playwright test` and MCP-driven browsing.
+
 ## Updating AI tools
 
 ```bash
