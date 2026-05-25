@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The per-project devcontainer name is now `aicontainer-<project folder>`
+  (prefix), flipped from the previous `<project folder>-aicontainer` (suffix),
+  so all aicontainer devcontainers sort together under a common `aicontainer-`
+  prefix in VS Code's remote indicator. Re-derived on every `aic init` / `aic
+  sync`; not hand-editable (overwritten on sync).
+
 ## [0.0.10] - 2026-05-25
 
 ### Changed
