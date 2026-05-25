@@ -29,6 +29,13 @@ permissions:
   contents: read
   packages: write
 
+# Supersede stale rebuilds: a newer push to the same ref cancels an older
+# in-flight rebuild — it would only publish a now-stale :latest. Safe because
+# :latest / :weekly are mutable and the newer run re-publishes them.
+concurrency:
+  group: rebuild-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest

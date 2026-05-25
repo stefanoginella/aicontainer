@@ -23,6 +23,13 @@ permissions:
   contents: read
   packages: write
 
+# Serialize releases of the same tag but NEVER cancel one mid-flight: a kill
+# between the GHCR push and `npm publish` could leave a partial release. Distinct
+# tags use distinct groups, so different versions don't block each other.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest

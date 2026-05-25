@@ -171,8 +171,26 @@ Release from the tag's `## [X.Y.Z]` CHANGELOG section.
 Internal notes:
 
 - The bump commit on `main` touches only `package.json` + `CHANGELOG.md` —
-  neither in `rebuild.yml`'s `paths:` filter — so `rebuild.yml` does **not** fire
-  on release commits. Only `release.yml` runs.
+  neither in `rebuild.yml`'s `paths:` filter — so a release push that contains
+  **only** the bump commit fires `release.yml` alone. **But merge a
+  template-touching feature and release in the *same* push** (e.g.
+  `git merge feat… && npm version && git push --follow-tags` back-to-back) and
+  the push range to `main` includes the feature commit, so `rebuild.yml` *also*
+  fires — two workflows build the same tree and both race to push `:latest`
+  (harmless: identical content, last-writer-wins; but ~7 min wasted). GitHub
+  evaluates `paths:` across *every* commit in a push, not just HEAD, which is
+  why the feature commit drags rebuild along. **Avoid it by separating the
+  pushes:** land the feature via PR first (rebuild runs at merge), *then* run
+  `npm version && git push --follow-tags` as its own push (bump commit only →
+  only `release.yml` fires). v0.0.9 was released the combined way and did
+  double-run; it's wasteful, not wrong.
+- **Concurrency guards** (top of each workflow). `rebuild.yml`:
+  `cancel-in-progress: true` — a newer push to the same ref supersedes an
+  in-flight rebuild (safe; `:latest`/`:weekly` are mutable and the newer run
+  re-pushes them). `release.yml`: `cancel-in-progress: false`, grouped per tag —
+  serialize, **never** cancel a run mid-publish (a kill between the GHCR push and
+  `npm publish` could leave a partial release). Keep release uncancellable; do
+  not "simplify" the two into one shared group, which could cancel a release.
 - `release.yml`'s "Verify tag matches package.json" step fails fast if you
   mint a tag manually that doesn't match. Use `npm version`.
 - Do not run `npm publish` locally. CI uses `--provenance`; manual publishes
