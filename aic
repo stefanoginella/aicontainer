@@ -448,8 +448,9 @@ cmd_sync () {
   echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell)"
   echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
   echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, docker-compose.override.yml) are untouched"
-  [ -f .devcontainer/docker-compose.override.yml ] && \
+  if [ -f .devcontainer/docker-compose.override.yml ]; then
     echo "aic: wired docker-compose.override.yml into dockerComposeFile"
+  fi
 }
 
 cmd_up () {

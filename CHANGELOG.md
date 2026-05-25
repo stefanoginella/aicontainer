@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survives `aic sync`, and its non-zero exit is logged without failing
   container creation.
 
+### Fixed
+
+- `aic sync` now exits `0` on success. It previously returned the status of its
+  last check, exiting `1` when a project had no `docker-compose.override.yml`
+  even though the sync completed correctly.
+
 ## [0.0.7] - 2026-05-25
 
 ### Added
