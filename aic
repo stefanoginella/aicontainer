@@ -272,11 +272,19 @@ patch_devcontainer_json () {
   #   4. Patch terminal.integrated.defaultProfile.linux to the chosen shell.
   #   5. Patch terminal.integrated.fontFamily — MesloLGS NF for zsh (p10k icons),
   #      plain monospace for bash/fish (no nerd font required on the host).
+  #   6. Wire a project-owned docker-compose.override.yml into dockerComposeFile
+  #      when one exists, so per-project compose tweaks (containerEnv-equivalent
+  #      `environment:`, extra_hosts, build.dockerfile) survive `aic sync`. The
+  #      override file itself is never copied or overwritten by apply_template;
+  #      this only re-applies the reference, which the template ships without.
   # Operates line-wise so JSONC comments don't trip us up.
   local file="$1" tools="$2" shell="$3"
-  local hc=0 hx=0 tmp font
+  local hc=0 hx=0 ov=0 tmp font dir
   case ",$tools," in *,claude-code,*) hc=1 ;; esac
   case ",$tools," in *,codex,*)       hx=1 ;; esac
+
+  dir="$(dirname "$file")"
+  [ -f "$dir/docker-compose.override.yml" ] && ov=1
 
   case "$shell" in
     zsh) font="'MesloLGS NF', monospace" ;;
@@ -284,7 +292,7 @@ patch_devcontainer_json () {
   esac
 
   tmp="$(mktemp "${file}.XXXXXX")"
-  awk -v tools="$tools" -v shell="$shell" -v font="$font" -v hc="$hc" -v hx="$hx" '
+  awk -v tools="$tools" -v shell="$shell" -v font="$font" -v hc="$hc" -v hx="$hx" -v ov="$ov" '
     {
       if ($0 ~ /^[[:space:]]*"anthropic\.claude-code",[[:space:]]*$/ && hc == 0) next
       if ($0 ~ /^[[:space:]]*"openai\.chatgpt",[[:space:]]*$/        && hx == 0) next
@@ -296,6 +304,13 @@ patch_devcontainer_json () {
       }
       if ($0 ~ /"terminal\.integrated\.fontFamily"/) {
         sub(/:[[:space:]]*"[^"]*"/, ": \"" font "\"")
+      }
+
+      # Append the override to the dockerComposeFile array. Docker Compose
+      # merges files left-to-right, so the override wins. Guarded so a file
+      # that already lists it (or a hand-edited multi-entry array) is a no-op.
+      if (ov == 1 && $0 ~ /"dockerComposeFile"/ && $0 !~ /docker-compose\.override\.yml/) {
+        sub(/\]/, ", \"docker-compose.override.yml\"]")
       }
 
       print
@@ -375,6 +390,8 @@ cmd_init () {
   apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer"
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
   echo "aic: copied $mode-mode template into .devcontainer/ (tools: $tools, shell: $shell)"
+  [ -f .devcontainer/docker-compose.override.yml ] && \
+    echo "aic: wired existing docker-compose.override.yml into dockerComposeFile"
   if [ "$mode" = "pull" ]; then
     local ver; ver="$(read_aic_version)"
     echo "aic: 'aic up' will pull ghcr.io/stefanoginella/aicontainer:v${ver} (pinned to this aic's version)"
@@ -430,7 +447,9 @@ cmd_sync () {
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
   echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell)"
   echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
-  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist) are untouched"
+  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, docker-compose.override.yml) are untouched"
+  [ -f .devcontainer/docker-compose.override.yml ] && \
+    echo "aic: wired docker-compose.override.yml into dockerComposeFile"
 }
 
 cmd_up () {
@@ -540,8 +559,11 @@ Usage:
                        --pull or --build to force one. Existing AIC_TOOLS /
                        AIC_SHELL selections are preserved unless overridden.
                        Project-owned files (Dockerfile.project, firewall-
-                       allowlist) are untouched. Useful after editing
-                       template/ in a checkout — saves you a manual cp -R.
+                       allowlist, docker-compose.override.yml) are untouched;
+                       an existing docker-compose.override.yml is auto-wired
+                       into dockerComposeFile so per-project compose tweaks
+                       (env, extra_hosts, build) survive the sync. Useful after
+                       editing template/ in a checkout — saves a manual cp -R.
                        Review with 'git diff' afterward.
   aic up               Pull/build and start the devcontainer for this project
   aic shell            Open the configured interactive shell (AIC_SHELL) inside the devcontainer
