@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11] - 2026-05-25
+
 ### Changed
 
 - The per-project devcontainer name is now `aicontainer-<project folder>`
@@ -166,7 +168,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release: a sandboxed devcontainer for running Claude Code and Codex in
   bypass / auto-approve mode.
 
-[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.0.10...HEAD
+[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.0.11...HEAD
+[0.0.11]: https://github.com/stefanoginella/aicontainer/compare/v0.0.10...v0.0.11
 [0.0.10]: https://github.com/stefanoginella/aicontainer/compare/v0.0.9...v0.0.10
 [0.0.9]: https://github.com/stefanoginella/aicontainer/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/stefanoginella/aicontainer/compare/v0.0.7...v0.0.8
