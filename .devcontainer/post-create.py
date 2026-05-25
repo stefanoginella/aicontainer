@@ -356,15 +356,6 @@ def setup_codex() -> None:
     link(SESSIONS / "codex-history.jsonl", codex_dir / "history.jsonl")
 
 
-def setup_semgrep() -> None:
-    """Semgrep stores its API token in ~/.semgrep/settings.yml. Symlink that
-    file into the global aic-auth volume so `semgrep login` survives image
-    rebuilds and is shared across projects. We link the file (not the dir)
-    so per-project caches under ~/.semgrep/cache/ stay ephemeral."""
-    settings = HOME / ".semgrep" / "settings.yml"
-    link(AUTH / "semgrep" / "settings.yml", settings)
-
-
 def setup_gitconfig() -> None:
     """Write ~/.gitconfig.local (pointed at by GIT_CONFIG_GLOBAL in
     devcontainer.json). Includes the read-only host gitconfig and adds
@@ -466,10 +457,11 @@ def main() -> None:
         setup_codex()
     else:
         log("skipping codex setup (not in AIC_TOOLS)")
-    # gh: no setup needed — ~/.config/gh is a direct subpath mount of
-    # aic-auth-global:gh, so `gh auth login` writes straight into the
-    # persistent volume.
-    setup_semgrep()
+    # gh + semgrep: no setup needed. ~/.config/gh is a direct subpath mount of
+    # aic-auth-global:gh, so `gh auth login` writes straight into the persistent
+    # volume; semgrep is pointed at ~/.config/aic-auth/semgrep/settings.yml via
+    # SEMGREP_SETTINGS_FILE (devcontainer.json), inside the same persistent
+    # volume — no leaf-file symlink to be clobbered by its atomic-rename writes.
     setup_gitconfig()
     lock_gitconfig()
     verify_socket_proxy()
