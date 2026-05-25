@@ -235,6 +235,34 @@ Swap the compose `image:` line for the `build:` block shown above, then `aic reb
 - **Testing `localhost` needs no firewall change** — loopback is always allowed, so driving your own dev server works even with the allowlist enabled. Only pointing the browser at the public internet (with the firewall on) means adding hosts to `.devcontainer/firewall-allowlist`.
 - **Playwright [MCP](https://github.com/microsoft/playwright-mcp)** (`@playwright/mcp`) reuses the same baked Chromium — just add it to `mcpServers` (it's seeded from your host config like any other MCP). One recipe covers both `playwright test` and MCP-driven browsing.
 
+## Per-project overrides that survive `aic sync`
+
+`devcontainer.json` and `docker-compose.yml` are **template-managed** — `aic init` writes them and `aic sync` overwrites them (only your `AIC_TOOLS` / `AIC_SHELL` choices are carried across). So don't hand-edit those two files for project-specific tweaks; your edits get reset on the next sync/upgrade.
+
+Instead, drop a **`.devcontainer/docker-compose.override.yml`**. It's project-owned: `aic` never copies over it, and `aic init` / `aic sync` auto-append it to `dockerComposeFile` in `devcontainer.json`, so the wiring is re-applied every sync. Docker Compose merges it on top of the base file (override wins).
+
+This is the right home for anything you'd otherwise have put in `containerEnv` or the compose service — env vars, `extra_hosts`, extra mounts, ports:
+
+```yaml
+# .devcontainer/docker-compose.override.yml
+services:
+  devcontainer:
+    environment:
+      # Reach a dev stack running on the HOST (Compose env outranks the mounted
+      # .env for libraries like pydantic-settings, so these win in-container
+      # while the host keeps using .env's localhost).
+      DATABASE_URL: postgresql://user:pass@host.docker.internal:5432/mydb
+      VALKEY_URL: redis://host.docker.internal:6379/0
+    # Docker Desktop (macOS/Windows) resolves host.docker.internal automatically.
+    # On a Linux host, add it explicitly:
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+```
+
+Run `aic rebuild` after editing. Verify the wiring landed with `grep dockerComposeFile .devcontainer/devcontainer.json` (you should see both files in the array).
+
+> The same file is also the sync-safe place to point at a [`Dockerfile.project`](#b-persistent-in-a-project-dockerfile): put the `build:` block in the override instead of editing `docker-compose.yml`. Compose merges `build:` onto the base service; `aic rebuild` refreshes the base image, then rebuilds your layer on top.
+
 ## Updating AI tools
 
 ```bash
@@ -247,7 +275,7 @@ The pull-mode compose file pins `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` to w
 
 `:vX.Y.Z` tags are immutable once published — they capture the exact image built at release time. CI separately rebuilds and pushes a floating `ghcr.io/stefanoginella/aicontainer:latest` on a weekly schedule and on every template change merged to main, for users who prefer base-layer freshness over reproducibility; that tag isn't referenced by default, but you can opt in by editing `.devcontainer/docker-compose.yml`. In `--build` mode `aic rebuild` does a no-cache local build that re-runs the `claude` and `codex` installers.
 
-The 2 files (pull mode) or full set (build mode) under `.devcontainer/` are not refreshed by `aic rebuild` on their own — they're created once by `aic init`. If a new template version changes them (e.g. a docker-compose mount), run `aic sync` to re-copy from the installed template into `./.devcontainer/`, then `aic rebuild`. `aic sync` auto-detects pull vs. build mode, preserves the project's `AIC_TOOLS` and `AIC_SHELL` selections (pass `--with` / `--shell` to change them), and leaves project-owned files (`Dockerfile.project`, `firewall-allowlist`) untouched.
+The 2 files (pull mode) or full set (build mode) under `.devcontainer/` are not refreshed by `aic rebuild` on their own — they're created once by `aic init`. If a new template version changes them (e.g. a docker-compose mount), run `aic sync` to re-copy from the installed template into `./.devcontainer/`, then `aic rebuild`. `aic sync` auto-detects pull vs. build mode, preserves the project's `AIC_TOOLS` and `AIC_SHELL` selections (pass `--with` / `--shell` to change them), and leaves project-owned files (`Dockerfile.project`, `firewall-allowlist`, `docker-compose.override.yml`) untouched — re-wiring an existing [`docker-compose.override.yml`](#per-project-overrides-that-survive-aic-sync) into `dockerComposeFile` so per-project compose tweaks survive the sync.
 
 ## Multi-project model
 
