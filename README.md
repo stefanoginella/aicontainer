@@ -171,8 +171,11 @@ Create `.devcontainer/Dockerfile.project`:
 
 ```dockerfile
 # Match the tag your .devcontainer/docker-compose.yml pins (set by `aic init`
-# to your installed aic version). Use `aic sync` after `npm update -g
-# aicontainer` to bump both at once.
+# to your installed aic version). This tag is project-owned, so `aic sync`
+# never rewrites it — after `npm update -g aicontainer`, sync re-pins
+# docker-compose.yml and WARNS that this FROM has drifted; run
+# `aic sync --bump-base` to rewrite it to match. (If it drifts and an override
+# build: points here, the stale base is what actually runs — see below.)
 FROM ghcr.io/stefanoginella/aicontainer:vX.Y.Z
 
 USER root
@@ -328,7 +331,7 @@ What's shared across all aicontainer projects on your host vs. what's per-projec
 
 | | Scope | Volume |
 |---|---|---|
-| `~/.claude`, `~/.codex`, `~/.config/gh`, `~/.config/npm` (auth + plugins + recent-session metadata) | **Global** | `aic-auth-global` (subpath mounts) |
+| `~/.claude`, `~/.codex`, `~/.config/gh`, `~/.config/npm` (auth + plugins + recent-session metadata), `semgrep` login token | **Global** | `aic-auth-global` (subpath mounts + `SEMGREP_SETTINGS_FILE`) |
 | Shell history (`.zsh_history`) | **Global** | `aic-shell-history` |
 | Claude session JSONLs (`~/.claude/projects/`) | **Per-project** | `<proj>_aic-sessions` |
 | Codex session history (`~/.codex/sessions/`, `history.jsonl`) | **Per-project** | `<proj>_aic-sessions` |

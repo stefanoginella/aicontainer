@@ -420,9 +420,51 @@ cmd_init () {
   echo "aic: next: 'aic up' then 'aic shell'"
 }
 
+# A project's Dockerfile.project is project-owned, so `aic sync` never rewrites
+# it — but if it pins the aicontainer base to an explicit
+# `FROM ghcr.io/stefanoginella/aicontainer:vX.Y.Z`, that tag silently lags the
+# version this aic pins into docker-compose.yml after `npm update -g
+# aicontainer`. And when an override's build: block points at Dockerfile.project,
+# that stale FROM is what actually runs (the compose `image:` pin is bypassed),
+# so the container can come up on an old base with none of the new behavior.
+# Warn on that drift; rewrite it in place only when --bump-base is given, and
+# only for a literal version pin — never :latest floats, ARG-templated bases,
+# or other repos (those are deliberate, so we leave them alone).
+check_dockerfile_project_base () {
+  local ver="$1" do_bump="$2"
+  local df=".devcontainer/Dockerfile.project"
+  [ -f "$df" ] || return 0
+
+  local repo="ghcr.io/stefanoginella/aicontainer"
+  local cur_tag
+  cur_tag="$(sed -n "s|^[[:space:]]*FROM[[:space:]]\{1,\}${repo}:\([A-Za-z0-9._-]\{1,\}\).*|\1|p" "$df" | head -n1)"
+  [ -n "$cur_tag" ] || return 0          # no literal FROM <repo>:tag — templated, other repo, or absent
+
+  local want="v${ver}"
+  [ "$cur_tag" = "$want" ] && return 0    # already matches the pinned version
+
+  if [ "$cur_tag" = "latest" ]; then
+    echo "aic: note: Dockerfile.project tracks ${repo}:latest (floating base); not pinning it to :${want}" >&2
+    return 0
+  fi
+
+  if [ -n "$do_bump" ]; then
+    # Escape dots for the sed LHS; anchor on the full repo path so the swap
+    # can't hit an unrelated token. Replaces every occurrence (multi-stage
+    # FROMs / an ARG default all reference the same base).
+    local re_repo="${repo//./\\.}" re_tag="${cur_tag//./\\.}" tmp
+    tmp="$(mktemp "${df}.XXXXXX")"
+    sed "s|${re_repo}:${re_tag}|${repo}:${want}|g" "$df" > "$tmp" && mv "$tmp" "$df"
+    echo "aic: bumped Dockerfile.project base → ${repo}:${want} (was :${cur_tag})"
+  else
+    echo "aic: warning: Dockerfile.project pins ${repo}:${cur_tag}, but this aic pins :${want}." >&2
+    echo "aic:          Bump its FROM to match, or re-run 'aic sync --bump-base' to do it for you." >&2
+  fi
+}
+
 cmd_sync () {
   require_in_project
-  local mode="" tools="" shell=""
+  local mode="" tools="" shell="" bump_base=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --pull)  mode="pull" ;;
@@ -431,7 +473,8 @@ cmd_sync () {
       --with=*) tools="${1#--with=}" ;;
       --shell) shift; shell="${1:-}" ;;
       --shell=*) shell="${1#--shell=}" ;;
-      *) die "unknown sync flag: $1 (try --pull, --build, --with claude-code,codex, or --shell zsh|bash|fish)" ;;
+      --bump-base) bump_base="1" ;;
+      *) die "unknown sync flag: $1 (try --pull, --build, --bump-base, --with claude-code,codex, or --shell zsh|bash|fish)" ;;
     esac
     shift
   done
@@ -466,10 +509,11 @@ cmd_sync () {
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
   echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell)"
   echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
-  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, docker-compose.override.yml) are untouched"
+  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, post-create.project.sh, docker-compose.override.yml) are untouched"
   if [ -f .devcontainer/docker-compose.override.yml ]; then
     echo "aic: wired docker-compose.override.yml into dockerComposeFile"
   fi
+  check_dockerfile_project_base "$(read_aic_version)" "$bump_base"
 }
 
 cmd_up () {
@@ -572,20 +616,25 @@ Usage:
                                 interactive radio prompt. Stored as
                                 containerEnv.AIC_SHELL; 'aic shell' and the
                                 VS Code default terminal profile honor it.
-  aic sync [--pull|--build] [--with TOOLS] [--shell SHELL]
+  aic sync [--pull|--build] [--bump-base] [--with TOOLS] [--shell SHELL]
                        Re-copy the aicontainer template files into an existing
                        ./.devcontainer/, overwriting them. Auto-detects the
                        mode from whether .devcontainer/Dockerfile exists; pass
                        --pull or --build to force one. Existing AIC_TOOLS /
                        AIC_SHELL selections are preserved unless overridden.
                        Project-owned files (Dockerfile.project, firewall-
-                       allowlist, chown-paths, docker-compose.override.yml)
-                       are untouched;
+                       allowlist, chown-paths, post-create.project.sh,
+                       docker-compose.override.yml) are untouched;
                        an existing docker-compose.override.yml is auto-wired
                        into dockerComposeFile so per-project compose tweaks
                        (env, extra_hosts, build) survive the sync. Useful after
                        editing template/ in a checkout — saves a manual cp -R.
                        Review with 'git diff' afterward.
+                       --bump-base: if Dockerfile.project pins an explicit
+                                FROM ghcr.io/stefanoginella/aicontainer:vX.Y.Z,
+                                rewrite that tag to this aic's version (sync
+                                otherwise only warns about the drift; :latest
+                                floats and ARG-templated bases are left alone).
   aic up               Pull/build and start the devcontainer for this project
   aic shell            Open the configured interactive shell (AIC_SHELL) inside the devcontainer
   aic run CMD ...      Run CMD inside the devcontainer
@@ -651,7 +700,7 @@ _aic_complete () {
         --with)  COMPREPLY=( $(compgen -W "$tools"  -- "$cur") ); return ;;
         --shell) COMPREPLY=( $(compgen -W "$shells" -- "$cur") ); return ;;
       esac
-      COMPREPLY=( $(compgen -W "--pull --build --with --shell" -- "$cur") )
+      COMPREPLY=( $(compgen -W "--pull --build --bump-base --with --shell" -- "$cur") )
       ;;
     completion)
       [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
@@ -709,6 +758,7 @@ _aic () {
           _arguments \
             '--pull[force pull-mode template]' \
             '--build[force build-mode template]' \
+            '--bump-base[bump Dockerfile.project FROM tag to this aic version]' \
             '--with[comma-separated tools]:tools:('"${tools[*]}"')' \
             '--shell[interactive shell]:shell:('"${shells[*]}"')'
           ;;
@@ -753,6 +803,7 @@ for cmd in aic aicontainer
 
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l pull  -d 'force pull-mode template'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l build -d 'force build-mode template'
+  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l bump-base -d 'bump Dockerfile.project FROM tag to this aic version'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l with  -d 'comma-separated tools' -xa 'claude-code codex claude-code,codex'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l shell -d 'interactive shell' -xa 'zsh bash fish'
 

@@ -181,6 +181,28 @@ jobs:
             echo "OK: project hook ran as vscode in /workspace; non-zero exit was non-fatal"
           '
 
+      - name: CLI test - aic sync warns on / bumps a stale Dockerfile.project base
+        run: |
+          # Host-only (no container). A project-owned Dockerfile.project that
+          # pins an old aicontainer base must NOT be silently edited by sync —
+          # sync warns; only `--bump-base` rewrites the FROM. Guards the drift
+          # footgun where an override's build: runs the stale base.
+          set -euo pipefail
+          tmp="$(mktemp -d)"; cd "$tmp"; git init -q
+          cur="v$(node -p "require('$GITHUB_WORKSPACE/package.json').version")"
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
+          printf 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.1\nRUN true\n' > .devcontainer/Dockerfile.project
+          # 1) plain sync: must WARN and leave the file untouched
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync 2>&1)"; echo "$out"
+          echo "$out" | grep -q "Dockerfile.project pins .*:v0.0.1" || { echo "FAIL: no drift warning"; exit 1; }
+          grep -q ':v0.0.1' .devcontainer/Dockerfile.project || { echo "FAIL: plain sync edited the file"; exit 1; }
+          # 2) sync --bump-base: must rewrite FROM to this aic's version
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --bump-base >/dev/null
+          grep -q "ghcr.io/stefanoginella/aicontainer:${cur}" .devcontainer/Dockerfile.project \
+            || { echo "FAIL: --bump-base did not rewrite FROM to ${cur}"; cat .devcontainer/Dockerfile.project; exit 1; }
+          grep -q ':v0.0.1' .devcontainer/Dockerfile.project && { echo "FAIL: stale tag still present"; exit 1; }
+          echo "OK: sync warns on drift; --bump-base rewrites FROM to ${cur}"
+
   publish:
     # Refresh `:latest` and the weekly tag on every push to main that touches
     # template files, the weekly cron, or manual dispatch — never on PRs (forks

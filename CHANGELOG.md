@@ -12,6 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `aic sync --bump-base`: when a project-owned `Dockerfile.project` pins an
+  explicit `FROM ghcr.io/stefanoginella/aicontainer:vX.Y.Z`, rewrite that tag to
+  the installed aic's version. Plain `aic sync` now also **warns** on such drift
+  (it still never edits the file on its own; `:latest` floats and `ARG`-templated
+  bases are left alone). Catches the case where a `docker-compose.override.yml`
+  `build:` block silently runs a stale base image after `npm update -g aicontainer`.
+
+### Fixed
+
+- semgrep's login token now persists reliably across rebuilds. semgrep is pointed
+  at `~/.config/aic-auth/semgrep/settings.yml` (inside the global auth volume) via
+  `SEMGREP_SETTINGS_FILE`, replacing a leaf-file symlink that semgrep's
+  atomic-rename writes clobbered — which produced a recurring `[post-create]
+  warning: both … settings.yml exist` on every container create and left the token
+  on the throwaway container rootfs.
+
 ## [0.0.8] - 2026-05-25
 
 ### Added

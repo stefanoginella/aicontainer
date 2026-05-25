@@ -46,6 +46,7 @@
   "containerEnv": {
     "DEVCONTAINER": "true",
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
+    "SEMGREP_SETTINGS_FILE": "/home/vscode/.config/aic-auth/semgrep/settings.yml",
     "NPM_CONFIG_IGNORE_SCRIPTS": "true",
     "NPM_CONFIG_AUDIT": "true",
     "NPM_CONFIG_FUND": "false",

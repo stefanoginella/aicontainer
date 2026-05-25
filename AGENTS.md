@@ -118,6 +118,21 @@ so it stays host-only-editable. Non-zero exit is logged, not fatal — keep that
 defensive degradation; a flaky project step shouldn't block the devcontainer
 from coming up.
 
+**Dockerfile.project base-tag drift.** Because `Dockerfile.project` is
+project-owned, `aic sync` re-pins `docker-compose.yml` to the new aic version
+but does **not** touch a `FROM ghcr.io/stefanoginella/aicontainer:vX.Y.Z` inside
+it — so after `npm update -g aicontainer` the two silently diverge, and when an
+override's `build:` points at `Dockerfile.project`, that stale `FROM` is what
+actually runs (the compose `image:` pin is bypassed). This bit a real project
+(container came up on an old base with none of the new template behavior).
+`check_dockerfile_project_base()` (called at the end of `cmd_sync`) detects the
+drift and **warns**; `aic sync --bump-base` rewrites the tag in place. It only
+acts on a literal version pin — `:latest` floats, `ARG`-templated bases, and
+other repos are left alone (deliberate choices). Keep the warn/opt-in split:
+silently editing a project-owned file would break the ownership contract above.
+The "aic sync warns on / bumps a stale Dockerfile.project base" CLI test in both
+workflows guards this — extend it, don't weaken it.
+
 ## Releasing
 
 See README.md's "Releasing" section for the user-visible flow. **When asked to
