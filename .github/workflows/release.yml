@@ -196,12 +196,12 @@ jobs:
           # 1) plain sync: must WARN and leave the file untouched
           out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync 2>&1)"; echo "$out"
           echo "$out" | grep -q "Dockerfile.project pins .*:v0.0.1" || { echo "FAIL: no drift warning"; exit 1; }
-          grep -q ':v0.0.1' .devcontainer/Dockerfile.project || { echo "FAIL: plain sync edited the file"; exit 1; }
+          grep -Fxq 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.1' .devcontainer/Dockerfile.project || { echo "FAIL: plain sync edited the file"; exit 1; }
           # 2) sync --bump-base: must rewrite FROM to this aic's version
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --bump-base >/dev/null
           grep -q "ghcr.io/stefanoginella/aicontainer:${cur}" .devcontainer/Dockerfile.project \
             || { echo "FAIL: --bump-base did not rewrite FROM to ${cur}"; cat .devcontainer/Dockerfile.project; exit 1; }
-          grep -q ':v0.0.1' .devcontainer/Dockerfile.project && { echo "FAIL: stale tag still present"; exit 1; }
+          grep -Fxq 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.1' .devcontainer/Dockerfile.project && { echo "FAIL: stale tag still present"; exit 1; }
           echo "OK: sync warns on drift; --bump-base rewrites FROM to ${cur}"
 
   publish:
