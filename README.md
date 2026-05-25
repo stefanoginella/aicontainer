@@ -263,6 +263,37 @@ Run `aic rebuild` after editing. Verify the wiring landed with `grep dockerCompo
 
 > The same file is also the sync-safe place to point at a [`Dockerfile.project`](#b-persistent-in-a-project-dockerfile): put the `build:` block in the override instead of editing `docker-compose.yml`. Compose merges `build:` onto the base service; `aic rebuild` refreshes the base image, then rebuilds your layer on top.
 
+### Persisting a named volume (and fixing its ownership)
+
+A common override is a **named volume** over a build artifact you don't want on the bind-mounted workspace — a Python `.venv`, `node_modules`, a language cache — so it persists across rebuilds and dodges the macOS bind-mount performance hit:
+
+```yaml
+# .devcontainer/docker-compose.override.yml
+services:
+  devcontainer:
+    volumes:
+      - myproject-venv:/workspace/.venv
+      - myproject-uv-cache:/home/vscode/.cache/uv
+volumes:
+  myproject-venv:
+  myproject-uv-cache:
+```
+
+There's a catch: Docker initializes a **fresh named volume as `root:root`**, and `updateRemoteUserUID` only remaps the user *inside* the container, not the daemon's volume-init UID. So `vscode` can't write into the mount and your `uv` / `npm` install fails. (You can't fix this with `sudo chown` from inside — in-container sudo is scoped to three aic helper scripts, not general `chown`.)
+
+The sync-safe fix is a project-owned **`.devcontainer/chown-paths`** — one mountpoint per line; `aic-chown-volumes` re-owns each to `vscode` on container creation:
+
+```
+# .devcontainer/chown-paths — re-owned to vscode on container create.
+# Only paths under /workspace/ or /home/vscode/.cache/ are honored.
+/workspace/.venv
+/home/vscode/.cache/uv
+```
+
+Like `firewall-allowlist`, this file is opt-in (read only if present), never touched by `aic sync`, and read-only inside the container (an in-container tool can't edit it). The prefix allowlist is a hard security boundary baked into the image — paths outside `/workspace/` and `/home/vscode/.cache/` are refused, so the re-own can't be pointed at sudoers, the hooks, or `~/.gitconfig.local`. Keep tool caches under `~/.cache/` (e.g. `CARGO_HOME=/home/vscode/.cache/cargo` in the override) so they fall inside the allowlist.
+
+> Already created the volume root-owned from an earlier run? `aic-chown-volumes` fixes it on the next `aic rebuild`. If it was populated by a partial install, `docker volume rm <name>` once and let it re-init clean.
+
 ## Updating AI tools
 
 ```bash
@@ -275,7 +306,7 @@ The pull-mode compose file pins `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` to w
 
 `:vX.Y.Z` tags are immutable once published — they capture the exact image built at release time. CI separately rebuilds and pushes a floating `ghcr.io/stefanoginella/aicontainer:latest` on a weekly schedule and on every template change merged to main, for users who prefer base-layer freshness over reproducibility; that tag isn't referenced by default, but you can opt in by editing `.devcontainer/docker-compose.yml`. In `--build` mode `aic rebuild` does a no-cache local build that re-runs the `claude` and `codex` installers.
 
-The 2 files (pull mode) or full set (build mode) under `.devcontainer/` are not refreshed by `aic rebuild` on their own — they're created once by `aic init`. If a new template version changes them (e.g. a docker-compose mount), run `aic sync` to re-copy from the installed template into `./.devcontainer/`, then `aic rebuild`. `aic sync` auto-detects pull vs. build mode, preserves the project's `AIC_TOOLS` and `AIC_SHELL` selections (pass `--with` / `--shell` to change them), and leaves project-owned files (`Dockerfile.project`, `firewall-allowlist`, `docker-compose.override.yml`) untouched — re-wiring an existing [`docker-compose.override.yml`](#per-project-overrides-that-survive-aic-sync) into `dockerComposeFile` so per-project compose tweaks survive the sync.
+The 2 files (pull mode) or full set (build mode) under `.devcontainer/` are not refreshed by `aic rebuild` on their own — they're created once by `aic init`. If a new template version changes them (e.g. a docker-compose mount), run `aic sync` to re-copy from the installed template into `./.devcontainer/`, then `aic rebuild`. `aic sync` auto-detects pull vs. build mode, preserves the project's `AIC_TOOLS` and `AIC_SHELL` selections (pass `--with` / `--shell` to change them), and leaves project-owned files (`Dockerfile.project`, `firewall-allowlist`, `chown-paths`, `docker-compose.override.yml`) untouched — re-wiring an existing [`docker-compose.override.yml`](#per-project-overrides-that-survive-aic-sync) into `dockerComposeFile` so per-project compose tweaks survive the sync.
 
 ## Multi-project model
 

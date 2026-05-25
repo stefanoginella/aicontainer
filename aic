@@ -447,7 +447,7 @@ cmd_sync () {
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
   echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell)"
   echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
-  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, docker-compose.override.yml) are untouched"
+  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, docker-compose.override.yml) are untouched"
   [ -f .devcontainer/docker-compose.override.yml ] && \
     echo "aic: wired docker-compose.override.yml into dockerComposeFile"
 }
@@ -559,7 +559,8 @@ Usage:
                        --pull or --build to force one. Existing AIC_TOOLS /
                        AIC_SHELL selections are preserved unless overridden.
                        Project-owned files (Dockerfile.project, firewall-
-                       allowlist, docker-compose.override.yml) are untouched;
+                       allowlist, chown-paths, docker-compose.override.yml)
+                       are untouched;
                        an existing docker-compose.override.yml is auto-wired
                        into dockerComposeFile so per-project compose tweaks
                        (env, extra_hosts, build) survive the sync. Useful after

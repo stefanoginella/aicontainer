@@ -65,7 +65,7 @@ wholesale on every `init`/`sync`; only `AIC_TOOLS` / `AIC_SHELL` survive (they
 are re-derived from the old file and re-injected by `patch_devcontainer_json`).
 So users must **not** hand-edit those two files — per-project tweaks go in
 project-owned files that `apply_template()` never touches: `Dockerfile.project`,
-`firewall-allowlist`, and `docker-compose.override.yml`.
+`firewall-allowlist`, `chown-paths`, and `docker-compose.override.yml`.
 
 The override is the sync-safe home for anything that would otherwise live in
 `containerEnv` or the compose service (env, `extra_hosts`, mounts, a
@@ -81,6 +81,17 @@ Keep the template's array single-entry — do not pre-list the override there, o
 `devcontainer up` fails on projects that don't have the file (a missing
 `dockerComposeFile` entry is a hard error). The wiring is opt-in by file
 presence, mirroring how `firewall-allowlist` is read only if present.
+
+`chown-paths` is the companion to override-declared **named volumes**. Docker
+inits a fresh named volume `root:root` and `updateRemoteUserUID` doesn't touch
+the daemon's init UID, so a `myproject-venv:/workspace/.venv` mount lands
+unwritable by `vscode`. A project lists such mountpoints (one per line) in
+`.devcontainer/chown-paths`; `post-create.py`'s `fix_volume_ownership()` then
+re-owns them via `aic-chown-volumes` on container creation. Same opt-in-by-
+presence, read-only-inside-container, survives-sync contract as
+`firewall-allowlist`. **The prefix allowlist (`/workspace/`,
+`/home/vscode/.cache/`) is the security boundary — see "Security stance"
+before widening it.**
 
 ## Releasing
 
@@ -173,7 +184,15 @@ should be reviewed for security regressions:
   sensitive paths. Loosening the deny list weakens the model.
 - `template/aic-chown-volumes`, `template/aic-lock-gitconfig` — the only
   scripts allowed via `NOPASSWD` sudo. Touching them changes the privileged
-  surface.
+  surface. `aic-chown-volumes` reads project-supplied targets from
+  `.devcontainer/chown-paths`, **never from argv** — that's what stops the
+  `NOPASSWD` grant from becoming an arbitrary `sudo aic-chown-volumes
+  /etc/sudoers.d`. The hardcoded prefix allowlist (`/workspace/`,
+  `/home/vscode/.cache/`) plus `-h`/non-traversing `-R` is the boundary;
+  widening it to broader `$HOME` would expose `~/.gitconfig.local` (the
+  root-locked gitconfig) and is a load-bearing decision. The "scoped sudo
+  cannot chown arbitrary paths" smoke test guards this — extend it, don't
+  weaken it.
 - `.github/workflows/*.yml` — CI secrets (`NPM_TOKEN`, GHCR via
   `GITHUB_TOKEN`). The `publish` jobs only run on push/schedule/dispatch,
   never on `pull_request`, to keep fork PRs from triggering publishes.
