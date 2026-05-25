@@ -113,6 +113,29 @@ jobs:
             echo "OK: arbitrary sudo chown is denied"
           '
 
+      - name: Smoke test - chown-paths allowlist is enforced
+        working-directory: /tmp/proj
+        run: |
+          # chown-paths is RO-mounted + PreToolUse-blocked, so an in-container
+          # tool can't add entries. But a forbidden entry (e.g. a careless
+          # host-side edit) must still be refused fail-closed without touching
+          # the target. We write it host-side; the live RO bind mount reflects
+          # it inside the container.
+          trap 'rm -rf .devcontainer/chown-paths .venv-smoke' EXIT
+          printf '/home/vscode/.gitconfig.local\n' > .devcontainer/chown-paths
+          devcontainer exec --workspace-folder . bash -lc '
+            sudo -n /usr/local/bin/aic-chown-volumes && { echo "FAIL: accepted out-of-allowlist path"; exit 1; }
+            owner=$(stat -c "%U" /home/vscode/.gitconfig.local)
+            [ "$owner" = "root" ] || { echo "FAIL: gitconfig.local now owned by $owner"; exit 1; }
+            echo "OK: forbidden chown-paths entry refused; gitconfig.local still root-owned"
+          '
+          printf '/workspace/.venv-smoke\n' > .devcontainer/chown-paths
+          devcontainer exec --workspace-folder . bash -lc '
+            mkdir -p /workspace/.venv-smoke
+            sudo -n /usr/local/bin/aic-chown-volumes || { echo "FAIL: rejected a valid /workspace path"; exit 1; }
+            echo "OK: valid /workspace chown-paths entry accepted"
+          '
+
       - name: Smoke test - gitconfig.local is root-owned 0444
         working-directory: /tmp/proj
         run: |

@@ -36,6 +36,13 @@ HOST_GITCONFIG = HOME / ".gitconfig"             # bind-mounted RO from host
 HOST_SEED_CLAUDE = Path("/host-seed/claude")     # bind-mounted RO file/dir
 HOST_SEED_CODEX = Path("/host-seed/codex")       # bind-mounted RO file
 
+# Optional project-declared volume mountpoints to re-own, one path per line in
+# .devcontainer/chown-paths. The prefix allowlist mirrors (advisory-only) the
+# authoritative check in aic-chown-volumes; the root script re-validates, so a
+# bad entry that slips past here is still refused where it matters.
+PROJECT_CHOWN_FILE = Path("/workspace/.devcontainer/chown-paths")
+CHOWN_ALLOWED_PREFIXES = ("/workspace/", "/home/vscode/.cache/")
+
 # Per-project tool selection. Set by `aic init`/`aic sync` as
 # containerEnv.AIC_TOOLS in .devcontainer/devcontainer.json. Empty/unset
 # defaults to both tools (preserves behavior for projects pinned before the
@@ -92,11 +99,30 @@ def log(msg: str) -> None:
     print(f"[post-create] {msg}", file=sys.stderr)
 
 
+def _project_chown_paths() -> list[Path]:
+    """Parse .devcontainer/chown-paths (project-owned, RO-mounted) into the
+    list of extra volume mountpoints to re-own. Entries outside the prefix
+    allowlist are skipped here with a warning; aic-chown-volumes re-validates
+    them as the authoritative (root-side) gate, so this is advisory only."""
+    if not PROJECT_CHOWN_FILE.is_file():
+        return []
+    paths: list[Path] = []
+    for raw in PROJECT_CHOWN_FILE.read_text().splitlines():
+        entry = raw.split("#", 1)[0].strip()
+        if not entry:
+            continue
+        if ".." in entry.split("/") or not entry.startswith(CHOWN_ALLOWED_PREFIXES):
+            log(f"warning: ignoring out-of-allowlist chown-paths entry: {entry!r}")
+            continue
+        paths.append(Path(entry))
+    return paths
+
+
 def fix_volume_ownership() -> None:
     """Named volumes mount as root:root on first creation. Re-own them via
-    the scoped /usr/local/bin/aic-chown-volumes wrapper (hardcoded targets,
-    -h to block symlink-following) so the sudo grant cannot be turned into
-    an arbitrary-path chown."""
+    the scoped /usr/local/bin/aic-chown-volumes wrapper (fixed targets + the
+    project chown-paths allowlist, -h to block symlink-following) so the sudo
+    grant cannot be turned into an arbitrary-path chown."""
     uid = os.getuid()
     needs_chown = False
     for path in (
@@ -110,6 +136,13 @@ def fix_volume_ownership() -> None:
     ):
         path.mkdir(parents=True, exist_ok=True)
         if path.stat().st_uid != uid:
+            needs_chown = True
+    # Project-declared mountpoints: don't mkdir (they're volume mounts that
+    # exist iff the volume is attached); only flag a chown when one is present
+    # and still root-owned — e.g. a rebuild where aic's own volumes are already
+    # correct but a freshly-created project volume isn't.
+    for path in _project_chown_paths():
+        if path.exists() and path.stat().st_uid != uid:
             needs_chown = True
     if needs_chown:
         try:

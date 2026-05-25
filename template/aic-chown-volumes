@@ -2,10 +2,24 @@
 # =============================================================================
 # aic-chown-volumes — re-own aicontainer's persistent volume mount points
 # =============================================================================
-# Called via scoped sudo from post-create.py on first container creation
-# (named volumes come up root-owned). Targets are hardcoded, and -h prevents
-# a symlink the AI may have planted in a persisted volume from redirecting
-# chown to /etc/sudoers.d/vscode or similar.
+# Called via scoped sudo from post-create.py on container creation (named
+# volumes come up root-owned). Targets come from two sources, both *outside*
+# argv:
+#
+#   1. The hardcoded list below — aic's own auth/session/history volumes.
+#   2. Optional project-declared mountpoints, one path per line in
+#      /workspace/.devcontainer/chown-paths (see README "Persisting a named
+#      volume"). Only paths under /workspace/ or /home/vscode/.cache/ are
+#      honored.
+#
+# Targets are NEVER read from this script's arguments. The scoped sudoers entry
+# lets vscode *invoke* the script, but because the policy lives in hardcoded
+# paths + a read-only, PreToolUse-blocked file (not argv), running
+# `sudo aic-chown-volumes /etc/sudoers.d` cannot redirect the chown. Combined
+# with -h (never dereference a final-component symlink) and the prefix
+# allowlist below — which excludes /etc, /etc/aic/hooks, and
+# ~/.gitconfig.local — the NOPASSWD grant cannot be turned into a privilege
+# escalation.
 #
 # Replaces the previous `NOPASSWD: /usr/bin/chown` sudoers entry, which let
 # any in-container process chown arbitrary paths and escalate to root.
@@ -17,6 +31,13 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+chown_safe() {
+  # -h: act on a symlink itself, never its referent. -R without -H/-L is -P
+  # under GNU coreutils, so recursion does not traverse symlinks — a symlink
+  # planted in a persisted volume cannot redirect chown to /etc/sudoers.d etc.
+  chown -h -R vscode:vscode "$1"
+}
+
 for d in /home/vscode/.shell-history \
          /home/vscode/.config/aic-auth \
          /home/vscode/.claude-sessions \
@@ -24,5 +45,33 @@ for d in /home/vscode/.shell-history \
          /home/vscode/.codex \
          /home/vscode/.config/gh \
          /home/vscode/.config/npm; do
-  [ -d "$d" ] && chown -h -R vscode:vscode "$d"
+  [ -d "$d" ] && chown_safe "$d"
 done
+
+# Project-declared volume mountpoints. Opt-in: read only if the project
+# created the file, mirroring firewall-allowlist. The prefix allowlist is the
+# security boundary — anything outside /workspace/ and /home/vscode/.cache/
+# (sudoers, /etc/aic/hooks, ~/.gitconfig.local, the rest of $HOME) is refused,
+# fail-closed, even though the file is itself read-only inside the container.
+EXTRA_FILE="/workspace/.devcontainer/chown-paths"
+if [ -f "$EXTRA_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    p="${line%%#*}"                              # strip trailing comment
+    p="${p#"${p%%[![:space:]]*}"}"               # ltrim
+    p="${p%"${p##*[![:space:]]}"}"               # rtrim
+    [ -n "$p" ] || continue
+    case "/$p/" in
+      */../*)
+        echo "aic-chown-volumes: refusing path with a '..' component: $p" >&2
+        exit 1 ;;
+    esac
+    case "$p" in
+      /workspace/?*|/home/vscode/.cache/?*)
+        [ -e "$p" ] && chown_safe "$p" ;;
+      *)
+        echo "aic-chown-volumes: refusing out-of-allowlist path: $p" >&2
+        echo "  (only /workspace/* and /home/vscode/.cache/* are allowed)" >&2
+        exit 1 ;;
+    esac
+  done < "$EXTRA_FILE"
+fi
