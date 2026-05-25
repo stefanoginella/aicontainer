@@ -1,20 +1,22 @@
 # =============================================================================
-# aicontainer — pull-mode compose (uses the prebuilt GHCR image)
+# aicontainer — devcontainer + Tecnativa docker-socket-proxy
 # =============================================================================
-# Pulls ghcr.io/stefanoginella/aicontainer:v0.0.7 instead of building locally.
-# All helper scripts (post-create.py, aic-firewall, hooks, etc.) are baked
-# into the image — see template/Dockerfile in the aicontainer repo for the
-# source of truth.
+# `aic up` invokes `devcontainer up` which uses this compose file. The
+# devcontainer CLI sets COMPOSE_PROJECT_NAME to the host workspace folder
+# basename, which scopes the per-project named volumes below.
 #
-# If a project needs extra apt packages or language tooling, run `aic init
-# --build` to switch to the local-build template (or add a Dockerfile.project
-# that does `FROM ghcr.io/stefanoginella/aicontainer:v0.0.7`).
+# If a project has its own services (postgres, redis, etc.), add them to a
+# root compose.yml and uncomment the second entry in dockerComposeFile in
+# devcontainer.json.
 # =============================================================================
 
 services:
   devcontainer:
-    image: ghcr.io/stefanoginella/aicontainer:v0.0.7
-    pull_policy: missing
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        TZ: ${TZ:-UTC}
     command: sleep infinity
     # NET_ADMIN + NET_RAW let the opt-in `sudo aic-firewall` script set up
     # an iptables allowlist for outbound traffic. Capabilities are confined

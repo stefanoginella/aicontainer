@@ -1,0 +1,227 @@
+# =============================================================================
+# aicontainer — base image for Claude Code + Codex in bypass mode
+# =============================================================================
+# Build inside a project's .devcontainer/ via `aic up` (which runs `devcontainer
+# up` and reads docker-compose.yml). Image is rebuilt by CI weekly so AI CLI
+# versions stay current.
+# =============================================================================
+
+FROM ghcr.io/astral-sh/uv:0.10@sha256:10902f58a1606787602f303954cea099626a4adb02acbac4c69920fe9d278f82 AS uv
+FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04@sha256:4bcb1b466771b1ba1ea110e2a27daea2f6093f9527fb75ee59703ec89b5561cb
+
+# OCI labels: lets GitHub auto-link the GHCR package back to this repo.
+LABEL org.opencontainers.image.source="https://github.com/stefanoginella/aicontainer" \
+      org.opencontainers.image.description="Sandboxed devcontainer for running Claude Code and Codex in bypass / auto-approve mode." \
+      org.opencontainers.image.licenses="MIT"
+
+ARG TZ
+ENV TZ="$TZ"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# ---------------------------------------------------------------------------
+# System packages (base image already ships git, curl, sudo, etc.)
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      fd-find \
+      ripgrep \
+      tmux \
+      zsh \
+      bash \
+      fish \
+      build-essential \
+      jq \
+      nano \
+      unzip \
+      vim \
+      dnsutils \
+      iproute2 \
+      iptables \
+      ipset \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# git-delta
+# renovate: datasource=github-releases depName=dandavison/delta
+ARG GIT_DELTA_VERSION=0.18.2
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" -o /tmp/git-delta.deb && \
+    dpkg -i /tmp/git-delta.deb && \
+    rm /tmp/git-delta.deb
+
+# uv (Python package manager)
+COPY --from=uv /uv /usr/local/bin/uv
+
+# fzf (GitHub release is newer than apt and includes shell integration)
+# renovate: datasource=github-releases depName=junegunn/fzf
+ARG FZF_VERSION=0.70.0
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "${ARCH}" in \
+      amd64) FZF_ARCH="linux_amd64" ;; \
+      arm64) FZF_ARCH="linux_arm64" ;; \
+      *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/junegunn/fzf/releases/download/v${FZF_VERSION}/fzf-${FZF_VERSION}-${FZF_ARCH}.tar.gz" | tar -xz -C /usr/local/bin
+
+# GitHub CLI (used by AI for PR/issue work; user logs in inside the container)
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI (talks to socket-proxy via DOCKER_HOST=tcp://socket-proxy:2375)
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
+      | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu noble stable" \
+      > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      docker-ce-cli docker-buildx-plugin docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Persistent directories and ownership
+# ---------------------------------------------------------------------------
+RUN mkdir -p /workspace \
+             /home/vscode/.claude \
+             /home/vscode/.codex \
+             /home/vscode/.semgrep \
+             /home/vscode/.config/gh \
+             /home/vscode/.config/npm \
+             /home/vscode/.config/aic-auth \
+             /home/vscode/.claude-sessions \
+             /home/vscode/.shell-history \
+             /opt \
+    && chown -R vscode:vscode /workspace /home/vscode/.claude /home/vscode/.codex /home/vscode/.semgrep /home/vscode/.config /home/vscode/.config/aic-auth /home/vscode/.claude-sessions /home/vscode/.shell-history /opt
+
+ENV DEVCONTAINER=true
+ENV SHELL=/bin/zsh
+ENV EDITOR=nano
+ENV VISUAL=nano
+
+WORKDIR /workspace
+
+# Scoped sudoers: every entry is a wrapper with hardcoded targets, so the
+# grant cannot be turned into arbitrary chown / file write. aic-firewall is
+# enable-only; aic-chown-volumes touches three known volume paths;
+# aic-lock-gitconfig locks one known file. A bare `chown` here would let AI
+# `chown vscode /etc/sudoers.d/vscode` and escalate to root.
+RUN echo 'vscode ALL=(ALL) NOPASSWD: /usr/local/bin/aic-chown-volumes, /usr/local/bin/aic-lock-gitconfig, /usr/local/bin/aic-firewall' > /etc/sudoers.d/vscode \
+    && chmod 0440 /etc/sudoers.d/vscode
+
+# Privileged helper scripts. All root-owned and only callable via the scoped
+# sudoers entry above. aic-firewall is enable-only; aic-chown-volumes and
+# aic-lock-gitconfig operate on hardcoded paths.
+COPY aic-firewall aic-chown-volumes aic-lock-gitconfig /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/aic-firewall \
+                /usr/local/bin/aic-chown-volumes \
+                /usr/local/bin/aic-lock-gitconfig \
+    && chown root:root /usr/local/bin/aic-firewall \
+                       /usr/local/bin/aic-chown-volumes \
+                       /usr/local/bin/aic-lock-gitconfig
+
+# ---------------------------------------------------------------------------
+# Hooks: root-owned, not writable by vscode (self-defense)
+# ---------------------------------------------------------------------------
+COPY hooks/ /etc/aic/hooks/
+RUN chmod 755 /etc/aic/hooks /etc/aic /etc/aic/hooks/*.sh \
+    && chmod 644 /etc/aic/hooks/*.json \
+    && chown -R root:root /etc/aic
+
+# ---------------------------------------------------------------------------
+# Lifecycle script
+# ---------------------------------------------------------------------------
+COPY post-create.py /opt/post-create.py
+RUN chmod 0755 /opt/post-create.py
+
+USER vscode
+
+ENV PATH="/home/vscode/.local/bin:$PATH"
+# Build-time mirror of devcontainer.json's containerEnv: skip npm lifecycle
+# scripts for the codex install below (and for any `npm install` baked into a
+# downstream Dockerfile.project).
+ENV NPM_CONFIG_IGNORE_SCRIPTS=true
+
+# Claude Code (official native installer to ~/.local/bin)
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && claude --version
+
+# Python toolchain (per-user; survives image rebuilds via base layer caching)
+RUN uv python install 3.13 --default
+
+# Node LTS via fnm (per-user; lets projects override with their own version)
+# renovate: datasource=node-version depName=node
+ARG NODE_VERSION=24
+ENV FNM_DIR="/home/vscode/.fnm"
+RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$FNM_DIR" --skip-shell \
+    && export PATH="$FNM_DIR:$PATH" \
+    && eval "$(fnm env)" \
+    && fnm install ${NODE_VERSION} \
+    && fnm default ${NODE_VERSION}
+
+# Codex CLI (npm global into the fnm-managed Node ${NODE_VERSION})
+RUN export PATH="$FNM_DIR:$PATH" \
+    && eval "$(fnm env)" \
+    && npm install -g @openai/codex@latest \
+    && codex --version
+
+# Semgrep (used by Claude Code's semgrep plugin; installed into ~/.local/bin
+# via uv tool so the binary is on PATH for the vscode user). Auth (settings.yml)
+# is symlinked to the global aic-auth volume by post-create.py.
+RUN uv tool install semgrep \
+    && semgrep --version
+
+# oh-my-zsh + powerlevel10k + plugins
+# renovate: datasource=github-releases depName=deluan/zsh-in-docker
+ARG ZSH_IN_DOCKER_VERSION=1.2.1
+RUN sh -c "$(curl -fsSL https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
+      -t https://github.com/romkatv/powerlevel10k \
+      -p git \
+      -p fzf \
+      -p https://github.com/zsh-users/zsh-autosuggestions \
+      -p https://github.com/zsh-users/zsh-syntax-highlighting \
+      -a 'export HISTFILE=/home/vscode/.shell-history/.zsh_history' \
+      -a 'export HISTSIZE=50000' \
+      -a 'export SAVEHIST=50000' \
+      -a 'setopt SHARE_HISTORY' \
+      -a 'export PATH="$FNM_DIR:$PATH"' \
+      -a 'eval "$(fnm env --use-on-cd)"' \
+      -a '[[ -s ~/.p10k.zsh ]] && source ~/.p10k.zsh' \
+      -a '[[ -s ~/.zshrc.local ]] && source ~/.zshrc.local' \
+      -x
+
+# Container-tailored zshrc additions are baked into ~/.zshrc above by
+# zsh-in-docker's `-a` flag. We keep template/.zshrc in the repo for reference
+# and as a single source of truth that contributors can edit.
+COPY --chown=vscode:vscode .zshrc /home/vscode/.zshrc.aic
+
+# ---------------------------------------------------------------------------
+# Bash + fish: minimal parity with the zsh setup for users who pick
+# AIC_SHELL=bash|fish via `aic init`. Bash gets persistent history (shared
+# volume with zsh) and fnm on PATH; fish gets fnm on PATH. Theming
+# (oh-my-zsh + powerlevel10k) is zsh-only — bash/fish stay barebones, with a
+# ~/.bashrc.local / ~/.config/fish/config.local.fish opt-in so users can layer
+# their own config without rebuilding the image.
+# ---------------------------------------------------------------------------
+RUN cat >> /home/vscode/.bashrc <<'BASHRC_EOF'
+
+# aicontainer additions
+export HISTFILE=/home/vscode/.shell-history/.bash_history
+export HISTSIZE=50000
+export HISTFILESIZE=50000
+shopt -s histappend
+export PATH="$FNM_DIR:$PATH"
+eval "$(fnm env --use-on-cd)"
+[ -f ~/.bashrc.local ] && . ~/.bashrc.local
+BASHRC_EOF
+
+RUN mkdir -p /home/vscode/.config/fish \
+    && cat > /home/vscode/.config/fish/config.fish <<'FISH_EOF'
+# aicontainer fish config (baked at image build; see template/Dockerfile)
+set -gx FNM_DIR /home/vscode/.fnm
+fish_add_path $FNM_DIR
+fnm env --use-on-cd | source
+if test -f ~/.config/fish/config.local.fish
+    source ~/.config/fish/config.local.fish
+end
+FISH_EOF
