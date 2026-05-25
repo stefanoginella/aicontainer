@@ -427,16 +427,21 @@ From a clean `main`:
 
 ```bash
 git checkout main && git pull
-npm version patch         # or: minor / major. Creates the bump commit + v* tag.
-git push --follow-tags    # pushes both the commit and the tag
+# 1. Edit CHANGELOG.md: rename ## [Unreleased] -> ## [X.Y.Z] - <date>, add its
+#    compare link, commit it.
+npm version patch         # 2. or: minor / major. Creates the bump commit + v* tag.
+git push --follow-tags    # 3. pushes both the commit and the tag
 ```
 
 `release.yml` then fires on the tag and ships, in one atomic flow:
 - `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` (immutable)
 - `ghcr.io/stefanoginella/aicontainer:latest` (floats forward)
 - `aicontainer@X.Y.Z` on npm with provenance attestation
+- a GitHub Release for the tag, with notes pulled from `CHANGELOG.md`
 
 A guard step rejects the run if the `v*` tag doesn't match `package.json`'s `version` — so `npm version` is the only sane way to mint a release tag.
+
+`CHANGELOG.md` is **hand-maintained** ([Keep a Changelog](https://keepachangelog.com/) format). Add notes under `## [Unreleased]` as you work; at release time, rename that heading to the new version and add its compare link. The GitHub Release notes are the matching `## [X.Y.Z]` section, pulled verbatim. **A release is blocked unless that section exists** — `release.yml` greps for it before any publish, so you can't ship a version with no changelog entry. The `.githooks/pre-push` hook enforces the same check locally; enable it once per clone with `git config core.hooksPath .githooks`.
 
 ### Day-to-day pushes vs. releases
 
@@ -444,7 +449,7 @@ A guard step rejects the run if the `v*` tag doesn't match `package.json`'s `ver
 | ---          | ---                                               | ---                                                     |
 | Feature PR   | merge to `main`, touches `template/**`            | `:latest` + weekly tag refresh. Nothing on npm.         |
 | Feature PR   | merge to `main`, only touches `aic`/README        | Nothing.                                                |
-| Release      | `npm version <bump> && git push --follow-tags`    | `:vX.Y.Z` (immutable) + `:latest` + npm publish.        |
+| Release      | `npm version <bump> && git push --follow-tags`    | `:vX.Y.Z` (immutable) + `:latest` + npm publish + GitHub Release. |
 | Weekly cron  | Mondays 06:00 UTC                                 | `:latest` + `:weekly-YYYY-VV` refresh. No npm activity. |
 
 Because `aic init` pins users to `:v{installed-aic-version}`, **only a release reaches pinned users**. Template-only merges to `main` refresh `:latest` (an opt-in track), not anyone's pinned image. Lean toward small, frequent patch releases when you fix something users should pick up — there is no "hidden" template change for pinned users.
@@ -478,6 +483,7 @@ cd my-project && aic sync && aic rebuild
 - **Don't push a `v*` tag without bumping `package.json` first.** Use `npm version`, which keeps the two in lockstep. The CI guard will fail the release otherwise.
 - **Don't bump `package.json` as part of a feature PR.** Version bumps are their own commit (created by `npm version`) so the tag points at a clean release commit, not a multi-purpose merge.
 - **Don't force-push or rewrite tags on `main`.** GHCR already received whatever the tag was bound to; rewriting history creates ghost tags and confused users.
+- **Don't tag a release without a `CHANGELOG.md` entry for it.** CI refuses to publish a version that has no `## [X.Y.Z]` section, so you'd just burn a tag. Update the changelog *before* `npm version`.
 
 ## Contributing & security
 

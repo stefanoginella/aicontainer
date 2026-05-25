@@ -31,6 +31,11 @@ agent-facing notes go here, not in `CLAUDE.md`.
 - `package.json` — npm metadata. Its `version` field is the source of truth
   for the GHCR image tag pinned by `aic init`. Do not edit it by hand for a
   release; use `npm version`.
+- `CHANGELOG.md` — hand-maintained ([Keep a Changelog](https://keepachangelog.com/)
+  format). Source of the GitHub Release notes, and a release precondition (see
+  "Releasing").
+- `.githooks/pre-push` — local mirror of the CI changelog gate; opt-in via
+  `git config core.hooksPath .githooks`.
 
 ## How image tag pinning works (read before editing the CLI)
 
@@ -99,6 +104,7 @@ See README.md's "Releasing" section for the user-visible flow. Internal notes:
 
 ```bash
 # From a clean main:
+# 0. Update CHANGELOG.md: rename ## [Unreleased] -> ## [X.Y.Z] - <date> + link
 npm version patch        # or minor / major
 git push --follow-tags   # pushes the bump commit AND the v* tag
 ```
@@ -116,6 +122,23 @@ git push --follow-tags   # pushes the bump commit AND the v* tag
   mint a tag manually that doesn't match. Use `npm version`.
 - Do not run `npm publish` locally. CI uses `--provenance`; manual publishes
   skip the supply-chain attestation users can verify.
+- **`CHANGELOG.md` is hand-maintained, and updating it is a release
+  precondition.** Edit the file before bumping: rename `## [Unreleased]` to
+  `## [X.Y.Z] - <date>` and add the compare link at the bottom. `release.yml`'s
+  "Verify CHANGELOG.md has an entry" step greps for `^## [X.Y.Z]` *before* any
+  GHCR/npm push and fails the whole release if it's missing — so a forgotten
+  changelog burns a tag, it doesn't ship. `.githooks/pre-push` runs the same
+  check locally (opt-in: `git config core.hooksPath .githooks`); it's
+  convenience only — bypassable with `--no-verify` and per-clone, so **CI is
+  the real gate; don't weaken that step.** Keep the `## [X.Y.Z]` heading format:
+  both the gate's grep and the release-notes extraction key on it.
+- **The GitHub Release is automatic.** `release.yml`'s `github-release` job
+  (`needs: [publish]`, so it only runs after GHCR + npm succeed) extracts the
+  tag's `## [X.Y.Z]` section from `CHANGELOG.md` and creates the Release via
+  `gh`. It's idempotent (skips if the Release exists) and falls back to
+  `--generate-notes` if no section is found. This is why the job needs
+  `contents: write` while `publish` stays `contents: read`. Releases v0.0.1–
+  v0.0.7 were created by hand before this existed; v0.0.8+ are automatic.
 
 ## Workflow split rationale (so future edits don't undo it)
 
@@ -163,6 +186,14 @@ Earthly's floating-with-coupling model is the documented anti-pattern.
 - **Don't bump `package.json` in a feature PR.** Version bumps are their own
   commit (created by `npm version`) so the tag points at a clean release
   commit.
+- **Don't land a user-facing change without a `CHANGELOG.md` note.** When you
+  add, change, fix, or remove something a user would notice (an `aic`
+  flag/command, a `template/` behavior, a security fix, a default), add a bullet
+  under `## [Unreleased]` in `CHANGELOG.md` in the *same* commit/PR — under the
+  right Keep-a-Changelog heading (`Added`/`Changed`/`Fixed`/`Removed`). Keep
+  `[Unreleased]` current so release time is just "rename the heading," not
+  "reconstruct history." The changelog is hand-maintained and is a release
+  precondition (CI blocks a version with no section) — see "Releasing".
 - **Don't force-push to `main` or rewrite tags.** GHCR has already received
   whatever the tag was bound to; ghost tags confuse users on pinned versions.
 - **Don't use `git rebase -i` or other interactive git commands** from a
