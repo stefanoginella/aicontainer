@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Project-owned `post-create.project.sh`: drop a script at
+  `.devcontainer/post-create.project.sh` to run your own steps (`lefthook
+  install`, `npm ci`, DB seeding, …) on every container creation. Runs last —
+  as `vscode`, in `/workspace`, after all aic setup — is opt-in by presence,
+  survives `aic sync`, and its non-zero exit is logged without failing
+  container creation.
+
 ## [0.0.7] - 2026-05-25
 
 ### Added

@@ -43,6 +43,11 @@ HOST_SEED_CODEX = Path("/host-seed/codex")       # bind-mounted RO file
 PROJECT_CHOWN_FILE = Path("/workspace/.devcontainer/chown-paths")
 CHOWN_ALLOWED_PREFIXES = ("/workspace/", "/home/vscode/.cache/")
 
+# Optional project-owned post-create extension. Runs last, after all aic-managed
+# setup, as the sync-safe / pull-mode-compatible place for per-project steps
+# (e.g. `lefthook install`). See run_project_hook().
+PROJECT_POST_CREATE = Path("/workspace/.devcontainer/post-create.project.sh")
+
 # Per-project tool selection. Set by `aic init`/`aic sync` as
 # containerEnv.AIC_TOOLS in .devcontainer/devcontainer.json. Empty/unset
 # defaults to both tools (preserves behavior for projects pinned before the
@@ -423,6 +428,33 @@ def verify_socket_proxy() -> None:
         log("warning: curl not available; skipping socket-proxy check")
 
 
+def run_project_hook() -> None:
+    """Run the project-owned post-create extension, if present.
+
+    This is the sync-safe, pull-mode-compatible way for a project to add its
+    own setup steps (`lefthook install`, `pre-commit install`, `npm ci`, ...)
+    without editing the aic-managed devcontainer.json (clobbered every sync)
+    or post-create.py (baked into the image and absent from the repo in pull
+    mode). Opt-in by presence, mirroring chown-paths / firewall-allowlist /
+    Dockerfile.project.
+
+    Runs as `vscode` with cwd /workspace and inherited env — no privilege the
+    in-container agent doesn't already have. The file lives under
+    .devcontainer/, which the PreToolUse hook blocks the in-container agent
+    from writing, so it stays host-only-editable. Invoked via `bash <file>`
+    so the executable bit isn't required. A non-zero exit is logged but does
+    not fail container creation, matching the rest of post-create's defensive
+    degradation; output streams through so the user sees it during `aic up`."""
+    if not PROJECT_POST_CREATE.is_file():
+        return
+    log(f"running project hook {PROJECT_POST_CREATE}")
+    try:
+        subprocess.run(["bash", str(PROJECT_POST_CREATE)], cwd="/workspace", check=True)
+        log("project hook finished")
+    except subprocess.CalledProcessError as e:
+        log(f"warning: project hook exited {e.returncode}; continuing")
+
+
 def main() -> None:
     log(f"starting (tools: {','.join(sorted(ENABLED_TOOLS)) or 'none'})")
     fix_volume_ownership()
@@ -441,6 +473,7 @@ def main() -> None:
     setup_gitconfig()
     lock_gitconfig()
     verify_socket_proxy()
+    run_project_hook()
     log("done")
 
 

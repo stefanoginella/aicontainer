@@ -294,6 +294,20 @@ Like `firewall-allowlist`, this file is opt-in (read only if present), never tou
 
 > Already created the volume root-owned from an earlier run? `aic-chown-volumes` fixes it on the next `aic rebuild`. If it was populated by a partial install, `docker volume rm <name>` once and let it re-init clean.
 
+### Project-specific post-create steps
+
+Need to run something on every container creation — `lefthook install`, `pre-commit install`, `npm ci`, seeding a local DB? Don't edit `devcontainer.json`'s `postCreateCommand` (clobbered every sync) or `post-create.py` (it's baked into the image and isn't even in your repo in pull mode). Drop a **`.devcontainer/post-create.project.sh`**:
+
+```bash
+# .devcontainer/post-create.project.sh — runs as `vscode`, cwd /workspace,
+# after all aic setup, on every container create. Opt-in by presence.
+#!/usr/bin/env bash
+set -euo pipefail
+lefthook install
+```
+
+The base `post-create.py` runs it last, after the AI tools, git config, and volume ownership are all wired up, so your steps see a fully configured environment. Like `firewall-allowlist` and `chown-paths`, it's opt-in (run only if present), never touched by `aic sync`, and read-only inside the container — the [PreToolUse hook](#threat-model) blocks an in-container tool from editing anything under `.devcontainer/`, so the script stays host-only-editable. It's invoked via `bash <file>` (no executable bit needed), runs with no privilege the in-container agent doesn't already have, and a non-zero exit is logged as a warning during `aic up` without failing container creation — its output streams through so you can see what happened.
+
 ## Updating AI tools
 
 ```bash
@@ -306,7 +320,7 @@ The pull-mode compose file pins `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` to w
 
 `:vX.Y.Z` tags are immutable once published — they capture the exact image built at release time. CI separately rebuilds and pushes a floating `ghcr.io/stefanoginella/aicontainer:latest` on a weekly schedule and on every template change merged to main, for users who prefer base-layer freshness over reproducibility; that tag isn't referenced by default, but you can opt in by editing `.devcontainer/docker-compose.yml`. In `--build` mode `aic rebuild` does a no-cache local build that re-runs the `claude` and `codex` installers.
 
-The 2 files (pull mode) or full set (build mode) under `.devcontainer/` are not refreshed by `aic rebuild` on their own — they're created once by `aic init`. If a new template version changes them (e.g. a docker-compose mount), run `aic sync` to re-copy from the installed template into `./.devcontainer/`, then `aic rebuild`. `aic sync` auto-detects pull vs. build mode, preserves the project's `AIC_TOOLS` and `AIC_SHELL` selections (pass `--with` / `--shell` to change them), and leaves project-owned files (`Dockerfile.project`, `firewall-allowlist`, `chown-paths`, `docker-compose.override.yml`) untouched — re-wiring an existing [`docker-compose.override.yml`](#per-project-overrides-that-survive-aic-sync) into `dockerComposeFile` so per-project compose tweaks survive the sync.
+The 2 files (pull mode) or full set (build mode) under `.devcontainer/` are not refreshed by `aic rebuild` on their own — they're created once by `aic init`. If a new template version changes them (e.g. a docker-compose mount), run `aic sync` to re-copy from the installed template into `./.devcontainer/`, then `aic rebuild`. `aic sync` auto-detects pull vs. build mode, preserves the project's `AIC_TOOLS` and `AIC_SHELL` selections (pass `--with` / `--shell` to change them), and leaves project-owned files (`Dockerfile.project`, `firewall-allowlist`, `chown-paths`, `post-create.project.sh`, `docker-compose.override.yml`) untouched — re-wiring an existing [`docker-compose.override.yml`](#per-project-overrides-that-survive-aic-sync) into `dockerComposeFile` so per-project compose tweaks survive the sync.
 
 ## Multi-project model
 

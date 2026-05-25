@@ -156,6 +156,31 @@ jobs:
             echo "OK: gitconfig.local is locked"
           '
 
+      - name: Smoke test - project post-create hook runs (vscode, /workspace, non-fatal)
+        working-directory: /tmp/proj
+        run: |
+          # post-create.project.sh is opt-in by presence and RO-mounted; the
+          # live bind mount reflects this host-side write inside the container.
+          # post-create only runs at create time, so re-invoke it directly to
+          # exercise run_project_hook (mirrors how the chown-paths test re-runs
+          # the wrapper). The hook exits non-zero on purpose: post-create must
+          # warn-and-continue (exit 0), never propagate the failure.
+          trap 'rm -f .devcontainer/post-create.project.sh .aic-hook-evidence' EXIT
+          cat > .devcontainer/post-create.project.sh <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          { echo "user=$(whoami)"; echo "pwd=$(pwd)"; } > /workspace/.aic-hook-evidence
+          exit 3
+          SH
+          devcontainer exec --workspace-folder . bash -lc '
+            rm -f /workspace/.aic-hook-evidence
+            uv run --no-project /opt/post-create.py || { echo "FAIL: post-create propagated the hook non-zero exit"; exit 1; }
+            [ -f /workspace/.aic-hook-evidence ] || { echo "FAIL: project hook did not run"; exit 1; }
+            grep -qx "user=vscode"    /workspace/.aic-hook-evidence || { echo "FAIL: hook not run as vscode"; cat /workspace/.aic-hook-evidence; exit 1; }
+            grep -qx "pwd=/workspace" /workspace/.aic-hook-evidence || { echo "FAIL: hook cwd not /workspace"; cat /workspace/.aic-hook-evidence; exit 1; }
+            echo "OK: project hook ran as vscode in /workspace; non-zero exit was non-fatal"
+          '
+
   publish:
     # Refresh `:latest` and the weekly tag on every push to main that touches
     # template files, the weekly cron, or manual dispatch — never on PRs (forks

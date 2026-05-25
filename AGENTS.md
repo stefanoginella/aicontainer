@@ -70,7 +70,8 @@ wholesale on every `init`/`sync`; only `AIC_TOOLS` / `AIC_SHELL` survive (they
 are re-derived from the old file and re-injected by `patch_devcontainer_json`).
 So users must **not** hand-edit those two files — per-project tweaks go in
 project-owned files that `apply_template()` never touches: `Dockerfile.project`,
-`firewall-allowlist`, `chown-paths`, and `docker-compose.override.yml`.
+`firewall-allowlist`, `chown-paths`, `post-create.project.sh`, and
+`docker-compose.override.yml`.
 
 The override is the sync-safe home for anything that would otherwise live in
 `containerEnv` or the compose service (env, `extra_hosts`, mounts, a
@@ -97,6 +98,21 @@ presence, read-only-inside-container, survives-sync contract as
 `firewall-allowlist`. **The prefix allowlist (`/workspace/`,
 `/home/vscode/.cache/`) is the security boundary — see "Security stance"
 before widening it.**
+
+`post-create.project.sh` is the project-owned extension point for
+`post-create.py` itself. `run_project_hook()` runs
+`.devcontainer/post-create.project.sh` (via `bash <file>`, cwd `/workspace`,
+as `vscode`) **last** in `main()`, after every aic-managed step, so a
+project's `lefthook install` / `npm ci` sees a fully wired environment. Same
+opt-in-by-presence / survives-sync / read-only-inside-container contract as
+the files above. It's the only way to extend post-create in **pull mode**,
+where `post-create.py` is baked into the image and absent from the repo —
+`apply_template()` only copies it in `--build` mode. Security-wise it's lower
+stakes than it looks: it runs unprivileged (no grant the in-container agent
+lacks) and the PreToolUse hook blocks in-container writes to `.devcontainer/`,
+so it stays host-only-editable. Non-zero exit is logged, not fatal — keep that
+defensive degradation; a flaky project step shouldn't block the devcontainer
+from coming up.
 
 ## Releasing
 
