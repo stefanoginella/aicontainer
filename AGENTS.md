@@ -58,6 +58,30 @@ of**: the template (`docker-compose.pull.yml`), the sed pattern in
 `apply_template()` inside `aic`, the README's GHCR references, the
 `aic-firewall` allowlist's `ghcr.io` entry, and both workflows' image tags.
 
+## Project-owned override files (don't break the auto-wire)
+
+`apply_template()` overwrites `devcontainer.json` and `docker-compose.yml`
+wholesale on every `init`/`sync`; only `AIC_TOOLS` / `AIC_SHELL` survive (they
+are re-derived from the old file and re-injected by `patch_devcontainer_json`).
+So users must **not** hand-edit those two files — per-project tweaks go in
+project-owned files that `apply_template()` never touches: `Dockerfile.project`,
+`firewall-allowlist`, and `docker-compose.override.yml`.
+
+The override is the sync-safe home for anything that would otherwise live in
+`containerEnv` or the compose service (env, `extra_hosts`, mounts, a
+`build:` block for `Dockerfile.project`). The mechanism:
+
+1. The template's `devcontainer.json` ships `"dockerComposeFile":
+   ["docker-compose.yml"]` (single entry — the canonical placeholder).
+2. `patch_devcontainer_json()` appends `"docker-compose.override.yml"` to that
+   array **only when `.devcontainer/docker-compose.override.yml` exists**. The
+   append is guarded against double-wiring, so it stays idempotent across syncs.
+
+Keep the template's array single-entry — do not pre-list the override there, or
+`devcontainer up` fails on projects that don't have the file (a missing
+`dockerComposeFile` entry is a hard error). The wiring is opt-in by file
+presence, mirroring how `firewall-allowlist` is read only if present.
+
 ## Releasing
 
 See README.md's "Releasing" section for the user-visible flow. Internal notes:
