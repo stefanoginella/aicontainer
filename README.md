@@ -424,6 +424,13 @@ After `~/.p10k.zsh` exists on the host, the next `aic shell` picks it up automat
 
 **Codex prompts for approval despite auto-approve.** Make sure `~/.codex/config.toml` exists (it's written by `post-create.py`). Re-run `aic rebuild` if the file is missing.
 
+**Codex VS Code sidebar asks for approval, or a command fails with `bwrap: No permissions to create a new namespace` / "The sandbox cannot create a namespace here".** `post-create.py` already forces `~/.codex/config.toml` to `sandbox_mode = danger-full-access` + `approval_policy = never`, so the **main** Codex agent runs without prompts (verify with `cat ~/.codex/config.toml`). Two things can still surface a prompt:
+
+- **Sidebar mode.** The extension's built-in *Full access* preset tries to start Codex's own sandbox. Pick **Custom (config.toml)** in the mode menu so the sidebar uses the forced `danger-full-access` — the only mode that skips the inner sandbox.
+- **Review / sub-agent workflows.** Codex's built-in *Code Review* feature (and spawned sub-agents) currently don't inherit `danger-full-access` and fall back to `workspace-write` ([openai/codex#15305](https://github.com/openai/codex/issues/15305), [#5090](https://github.com/openai/codex/issues/5090)). Inside the container that sandbox can't create a namespace, so Codex asks to run the command *outside the sandbox*. **That's safe to allow here** — "outside the [inner] sandbox" just means "normally inside the container," which is the isolation aicontainer already provides — so click **Yes** (or *Yes, and don't ask again…*). Workaround: run the review as a **normal turn** (e.g. invoke the review skill/command directly in the chat) instead of via Codex's *Code Review* entry point — a main-loop turn inherits `danger-full-access` and won't prompt. It's an upstream Codex bug, not an aicontainer misconfiguration.
+
+Either way, don't "fix" bwrap by granting `SYS_ADMIN` / `seccomp=unconfined` / unprivileged user namespaces — that lets the AI nest a sandbox by weakening the container's own boundary, which is the whole point of running here.
+
 ## Uninstall
 
 ```bash

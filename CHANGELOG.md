@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- README Troubleshooting: document why Codex still surfaces approval / `bwrap:
+  No permissions to create a new namespace` prompts in the VS Code extension
+  even though `~/.codex/config.toml` is forced to `sandbox_mode =
+  danger-full-access`. Two causes: the sidebar's built-in *Full access* preset
+  (fix: pick **Custom (config.toml)**), and an upstream bug where Codex review
+  mode / sub-agents don't inherit `danger-full-access` and fall back to
+  `workspace-write` ([openai/codex#15305](https://github.com/openai/codex/issues/15305)) —
+  safe to allow ("outside the sandbox" = normally inside the container). Also
+  warns against "fixing" bwrap by granting `SYS_ADMIN` / userns.
+
 ## [0.0.9] - 2026-05-25
 
 ### Added
