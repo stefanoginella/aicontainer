@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Spurious Docker Compose warnings on `aic up` when more than one aicontainer
+  project runs on the same host (`volume "aic-shell-history" already exists but
+  was created for project X` / `volume "aic-auth-global" ... was not created by
+  Docker Compose`). The two host-global volumes are now declared `external: true`
+  in the generated `docker-compose.yml`, so Compose adopts them by name instead
+  of claiming per-project ownership. `initializeCommand` now also creates
+  `aic-shell-history` (alongside `aic-auth-global`), since external volumes are
+  never auto-created by Compose. Existing volumes and their contents are reused
+  as-is — run `aic sync` to pick up the change.
+
 ## [0.1.0] - 2026-05-26
 
 ### Added

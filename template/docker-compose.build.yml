@@ -148,11 +148,18 @@ services:
       start_period: 5s
 
 volumes:
-  # Global — shared across all aicontainer projects on this host.
+  # Global — shared across all aicontainer projects on this host. Declared
+  # `external` so Compose adopts each volume by name without stamping it with a
+  # per-project owner label. Without this, the first project to start claims
+  # them and every *other* project warns on `up` ("volume ... was created for
+  # project X" / "was not created by Docker Compose"). external volumes are
+  # never auto-created by Compose, so initializeCommand guarantees both exist.
   aic-shell-history:
     name: aic-shell-history
+    external: true
   aic-auth-global:
     name: aic-auth-global
+    external: true
   # Per-project — scoped to the compose project name, which devcontainer CLI
   # sets to the host workspace folder basename.
   aic-sessions:
