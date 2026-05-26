@@ -516,10 +516,102 @@ cmd_sync () {
   check_dockerfile_project_base "$(read_aic_version)" "$bump_base"
 }
 
+# Best-effort detection of whether the opt-in outbound firewall is currently
+# active inside the running container. Echoes on|off|unknown and never fails.
+# The firewall is enable-only, never auto-applied, and does not survive
+# container recreation, so "off"/"unknown" is the safe (network-open) default.
+# `sudo aic-firewall status` is one of the three scoped-sudo scripts, so this
+# read is allowed; when enabled the OUTPUT chain shows `policy DROP`.
+firewall_live_state () {
+  local project cid devcontainer out
+  project="$(project_name)"
+  cid="$(docker compose -p "$project" -f .devcontainer/docker-compose.yml ps -q devcontainer 2>/dev/null)" || { echo unknown; return; }
+  [ -n "$cid" ] || { echo unknown; return; }
+  [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] || { echo unknown; return; }
+  devcontainer="$(resolve_devcontainer 2>/dev/null)" || { echo unknown; return; }
+  out="$("$devcontainer" exec --workspace-folder . sudo aic-firewall status 2>/dev/null)" || { echo unknown; return; }
+  if grep -q 'policy DROP' <<<"$out"; then echo on; else echo off; fi
+}
+
+# Print the trust boundary for the current project: what the agent can read,
+# write, and reach. Folded into `aic up` (mode=up always reports network OPEN,
+# since a freshly (re)created container never has the opt-in firewall applied)
+# and exposed standalone as `aic preflight` (live-detects the firewall state).
+# The protections are real but otherwise invisible — this makes them auditable.
+# See the README "What crosses the boundary" table for the canonical version.
+print_boundary_summary () {
+  local mode="${1:-preflight}" project net
+  project="$(project_name)"
+  if [ "$mode" = "up" ]; then net="open"; else net="$(firewall_live_state)"; fi
+
+  local b r y dim rst
+  if [ -t 1 ]; then
+    b=$'\033[1m'; r=$'\033[31m'; y=$'\033[33m'; dim=$'\033[2m'; rst=$'\033[0m'
+  else
+    b=""; r=""; y=""; dim=""; rst=""
+  fi
+
+  printf "\n%saic: trust boundary for project '%s'%s\n\n" "$b" "$project" "$rst"
+
+  printf "  %sFilesystem%s\n" "$b" "$rst"
+  printf "    rw   /workspace                               your project (the only writable host path)\n"
+  printf "    ro   ~/.gitconfig ~/.p10k.zsh ~/.zshrc.local    shell look-and-feel\n"
+  printf "    ro   ~/.claude/settings.json ~/.codex/config.toml   AI-config seeds (allowlisted fields only)\n"
+  printf "    ro   .devcontainer/ .git/config .git/hooks     AI cannot rewrite its own sandbox\n"
+  printf "    %s--   host home, ~/.ssh, host credentials: NOT mounted%s\n" "$dim" "$rst"
+
+  printf "\n  %sSecrets%s\n" "$b" "$rst"
+  printf "    .env* reads/writes blocked by the PreToolUse hook (fires even in bypass mode)\n"
+  printf "    %syour project's own .env still lives in /workspace: the hook gates the agent, not the file%s\n" "$dim" "$rst"
+  printf "    git credentials: none forwarded (you auth fresh inside); ~/.gitconfig.local is root-locked\n"
+
+  printf "\n  %sSessions%s\n" "$b" "$rst"
+  if docker volume inspect "${project}_aic-sessions" >/dev/null 2>&1; then
+    printf "    transcripts -> volume %s_aic-sessions  (survives rebuild; cleared only by 'aic destroy')\n" "$project"
+  else
+    printf "    transcripts -> volume %s_aic-sessions  (created on first 'aic up'; survives rebuild)\n" "$project"
+  fi
+
+  printf "\n  %sNetwork%s\n" "$b" "$rst"
+  case "$net" in
+    on)
+      printf "    %s* firewall ENABLED%s  (default DROP + curated allowlist active)\n" "$b" "$rst"
+      ;;
+    unknown)
+      printf "    %s! full outbound by default%s: internet, your LAN, cloud metadata (169.254.169.254)\n" "$y" "$rst"
+      printf "    %s(container not running: live firewall state unknown)%s\n" "$dim" "$rst"
+      printf "    lock down:  aic shell  ->  sudo aic-firewall enable\n"
+      ;;
+    *)
+      printf "    %s! FULL OUTBOUND%s: reaches the internet, your LAN, and cloud metadata (169.254.169.254)\n" "$r" "$rst"
+      printf "    lock down per-project:  aic shell  ->  sudo aic-firewall enable\n"
+      ;;
+  esac
+
+  if [ -f .devcontainer/docker-compose.override.yml ] || [ -f .devcontainer/firewall-allowlist ]; then
+    printf "\n  %sProject overrides%s\n" "$b" "$rst"
+    if [ -f .devcontainer/docker-compose.override.yml ]; then
+      printf "    %s! docker-compose.override.yml present%s: may add mounts/env/hosts; review it.\n" "$y" "$rst"
+    fi
+    if [ -f .devcontainer/firewall-allowlist ]; then
+      local fwcount; fwcount="$(grep -cvE '^[[:space:]]*(#|$)' .devcontainer/firewall-allowlist 2>/dev/null)" || fwcount=0
+      printf "    firewall-allowlist present (%s domains): applied when you enable the firewall.\n" "$fwcount"
+    fi
+  fi
+
+  printf "\n  %sFull model:%s README \"Threat model\" + \"What crosses the boundary\".\n\n" "$dim" "$rst"
+}
+
 cmd_up () {
   require_in_project
   local devcontainer; devcontainer="$(resolve_devcontainer)"
   "$devcontainer" up --workspace-folder . "$@"
+  print_boundary_summary up
+}
+
+cmd_preflight () {
+  require_in_project
+  print_boundary_summary preflight
 }
 
 cmd_rebuild () {
@@ -568,13 +660,56 @@ cmd_down () {
   docker compose -p "$project" -f .devcontainer/docker-compose.yml down
 }
 
+# Best-effort on-disk size of a named volume, e.g. "123.4MB". Echoes "" if the
+# volume doesn't exist or docker can't tell us. Uses `docker system df -v`
+# (docker's own accounting — no helper container, works on a stopped container),
+# matching the volume by exact name. Never blocks the caller.
+volume_size () {
+  local vol="$1"
+  command -v docker >/dev/null 2>&1 || { echo ""; return; }
+  docker volume inspect "$vol" >/dev/null 2>&1 || { echo ""; return; }
+  docker system df -v 2>/dev/null | awk -v v="$vol" '$1==v {print $NF; found=1} END{if(!found) print ""}'
+}
+
 cmd_destroy () {
   require_in_project
-  local project; project="$(project_name)"
-  echo "aic: stopping container and removing per-project volumes for '$project'"
-  echo "aic: (global volumes aic-auth-global and aic-shell-history are PRESERVED)"
+  local project assume_yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -y|--yes) assume_yes=1 ;;
+      *) die "unknown destroy flag: $1 (try --yes)" ;;
+    esac
+    shift
+  done
+  project="$(project_name)"
+  local vol="${project}_aic-sessions" size
+  size="$(volume_size "$vol")"
+
+  echo "aic: 'aic destroy' will remove the container and these PER-PROJECT volumes for '$project':"
+  if [ -n "$size" ]; then
+    echo "       $vol  ($size of Claude/Codex session transcripts)"
+  else
+    echo "       $vol  (Claude/Codex session transcripts)"
+  fi
+  echo "aic: global volumes aic-auth-global and aic-shell-history are PRESERVED."
+  echo "aic: this is irreversible. To stop the container but KEEP history, use 'aic down' instead."
+
+  # Confirm interactively (stdin is a TTY). Non-interactive callers (CI, piped)
+  # proceed unprompted, preserving prior behavior; pass --yes to skip the prompt
+  # explicitly. Default answer is No.
+  if [ "$assume_yes" -ne 1 ] && [ -t 0 ]; then
+    local reply
+    printf "aic: destroy '%s' and delete the above? [y/N] " "$project"
+    IFS= read -r reply || reply=""
+    case "$reply" in
+      y|Y|yes|YES) ;;
+      *) echo "aic: aborted — nothing removed."; return 0 ;;
+    esac
+  fi
+
   docker compose -p "$project" -f .devcontainer/docker-compose.yml down --volumes --remove-orphans
-  docker volume rm "${project}_aic-sessions" 2>/dev/null || true
+  docker volume rm "$vol" 2>/dev/null || true
+  echo "aic: destroyed '$project' (container + per-project volumes removed)."
 }
 
 cmd_upgrade () {
@@ -636,12 +771,19 @@ Usage:
                                 otherwise only warns about the drift; :latest
                                 floats and ARG-templated bases are left alone).
   aic up               Pull/build and start the devcontainer for this project
+                       (prints the trust boundary summary when it comes up)
+  aic preflight        Print this project's trust boundary: what the agent can
+                       read (mounts), what's blocked (.env/secrets), where
+                       sessions persist, and whether outbound network is open
+                       or firewalled. Read-only; also shown after 'aic up'.
   aic shell            Open the configured interactive shell (AIC_SHELL) inside the devcontainer
   aic run CMD ...      Run CMD inside the devcontainer
   aic rebuild          Recreate the container from a fresh image
   aic down             Stop the container (volumes preserved)
-  aic destroy          Stop + remove container + per-project volumes
-                       (global auth + shell history are preserved)
+  aic destroy [--yes]  Stop + remove container + per-project volumes
+                       (global auth + shell history are preserved). Shows the
+                       session-transcript volume size and confirms first (the
+                       removal is irreversible); --yes / -y skips the prompt.
   aic upgrade          Update aic itself (git pull or 'npm update -g')
   aic completion SHELL Emit tab-completion script for bash, zsh, or fish.
                        Install (one-shot, recommended):
@@ -677,7 +819,7 @@ _aic_complete () {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local commands="init sync up shell run rebuild down destroy upgrade completion version help"
+  local commands="init sync up preflight shell run rebuild down destroy upgrade completion version help"
   local tools="claude-code codex claude-code,codex"
   local shells="zsh bash fish"
 
@@ -702,6 +844,9 @@ _aic_complete () {
       esac
       COMPREPLY=( $(compgen -W "--pull --build --bump-base --with --shell" -- "$cur") )
       ;;
+    destroy)
+      COMPREPLY=( $(compgen -W "--yes" -- "$cur") )
+      ;;
     completion)
       [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
       ;;
@@ -724,6 +869,7 @@ _aic () {
     'init:Copy template into ./.devcontainer/'
     'sync:Re-copy template into existing ./.devcontainer/'
     'up:Pull/build and start the devcontainer'
+    'preflight:Print this project'\''s trust boundary (mounts, secrets, network, sessions)'
     'shell:Open an interactive shell inside the devcontainer'
     'run:Run a command inside the devcontainer'
     'rebuild:Recreate the container from a fresh image'
@@ -762,6 +908,9 @@ _aic () {
             '--with[comma-separated tools]:tools:('"${tools[*]}"')' \
             '--shell[interactive shell]:shell:('"${shells[*]}"')'
           ;;
+        destroy)
+          _arguments '(--yes -y)'{--yes,-y}'[skip the confirmation prompt]'
+          ;;
         completion)
           _values 'shell' bash zsh fish
           ;;
@@ -779,13 +928,14 @@ _completion_fish () {
   cat <<'FISH_EOF'
 # aic fish completion. Install with:
 #   aic completion fish > ~/.config/fish/completions/aic.fish
-set -l aic_cmds init sync up shell run rebuild down destroy upgrade completion version help
+set -l aic_cmds init sync up preflight shell run rebuild down destroy upgrade completion version help
 
 for cmd in aic aicontainer
   complete -c $cmd -f
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a init     -d 'Copy template into ./.devcontainer/'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a sync     -d 'Re-copy template into existing ./.devcontainer/'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a up       -d 'Start the devcontainer'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a preflight -d 'Print this project\'s trust boundary (mounts, secrets, network)'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a shell    -d 'Open the configured shell inside the devcontainer'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a run      -d 'Run a command inside the devcontainer'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a rebuild  -d 'Recreate the container from a fresh image'
@@ -807,6 +957,8 @@ for cmd in aic aicontainer
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l with  -d 'comma-separated tools' -xa 'claude-code codex claude-code,codex'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l shell -d 'interactive shell' -xa 'zsh bash fish'
 
+  complete -c $cmd -n "__fish_seen_subcommand_from destroy" -l yes -s y -d 'skip the confirmation prompt'
+
   complete -c $cmd -n "__fish_seen_subcommand_from completion" -a 'bash zsh fish'
 end
 FISH_EOF
@@ -816,6 +968,7 @@ case "${1:-help}" in
   init)    shift; cmd_init "$@" ;;
   sync)    shift; cmd_sync "$@" ;;
   up)      shift; cmd_up "$@" ;;
+  preflight) shift; cmd_preflight "$@" ;;
   shell)   shift; cmd_shell "$@" ;;
   run)     shift; cmd_run "$@" ;;
   rebuild) shift; cmd_rebuild "$@" ;;
