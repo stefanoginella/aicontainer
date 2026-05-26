@@ -15,6 +15,28 @@ A sandboxed devcontainer for running [Claude Code](https://claude.ai/code) and [
 
 > Adjacent work: same shape as the [Trail of Bits devcontainer](https://github.com/trailofbits/claude-code-devcontainer), with Codex added, Docker access turned on by default, and host shell look-and-feel preserved.
 
+## What crosses the boundary
+
+At a glance, what the in-container agent can touch on your host. Run `aic
+preflight` in any project to print this for your *actual* config (it's also
+shown automatically at the end of every `aic up`).
+
+| Surface | Crosses the boundary? |
+|---|---|
+| Project directory | **Yes, read-write** (`/workspace`) — the one writable host path. |
+| `~/.gitconfig`, `~/.p10k.zsh`, `~/.zshrc.local` | Read-only (shell look-and-feel). |
+| `~/.claude/settings.json`, `~/.codex/config.toml` | Read-only **seed** — an allowlisted subset of fields; security-critical ones are force-overridden. See [Config seeding](#config-seeding-from-the-host). |
+| Host home, `~/.ssh`, SSH-agent socket | **No** — not mounted, not forwarded. |
+| Host credentials (API keys, `gh` token, keychain) | **No** — nothing auto-forwarded; you log in once *inside* the container. |
+| Package-manager caches | **No** — container-local volumes, not your host caches. |
+| Clipboard / browser | **No** — nothing bridged. |
+| `.env*` files | Blocked from the agent by the [PreToolUse hook](#whats-in-the-box). Your project's own `.env` is physically in `/workspace`, but the hook stops the agent from reading it — defense-in-depth at the tool layer, not a missing file. |
+| Session transcripts | Persist in a **per-project named volume**, never written back to your host home. See [Multi-project model](#multi-project-model). |
+| **Outbound network** | **Yes — fully open by default.** Reaches the internet, your LAN, and cloud metadata (`169.254.169.254`). Opt in to the [iptables allowlist](#opt-in-network-allowlist) to restrict it. |
+
+The full reasoning is in [Threat model](#threat-model); the network row is the
+one most worth your attention.
+
 ## Prerequisites
 
 - Docker runtime: [Docker Desktop](https://docker.com/products/docker-desktop), [OrbStack](https://orbstack.dev/), or [Colima](https://github.com/abiosoft/colima).
@@ -327,6 +349,14 @@ The 2 files (pull mode) or full set (build mode) under `.devcontainer/` are not 
 
 ## Multi-project model
 
+> **Your transcripts survive.** Session history is a first-class part of the
+> model, not an afterthought. `~/.claude/projects/` and `~/.codex/sessions/`
+> live in a **per-project named volume** (`<proj>_aic-sessions`), so they
+> survive container recreation (`aic rebuild`, `aic up`) without ever being
+> written back to your host home — the host's `~/.claude/projects/` is *not*
+> mounted. The only thing that clears them is `aic destroy` (which says so
+> before it does). So you get isolation *and* durable decision history.
+
 What's shared across all aicontainer projects on your host vs. what's per-project:
 
 | | Scope | Volume |
@@ -399,6 +429,19 @@ Design notes:
 - To turn the firewall off, `aic rebuild` from the host (this script doesn't survive container recreation).
 - `NET_ADMIN` and `NET_RAW` are granted to the container so the script can manage iptables. The caps are confined to the container's network namespace — they do not affect the host's networking.
 
+## FAQ
+
+**Doesn't Claude Code's new auto mode make this unnecessary?** No — they're
+complementary. Claude Code's [auto mode](https://www.anthropic.com/engineering/claude-code-auto-mode)
+runs a classifier that reviews each action before it executes and blocks the
+obviously destructive ones, which is great, but Anthropic themselves recommend
+running it *in an isolated environment* because it "reduces risk but doesn't
+eliminate it." That isolated environment is exactly what aicontainer provides.
+Auto mode also isn't available on every plan yet, and it doesn't cover
+`--dangerously-skip-permissions` or Codex's `--full-auto` / sandbox-off, which
+have no classifier at all. The sandbox is the boundary; auto mode is a smarter
+agent *inside* it. Run both.
+
 ## Troubleshooting
 
 **Docker not running.** Start Docker Desktop / OrbStack / Colima. `aic up` won't even try without it.
@@ -435,7 +478,8 @@ Either way, don't "fix" bwrap by granting `SYS_ADMIN` / `seccomp=unconfined` / u
 
 ```bash
 # In each project:
-aic destroy
+aic destroy          # shows the session-transcript volume size and confirms
+                     # first (irreversible); add --yes to skip the prompt
 
 # Globally:
 docker volume rm aic-auth-global aic-shell-history

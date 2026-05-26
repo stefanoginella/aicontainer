@@ -12,6 +12,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `aic preflight`: prints the project's trust boundary in one screen — what the
+  agent can read (RW/RO mounts), what's blocked (`.env`/secrets, host
+  credentials, SSH), where session transcripts persist, and whether outbound
+  network is open or firewalled. Read-only; live-detects the firewall state
+  when the container is running, reports it as open otherwise. The same summary
+  now prints automatically at the end of `aic up`, including a loud "full
+  outbound by default" network warning (the allowlist is opt-in and resets on
+  rebuild). It also flags a present `docker-compose.override.yml` (which can add
+  mounts/env/hosts) and counts a `firewall-allowlist`. Surfaces protections
+  that were real but previously only discoverable by reading the README.
+
+### Changed
+
+- `aic destroy` now confirms before deleting. It prints the per-project session
+  volume and its on-disk size (best-effort, via `docker system df`), notes the
+  removal is irreversible (and that `aic down` keeps history), and prompts
+  `[y/N]` — months of Claude/Codex transcripts no longer vanish on a single
+  command. Non-interactive callers (CI, piped) still proceed unprompted;
+  `--yes` / `-y` skips the prompt explicitly.
+- README: new "What crosses the boundary" at-a-glance table near the top, an
+  explicit session-survival guarantee in "Multi-project model", and a short FAQ
+  on how the sandbox relates to Claude Code's new auto mode.
+
 ## [0.0.11] - 2026-05-25
 
 ### Changed
