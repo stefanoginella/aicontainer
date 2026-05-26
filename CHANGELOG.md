@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-26
+
 ### Fixed
 
 - Spurious Docker Compose warnings on `aic up` when more than one aicontainer
@@ -207,7 +209,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release: a sandboxed devcontainer for running Claude Code and Codex in
   bypass / auto-approve mode.
 
-[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/stefanoginella/aicontainer/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/stefanoginella/aicontainer/compare/v0.0.11...v0.1.0
 [0.0.11]: https://github.com/stefanoginella/aicontainer/compare/v0.0.10...v0.0.11
 [0.0.10]: https://github.com/stefanoginella/aicontainer/compare/v0.0.9...v0.0.10
