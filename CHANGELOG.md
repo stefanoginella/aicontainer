@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `post-create.project.sh` no longer inherits the ephemeral `VIRTUAL_ENV` that
+  `uv run --no-project /opt/post-create.py` activates for post-create itself.
+  Previously a project hook running `uv sync`/`uv run` warned that
+  `VIRTUAL_ENV=…/uv/environments-v2/post-create-*` "does not match the project
+  environment path `.venv` and will be ignored"; the leaked activation (and its
+  `PATH` bin entry) is now stripped before the hook runs.
+
 ## [0.1.3] - 2026-05-27
 
 ### Changed

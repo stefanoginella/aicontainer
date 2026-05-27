@@ -165,7 +165,7 @@ jobs:
             echo "OK: gitconfig.local + shell rc files are locked"
           '
 
-      - name: Smoke test - project post-create hook runs (vscode, /workspace, non-fatal)
+      - name: Smoke test - project post-create hook runs (vscode, /workspace, non-fatal, clean VIRTUAL_ENV)
         working-directory: /tmp/proj
         run: |
           # post-create.project.sh is opt-in by presence and RO-mounted; the
@@ -173,12 +173,16 @@ jobs:
           # post-create only runs at create time, so re-invoke it directly to
           # exercise run_project_hook (mirrors how the chown-paths test re-runs
           # the wrapper). The hook exits non-zero on purpose: post-create must
-          # warn-and-continue (exit 0), never propagate the failure.
+          # warn-and-continue (exit 0), never propagate the failure. It also
+          # records VIRTUAL_ENV: postCreateCommand is `uv run --no-project`,
+          # which activates an ephemeral env for post-create itself; that must
+          # NOT leak into the hook (else a project `uv sync` warns it doesn't
+          # match .venv), so run_project_hook strips it before running the hook.
           trap 'rm -f .devcontainer/post-create.project.sh .aic-hook-evidence' EXIT
           cat > .devcontainer/post-create.project.sh <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
-          { echo "user=$(whoami)"; echo "pwd=$(pwd)"; } > /workspace/.aic-hook-evidence
+          { echo "user=$(whoami)"; echo "pwd=$(pwd)"; echo "venv=${VIRTUAL_ENV:-}"; } > /workspace/.aic-hook-evidence
           exit 3
           SH
           devcontainer exec --workspace-folder . bash -lc '
@@ -187,7 +191,8 @@ jobs:
             [ -f /workspace/.aic-hook-evidence ] || { echo "FAIL: project hook did not run"; exit 1; }
             grep -qx "user=vscode"    /workspace/.aic-hook-evidence || { echo "FAIL: hook not run as vscode"; cat /workspace/.aic-hook-evidence; exit 1; }
             grep -qx "pwd=/workspace" /workspace/.aic-hook-evidence || { echo "FAIL: hook cwd not /workspace"; cat /workspace/.aic-hook-evidence; exit 1; }
-            echo "OK: project hook ran as vscode in /workspace; non-zero exit was non-fatal"
+            if grep -q "environments-v2/post-create" /workspace/.aic-hook-evidence; then echo "FAIL: hook inherited post-create ephemeral VIRTUAL_ENV"; cat /workspace/.aic-hook-evidence; exit 1; fi
+            echo "OK: project hook ran as vscode in /workspace; non-zero exit non-fatal; no leaked VIRTUAL_ENV"
           '
 
       - name: CLI test - aic sync warns on / bumps a stale Dockerfile.project base

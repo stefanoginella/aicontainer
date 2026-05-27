@@ -474,8 +474,23 @@ def run_project_hook() -> None:
     if not PROJECT_POST_CREATE.is_file():
         return
     log(f"running project hook {PROJECT_POST_CREATE}")
+    # Our postCreateCommand is `uv run --no-project /opt/post-create.py`, which
+    # activates an ephemeral env for THIS script — exporting VIRTUAL_ENV (and
+    # prepending its bin/ to PATH) into the inherited environment. Passed
+    # through, a project hook running `uv sync`/`uv run` would see VIRTUAL_ENV
+    # pointing at .cache/uv/environments-v2/post-create-* instead of the
+    # project's .venv and warn ("does not match the project environment path
+    # `.venv` and will be ignored"). Strip the leaked activation so the hook's
+    # uv resolves the project environment cleanly.
+    env = os.environ.copy()
+    stale_venv = env.pop("VIRTUAL_ENV", None)
+    if stale_venv:
+        stale_bin = f"{stale_venv}/bin"
+        env["PATH"] = os.pathsep.join(
+            p for p in env.get("PATH", "").split(os.pathsep) if p != stale_bin
+        )
     try:
-        subprocess.run(["bash", str(PROJECT_POST_CREATE)], cwd="/workspace", check=True)
+        subprocess.run(["bash", str(PROJECT_POST_CREATE)], cwd="/workspace", env=env, check=True)
         log("project hook finished")
     except subprocess.CalledProcessError as e:
         log(f"warning: project hook exited {e.returncode}; continuing")
