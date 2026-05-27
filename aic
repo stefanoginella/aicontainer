@@ -462,18 +462,41 @@ check_dockerfile_project_base () {
     return 0
   fi
 
-  if [ -n "$do_bump" ]; then
-    # Escape dots for the sed LHS; anchor on the full repo path so the swap
-    # can't hit an unrelated token. Replaces every occurrence (multi-stage
-    # FROMs / an ARG default all reference the same base).
-    local re_repo="${repo//./\\.}" re_tag="${cur_tag//./\\.}" tmp
-    tmp="$(mktemp "${df}.XXXXXX")"
-    sed "s|${re_repo}:${re_tag}|${repo}:${want}|g" "$df" > "$tmp" && mv "$tmp" "$df"
-    echo "aic: bumped Dockerfile.project base → ${repo}:${want} (was :${cur_tag})"
-  else
-    echo "aic: warning: Dockerfile.project pins ${repo}:${cur_tag}, but this aic pins :${want}." >&2
-    echo "aic:          Bump its FROM to match, or re-run 'aic sync --bump-base' to do it for you." >&2
+  # Drift detected. With --bump-base we rewrite in place unconditionally.
+  # Otherwise warn (yellow on a TTY) and, when stdin is interactive, offer to
+  # bump now (default Yes). Non-interactive callers (CI, piped) are never
+  # prompted: they get the command hint and the file is left untouched —
+  # preserving the "plain sync only warns" contract the CLI tests guard.
+  if [ -z "$do_bump" ]; then
+    local y rst
+    if [ -t 2 ]; then y=$'\033[33m'; rst=$'\033[0m'; else y=""; rst=""; fi
+    printf "%saic: warning: Dockerfile.project pins %s:%s, but this aic pins :%s.%s\n" \
+      "$y" "$repo" "$cur_tag" "$want" "$rst" >&2
+
+    if [ -t 0 ]; then
+      local reply
+      printf "%saic: bump its FROM to :%s now? [Y/n]%s " "$y" "$want" "$rst" >&2
+      IFS= read -r reply || reply=""
+      case "$reply" in
+        n|N|no|NO)
+          echo "aic:          left as-is — bump later with 'aic sync --bump-base'." >&2
+          return 0
+          ;;
+      esac
+      do_bump=1
+    else
+      echo "aic:          Bump its FROM to match, or re-run 'aic sync --bump-base' to do it for you." >&2
+      return 0
+    fi
   fi
+
+  # Escape dots for the sed LHS; anchor on the full repo path so the swap
+  # can't hit an unrelated token. Replaces every occurrence (multi-stage
+  # FROMs / an ARG default all reference the same base).
+  local re_repo="${repo//./\\.}" re_tag="${cur_tag//./\\.}" tmp
+  tmp="$(mktemp "${df}.XXXXXX")"
+  sed "s|${re_repo}:${re_tag}|${repo}:${want}|g" "$df" > "$tmp" && mv "$tmp" "$df"
+  echo "aic: bumped Dockerfile.project base → ${repo}:${want} (was :${cur_tag})"
 }
 
 cmd_sync () {
@@ -781,9 +804,11 @@ Usage:
                        Review with 'git diff' afterward.
                        --bump-base: if Dockerfile.project pins an explicit
                                 FROM ghcr.io/stefanoginella/aicontainer:vX.Y.Z,
-                                rewrite that tag to this aic's version (sync
-                                otherwise only warns about the drift; :latest
-                                floats and ARG-templated bases are left alone).
+                                rewrite that tag to this aic's version without
+                                prompting. (Without the flag, an interactive
+                                sync warns about the drift and offers to bump;
+                                non-interactive syncs just warn. :latest floats
+                                and ARG-templated bases are left alone.)
   aic up               Pull/build and start the devcontainer for this project
                        (prints the trust boundary summary when it comes up)
   aic preflight        Print this project's trust boundary: what the agent can
