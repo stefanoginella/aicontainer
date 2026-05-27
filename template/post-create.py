@@ -362,16 +362,22 @@ def load_host_codex_config() -> dict:
 
 def setup_codex() -> None:
     """Configure Codex: seed allowlisted host config, then force
-    approval-policy=never, sandbox=danger-full-access, and our PreToolUse
-    hook. ~/.codex is itself the aic-auth-global:codex subpath mount;
-    auth.json persists inside it (same atomic-rename reasoning as Claude)."""
+    approval-policy=never and sandbox=danger-full-access. ~/.codex is itself the
+    aic-auth-global:codex subpath mount; auth.json persists inside it (same
+    atomic-rename reasoning as Claude).
+
+    The shared PreToolUse hook is NOT wired here: Codex command hooks are
+    trust-gated, so a hook in this (non-managed) config.toml would be skipped
+    until interactively trusted via `/hooks`. It's instead baked as a *managed*
+    hook in /etc/codex/requirements.toml (see template/Dockerfile), which Codex
+    auto-trusts and the in-container user can't disable. A host `[hooks]` table
+    is already dropped by load_host_codex_config()'s allowlist."""
     codex_dir = HOME / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = load_host_codex_config()
     cfg["approval_policy"] = "never"
     cfg["sandbox_mode"] = "danger-full-access"
-    cfg["hooks"] = {"pre_tool_use": "/etc/aic/hooks/pre-tool-use.sh"}
 
     config_toml = codex_dir / "config.toml"
     config_toml.write_text(tomli_w.dumps(cfg))
@@ -414,16 +420,18 @@ def setup_gitconfig() -> None:
     log(f"wrote {local}")
 
 
-def lock_gitconfig() -> None:
-    """Hand ~/.gitconfig.local to root via aic-lock-gitconfig so a compromised
-    tool session cannot inject credential.helper / core.sshCommand to capture
-    tokens during in-container git/gh use."""
-    local = HOME / ".gitconfig.local"
-    if not local.exists() or local.stat().st_uid == 0:
-        return
+def lock_config() -> None:
+    """Hand the self-protection files to root via aic-lock-gitconfig (root:root
+    0444): ~/.gitconfig.local (so a compromised tool session can't inject
+    credential.helper / core.sshCommand to capture tokens) and the baked
+    login-shell rc files ~/.zshrc / ~/.bashrc / fish config (so it can't plant a
+    payload that runs on the next `aic shell`). The wrapper locks a hardcoded
+    list and skips absent targets, so we invoke it unconditionally each
+    creation — the baked rc files ship owned by `vscode` and need re-locking on
+    every rebuild, independent of the (freshly written) gitconfig.local."""
     try:
         subprocess.run(["sudo", "/usr/local/bin/aic-lock-gitconfig"], check=True)
-        log("locked ~/.gitconfig.local")
+        log("locked ~/.gitconfig.local + baked shell rc files")
     except subprocess.CalledProcessError as e:
         log(f"warning: aic-lock-gitconfig failed: {e}")
 
@@ -490,7 +498,7 @@ def main() -> None:
     # SEMGREP_SETTINGS_FILE (devcontainer.json), inside the same persistent
     # volume — no leaf-file symlink to be clobbered by its atomic-rename writes.
     setup_gitconfig()
-    lock_gitconfig()
+    lock_config()
     verify_socket_proxy()
     run_project_hook()
     log("done")

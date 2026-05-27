@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
-# aic-lock-gitconfig — make ~/.gitconfig.local root-owned and read-only
+# aic-lock-gitconfig — root-own + read-only a fixed set of self-protection files
 # =============================================================================
-# Called once at the end of post-create.py. The file is the container-local
-# git config pointed at by GIT_CONFIG_GLOBAL. Without this lock, a compromised
-# tool session could append `[credential] helper = !cat > /tmp/x` or
-# `[core] sshCommand = ...` to capture tokens during in-container `gh` /
-# `git push` flows.
+# Called once at the end of post-create.py (via the scoped NOPASSWD sudoers
+# entry). Locks each of a HARDCODED list of files to root:root 0444:
+#
+#   1. ~/.gitconfig.local — the container-local git config pointed at by
+#      GIT_CONFIG_GLOBAL. Without the lock a compromised tool session could
+#      append `[credential] helper = !cat > /tmp/x` or `[core] sshCommand = ...`
+#      to capture tokens during in-container `gh` / `git push` flows.
+#   2. The baked login-shell rc files (~/.zshrc, ~/.bashrc, fish config). These
+#      ship in the image owned by `vscode`, so without this lock a tool session
+#      could append a payload that runs on the next `aic shell` (persistence
+#      beyond the agent turn). Locking them makes the PreToolUse self-protection
+#      check a real filesystem boundary rather than an advisory one. Users layer
+#      their own config via the *.local includes (left writable on purpose).
+#
+# Targets are hardcoded (never argv), so the NOPASSWD grant can only lock these
+# specific paths — it cannot be turned into an arbitrary chown/chmod.
 # =============================================================================
 set -euo pipefail
 
@@ -15,7 +26,13 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-f=/home/vscode/.gitconfig.local
-[ -f "$f" ] || { echo "aic-lock-gitconfig: $f not found" >&2; exit 1; }
-chown root:root "$f"
-chmod 0444 "$f"
+for f in /home/vscode/.gitconfig.local \
+         /home/vscode/.zshrc \
+         /home/vscode/.bashrc \
+         /home/vscode/.config/fish/config.fish; do
+  # Skip absent targets: which shell rc files exist depends on AIC_SHELL, and
+  # locking is best-effort per file (post-create treats a failure as non-fatal).
+  [ -f "$f" ] || continue
+  chown root:root "$f"
+  chmod 0444 "$f"
+done

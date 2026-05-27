@@ -146,11 +146,11 @@ You can still use `aic` from a separate terminal at the same time — `aic rebui
 **Security-driven defaults** (don't change casually — many are the actual sandbox boundary):
 
 - **npm hardening**: `NPM_CONFIG_IGNORE_SCRIPTS=true` blocks `postinstall` RCE, the most common supply-chain vector. `NPM_CONFIG_MIN_RELEASE_AGE=1` rejects any package published in the last 24h (mitigates fast-moving malicious releases — npm interprets the value in days). `audit=true`, `fund=false`.
-- **Locked git config**: `~/.gitconfig.local` is chowned `root:root 0444` after first run, so a compromised AI session can't inject `credential.helper` or `core.sshCommand` to capture tokens during in-container `git push` / `gh` flows. Host `~/.gitconfig` is included read-only.
+- **Locked config + shell rc**: `~/.gitconfig.local` is chowned `root:root 0444` after first run, so a compromised AI session can't inject `credential.helper` or `core.sshCommand` to capture tokens during in-container `git push` / `gh` flows. The baked login-shell rc files (`~/.zshrc`, `~/.bashrc`, fish config) are root-locked the same way, so a session can't plant a payload that runs on the next `aic shell`. Host `~/.gitconfig` is included read-only.
 - **PreToolUse hook** (Claude + Codex, fires even with bypass/auto-approve on) blocks:
-  - reads/writes of `.env*` files (allowing `.env.example|.sample|.template|.defaults`),
-  - `curl|sh` / `wget|bash` patterns in Bash,
-  - writes to `/etc/aic/`, `~/.zshrc`, `/workspace/.devcontainer/` (defense-in-depth on top of the RO mounts).
+  - reads of `.env*` files — via `Read`/`Edit`/`Write`/`Grep`/`Glob` and in Bash commands (allowing `.env.example|.sample|.template|.defaults`),
+  - `curl|sh` / `wget|bash` fetch-and-execute in Bash (including `| sudo bash`, `| tee | sh`, and `bash -c "$(curl …)"` variants),
+  - writes to `/etc/aic/`, `/workspace/.devcontainer/`, and the login-shell rc files (`~/.zshrc` / `~/.bashrc` / fish config + their `.local` includes) — defense-in-depth on top of the RO mounts and root-locks above.
 - **Forced AI sandbox settings** — host config can't loosen these: Claude `permissions.defaultMode=bypassPermissions` + hook registration, Codex `approval_policy=never` + `sandbox_mode=danger-full-access` + hook registration. See [Config seeding from the host](#config-seeding-from-the-host) for the full allowlist/dropped fields.
 - **Container global gitignore** covers `.env*`, `.claude/`, `.codex/`, `node_modules/`, `.venv/`, `__pycache__/`, `.DS_Store` — fewer ways to accidentally commit a secret.
 - **No host credential forwarding**: no SSH-agent socket, no `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` passthrough, no host `gh` token. You log in once *inside* the container; tokens persist in `aic-auth-global`.
@@ -385,7 +385,8 @@ On first container creation, `post-create.py` reads `~/.claude/settings.json` an
 | Claude `hooks` | the aicontainer PreToolUse hook |
 | Codex `approval_policy` | `never` |
 | Codex `sandbox_mode` | `danger-full-access` |
-| Codex `[hooks]` | the aicontainer pre_tool_use hook |
+
+Claude's PreToolUse hook is forced into `~/.claude/settings.json`. Codex's isn't seeded into `config.toml` (a hook there is *untrusted* and skipped in autonomous mode) — it's baked as a **managed** hook in `/etc/codex/requirements.toml`, which Codex auto-trusts and the in-container user can't disable.
 
 Seeded (when present on the host): Claude `env`, `statusLine`, `enabledPlugins`, `mcpServers` / `enabledMcpjsonServers`, `theme`, `model`, `effortLevel`, `editorMode`, `verbose`, `fileCheckpointingEnabled`, `outputStyle`, plus a handful of other preference fields. Codex `model`, `model_reasoning_effort`, `personality`, `[features]`, `[notice]`, `[projects.*]`, `[mcp_servers.*]`.
 

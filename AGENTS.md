@@ -233,8 +233,9 @@ Earthly's floating-with-coupling model is the documented anti-pattern.
 
 - **Don't weaken smoke tests** in either workflow's `smoke` job. They cover
   real security guarantees: `EXEC=0` on the socket-proxy, the `.env`
-  PreToolUse hook block, scoped sudo (no arbitrary `chown`), the
-  `gitconfig.local` root-444 lock, and the npm-quarantine sanity check
+  PreToolUse hook block, scoped sudo (no arbitrary `chown`), the self-protection
+  root-444 lock (`gitconfig.local` + the baked shell rc files), and the
+  npm-quarantine sanity check
   (`NPM_CONFIG_MIN_RELEASE_AGE` ≤ 30 days, so npx-based MCPs stay
   installable). If a test fails legitimately, fix the regression, not the
   assertion.
@@ -278,14 +279,30 @@ more restrictive one. The following files warrant extra care — any change
 should be reviewed for security regressions:
 
 - `template/Dockerfile` — particularly the sudoers, USER, and capability
-  bits. Adding a new `NOPASSWD` entry is a load-bearing decision.
+  bits. Adding a new `NOPASSWD` entry is a load-bearing decision. It also bakes
+  `/etc/codex/requirements.toml` (root-owned), the **managed** Codex hook that
+  wires `pre-tool-use.sh` into Codex — see the `pre-tool-use.sh` note below.
 - `template/aic-firewall` — outbound iptables allowlist. Adding hosts here
-  expands what an in-container AI can reach.
+  expands what an in-container AI can reach. `cmd_enable` resolves into a
+  staging ipset and `ipset swap`s it in, and **never sets `policy ACCEPT`** —
+  this is what keeps re-enabling strengthen-only (it must never open a window or
+  fail open on a 0-IP resolution). Don't reintroduce a flush-to-ACCEPT.
 - `template/hooks/pre-tool-use.sh` — blocks reads of `.env` and other
-  sensitive paths. Loosening the deny list weakens the model.
+  sensitive paths. Loosening the deny list (the `is_blocked_env` /
+  `bash_touches_env` / `is_curl_pipe_sh` / `is_protected_path` matchers, or the
+  `Bash|Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob` matcher in
+  `claude-settings.json`) weakens the model. The script is shared by Claude and
+  Codex: Claude registers it via `~/.claude/settings.json` (post-create), Codex
+  via the **managed** `/etc/codex/requirements.toml` baked in the Dockerfile.
+  Codex command hooks defined in `~/.codex/config.toml` are non-managed →
+  untrusted → silently skipped in autonomous mode, so **don't** move it back
+  there (a prior version did, and the hook never ran for Codex).
 - `template/aic-chown-volumes`, `template/aic-lock-gitconfig` — the only
   scripts allowed via `NOPASSWD` sudo. Touching them changes the privileged
-  surface. `aic-chown-volumes` reads project-supplied targets from
+  surface. `aic-lock-gitconfig` locks a hardcoded list to `root:root 0444`:
+  `~/.gitconfig.local` **and** the baked login-shell rc files (`~/.zshrc`,
+  `~/.bashrc`, fish config), so a tool session can't plant persistence that runs
+  on the next `aic shell`. Keep the target list hardcoded (never argv). `aic-chown-volumes` reads project-supplied targets from
   `.devcontainer/chown-paths`, **never from argv** — that's what stops the
   `NOPASSWD` grant from becoming an arbitrary `sudo aic-chown-volumes
   /etc/sudoers.d`. The hardcoded prefix allowlist (`/workspace/`,

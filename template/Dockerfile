@@ -129,6 +129,39 @@ RUN chmod 755 /etc/aic/hooks /etc/aic /etc/aic/hooks/*.sh \
     && chown -R root:root /etc/aic
 
 # ---------------------------------------------------------------------------
+# Codex managed hook (wires the shared PreToolUse guardrail into Codex)
+# ---------------------------------------------------------------------------
+# Codex command hooks are trust-gated: a hook defined in ~/.codex/config.toml is
+# "non-managed", starts untrusted, and is SKIPPED until reviewed via `/hooks` —
+# which never happens in autonomous bypass mode. The only way the hook actually
+# fires for Codex is as a "managed" hook in the system requirements.toml
+# (/etc/codex/requirements.toml), which is auto-trusted and can't be disabled by
+# the in-container user. `[features].hooks = true` enforces the hook capability.
+# Codex's event JSON (.tool_name / .tool_input.command, exit 2 = block) matches
+# what pre-tool-use.sh already parses; we match the Bash tool, through which
+# Codex runs shell and reads files (`cat`), so the .env-read and curl|sh checks
+# apply. Root-owned + 0644 so the agent can't edit or disable it.
+# (NOTE: a prior version wrote a `[hooks] pre_tool_use = "..."` scalar into
+# config.toml — wrong schema AND non-managed, so it never ran for Codex.)
+RUN mkdir -p /etc/codex && cat > /etc/codex/requirements.toml <<'CODEX_REQ_EOF'
+# Managed by aicontainer — baked into the image, do not edit. Forces the shared
+# PreToolUse guardrail to run for Codex without an interactive trust prompt.
+[features]
+hooks = true
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/etc/aic/hooks/pre-tool-use.sh"
+timeout = 30
+statusMessage = "aicontainer guardrail"
+CODEX_REQ_EOF
+RUN chmod 0644 /etc/codex/requirements.toml \
+    && chown root:root /etc/codex/requirements.toml
+
+# ---------------------------------------------------------------------------
 # Lifecycle script
 # ---------------------------------------------------------------------------
 COPY post-create.py /opt/post-create.py

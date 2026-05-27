@@ -12,6 +12,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- PreToolUse hook now also matches the **`Grep` and `Glob` tools**. A `Grep`
+  with `output_mode=content` aimed at `.env` could previously dump the file
+  without the Read/Edit/Write `.env` block ever firing, because the hook wasn't
+  invoked for those tools.
+- PreToolUse hook **`.env` detection in Bash commands** now treats quotes and
+  glob characters as filename boundaries, closing bypasses like `cat ".env"`,
+  `cat .env*`, and `cat *.env` that evaded the secret-read block.
+- PreToolUse hook **`curl|sh` detection** now catches interposed wrappers
+  (`| sudo bash`, `| env X=1 bash`, `| xargs`), intermediate pipes
+  (`| tee … | sh`), more shells (`dash`, `ash`, `ksh`, `/usr/bin/sh`), and
+  command/process substitution (`bash -c "$(curl …)"`, `. <(curl …)`).
+- **Login-shell rc files are now root-locked.** `~/.zshrc`, `~/.bashrc`, and the
+  fish config shipped writable by `vscode`, so a tool session could append a
+  payload that runs on the next `aic shell`. `aic-lock-gitconfig` (run by
+  post-create) now locks them to `root:root 0444` alongside `~/.gitconfig.local`,
+  and the hook's self-protection list covers them plus their `.local` includes
+  (which stay user-writable for layering your own config). Pick up the change
+  with `aic sync` (then rebuild).
+- **The PreToolUse guardrail now actually runs for Codex.** It was wired via a
+  `[hooks] pre_tool_use = "…"` entry in `~/.codex/config.toml` — the wrong schema
+  (Codex expects `[[hooks.PreToolUse]]` tables) *and* a non-managed hook, which
+  Codex leaves untrusted and skips until reviewed via `/hooks` (never, in
+  autonomous mode). It is now baked as a **managed** hook in
+  `/etc/codex/requirements.toml` (auto-trusted, not user-disablable) matching the
+  `Bash` tool, so the `.env`-read and `curl|sh` checks apply to Codex too.
+
+### Changed
+
+- The PreToolUse hook parses its event JSON in a single `jq` pass (was 2–3 `jq`
+  forks plus a `basename` fork per call) — it runs on every tool call. No
+  behavior change; NUL-separated fields preserve multi-line command text.
+
+### Fixed
+
+- `aic down`, `aic destroy`, and `aic preflight` targeted the wrong Docker
+  Compose project. `project_name()` produced `<folder>_` (a stray trailing
+  underscore, and no `_devcontainer` suffix) instead of the
+  `<folder>_devcontainer` name that `devcontainer up` / VS Code actually create
+  — so `aic down` left the container running and `aic destroy` printed success
+  while leaving the container and its `*_aic-sessions` transcript volume intact.
+  The computed name now matches the real stack.
+- `rebuild.yml` no longer skips compose-template changes: its push/PR `paths:`
+  filter referenced a nonexistent `template/docker-compose.yml`, so edits to
+  `docker-compose.{pull,build}.yml` (and `template/.zshrc`) never triggered the
+  weekly-track image rebuild or the PR smoke tests. It now globs `template/**`.
+- `sudo aic-firewall enable` no longer drops the firewall open while
+  (re-)applying. It used to flush the rules to `policy ACCEPT` and re-resolve the
+  ~17 allowlist domains wide-open on every run, and a transient 0-IP resolution
+  left the firewall fully open (the `exit 1` ran with the policy already
+  lowered). It now resolves into a staging ipset and swaps it in without ever
+  setting `policy ACCEPT`, so re-enabling can only re-apply or strengthen — never
+  transiently or permanently weaken — matching the documented invariant.
+
 ## [0.1.1] - 2026-05-26
 
 ### Fixed

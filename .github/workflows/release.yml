@@ -143,18 +143,26 @@ jobs:
             echo "OK: valid /workspace chown-paths entry accepted"
           '
 
-      - name: Smoke test - gitconfig.local is root-owned 0444
+      - name: Smoke test - self-protection files are root-owned 0444
         working-directory: /tmp/proj
         run: |
+          # gitconfig.local + the baked login-shell rc files are all root-locked
+          # by aic-lock-gitconfig so a tool session can't capture git creds or
+          # plant a payload that runs on the next `aic shell`.
           devcontainer exec --workspace-folder . bash -lc '
-            perms=$(stat -c "%U %a" /home/vscode/.gitconfig.local)
-            echo "gitconfig.local perms: $perms"
-            [ "$perms" = "root 444" ] || { echo "FAIL: expected root 444"; exit 1; }
-            if echo "x" >> /home/vscode/.gitconfig.local 2>/dev/null; then
-              echo "FAIL: vscode can still write to gitconfig.local"
-              exit 1
-            fi
-            echo "OK: gitconfig.local is locked"
+            for f in /home/vscode/.gitconfig.local \
+                     /home/vscode/.zshrc \
+                     /home/vscode/.bashrc \
+                     /home/vscode/.config/fish/config.fish; do
+              [ -e "$f" ] || { echo "FAIL: $f missing (should be locked)"; exit 1; }
+              perms=$(stat -c "%U %a" "$f")
+              echo "$f perms: $perms"
+              [ "$perms" = "root 444" ] || { echo "FAIL: $f expected root 444, got $perms"; exit 1; }
+              if echo "x" >> "$f" 2>/dev/null; then
+                echo "FAIL: vscode can still write to $f"; exit 1
+              fi
+            done
+            echo "OK: gitconfig.local + shell rc files are locked"
           '
 
       - name: Smoke test - project post-create hook runs (vscode, /workspace, non-fatal)

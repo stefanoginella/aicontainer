@@ -55,9 +55,9 @@ DEFAULT_ALLOWLIST=(
 EXTRA_FILE="/workspace/.devcontainer/firewall-allowlist"
 
 resolve_into_ipset() {
-  local domain="$1" ip
+  local set="$1" domain="$2" ip
   while IFS= read -r ip; do
-    [ -n "$ip" ] && ipset add aic-allowed "$ip/32" -exist
+    [ -n "$ip" ] && ipset add "$set" "$ip/32" -exist
   done < <(
     {
       dig +short A "$domain" 2>/dev/null || true
@@ -69,41 +69,54 @@ resolve_into_ipset() {
 cmd_enable() {
   echo "==> aic-firewall: building allowlist..."
 
-  # Snapshot the upstream DNS resolvers BEFORE we flip the default policy,
-  # so we can keep DNS reachable after DROP is in effect.
+  # Snapshot the upstream DNS resolvers up front, so we can keep DNS reachable
+  # after DROP is in effect.
   local resolvers
   resolvers=$(awk '/^nameserver/ {print $2}' /etc/resolv.conf | sort -u)
 
-  # Reset to permissive while we resolve domains.
-  iptables -F OUTPUT
-  iptables -F INPUT
-  iptables -P OUTPUT ACCEPT
-  iptables -P INPUT ACCEPT
+  # Resolve the whole allowlist into a STAGING ipset *before* touching the live
+  # policy. The previous version flushed OUTPUT and set `policy ACCEPT` first,
+  # which (a) blew a multi-second wide-open hole on every re-enable while it
+  # re-resolved ~17 domains and (b) left the firewall fully open if resolution
+  # yielded 0 IPs and the script `exit 1`d under `set -e`. Staging keeps the
+  # documented invariant true: enabling can only ever re-apply or strengthen,
+  # never transiently or permanently weaken.
+  ipset create aic-allowed       hash:net -exist     # the live set the rules match
+  ipset create aic-allowed-stage hash:net -exist
+  ipset flush  aic-allowed-stage
 
-  ipset create aic-allowed hash:net -exist
-  ipset flush aic-allowed
-
+  local d line
   for d in "${DEFAULT_ALLOWLIST[@]}"; do
-    resolve_into_ipset "$d"
+    resolve_into_ipset aic-allowed-stage "$d"
   done
 
   if [ -f "$EXTRA_FILE" ]; then
     echo "==> aic-firewall: loading extras from $EXTRA_FILE"
     while IFS= read -r line || [ -n "$line" ]; do
       d=$(sed 's/#.*//' <<<"$line" | xargs)
-      [ -n "$d" ] && resolve_into_ipset "$d"
+      [ -n "$d" ] && resolve_into_ipset aic-allowed-stage "$d"
     done < "$EXTRA_FILE"
   fi
 
   local count
-  count=$(ipset list aic-allowed | awk '/Number of entries:/ {print $4}')
+  count=$(ipset list aic-allowed-stage | awk '/Number of entries:/ {print $4}')
   if ! [[ "${count:-0}" =~ ^[0-9]+$ ]] || [ "${count:-0}" -eq 0 ]; then
-    echo "aic-firewall: ERROR — resolved 0 IPs; refusing to enable DROP policy." >&2
+    ipset destroy aic-allowed-stage 2>/dev/null || true
+    echo "aic-firewall: ERROR — resolved 0 IPs; leaving the current policy unchanged." >&2
     exit 1
   fi
   echo "==> aic-firewall: $count IPs in allowlist"
 
-  # Build the rules.
+  # Promote the staged set into the live set atomically — the OUTPUT rule
+  # matches `aic-allowed` by name, so swapping contents needs no rule churn.
+  ipset swap aic-allowed-stage aic-allowed
+  ipset destroy aic-allowed-stage 2>/dev/null || true
+
+  # Build the rules. We add the allow rules first and set `policy DROP` last,
+  # and we never set `policy ACCEPT` — so a re-enable (policy already DROP)
+  # stays closed throughout (flushing rules doesn't reset the policy), and a
+  # first enable is only briefly open while ~5 rules are added synchronously.
+  local r
   iptables -N AIC_OUT 2>/dev/null || iptables -F AIC_OUT
   iptables -A AIC_OUT -m set --match-set aic-allowed dst -j ACCEPT
   iptables -A AIC_OUT -j RETURN

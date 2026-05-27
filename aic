@@ -38,8 +38,22 @@ resolve_devcontainer () {
   fi
 }
 
+# Compose project name for this project's stack, matching what `devcontainer up`
+# (and VS Code's "Reopen in Container") actually create: the lowercased workspace
+# folder basename with characters outside [a-z0-9_-] *removed*, plus a
+# `_devcontainer` suffix. Used by down/destroy/preflight to target the right
+# stack and its `<project>_aic-sessions` volume.
+#
+# Two historical bugs this avoids: piping basename's trailing newline through
+# `tr -c 'a-z0-9_-' '_'` turned the newline into a spurious trailing `_`, and the
+# `_devcontainer` suffix was missing entirely — so `docker compose -p` and the
+# volume name never matched the real stack, silently no-opping `aic down`/`destroy`.
 project_name () {
-  basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_'
+  local base
+  base="$(basename -- "$PWD")"
+  # toLowerCase().replace(/[^a-z0-9_-]/g, '') — strip, don't substitute.
+  base="$(printf '%s' "$base" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -dc 'a-z0-9_-')"
+  printf '%s_devcontainer\n' "$base"
 }
 
 require_in_project () {

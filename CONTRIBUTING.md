@@ -38,7 +38,7 @@ If you'd rather not symlink `aic` onto your PATH, invoke it directly: `AIC_HOME=
 
 1. Open an issue first if the change is more than a couple of lines — easier to align before code is written.
 2. Branch off `main`. Keep PRs focused — one logical change per PR.
-3. CI must be green. The `smoke` job verifies `claude`, `codex`, `gh`, `uv` resolve, the socket-proxy is reachable, `EXEC` returns 403, the PreToolUse hook blocks `.env`, the scoped sudoers entry can't be turned into an arbitrary `chown`, and `~/.gitconfig.local` is root-owned `0444`.
+3. CI must be green. The `smoke` job verifies `claude`, `codex`, `gh`, `uv` resolve, the socket-proxy is reachable, `EXEC` returns 403, the PreToolUse hook blocks `.env`, the scoped sudoers entry can't be turned into an arbitrary `chown`, and the self-protection files (`~/.gitconfig.local` + the baked shell rc files) are root-owned `0444`.
 4. Update the README if you change observable behavior (commands, defaults, mounted paths, capabilities, allowlist).
 
 ## What we will not merge
