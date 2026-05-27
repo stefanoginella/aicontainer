@@ -563,4 +563,4 @@ Security findings: please **don't** open a public issue. Use GitHub's [private s
 
 ## License
 
-[MIT](./LICENSE).
+[MIT](./LICENSE) © 2026 Stefano Ginella
