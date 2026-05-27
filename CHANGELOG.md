@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `aic sync`'s stale-`Dockerfile.project`-base warning is now printed in yellow
+  (on a TTY) and, when run interactively, offers to bump the `FROM` tag in place
+  with a `[Y/n]` prompt (default Yes). Declining — or running non-interactively
+  (CI, piped) — leaves the file untouched and points at `aic sync --bump-base`,
+  preserving the previous behavior.
+
 ## [0.1.2] - 2026-05-27
 
 ### Security
