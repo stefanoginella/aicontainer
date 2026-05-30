@@ -154,7 +154,25 @@ cut/trigger a release, do exactly this:**
    holds copies of `template/`; skipping this leaves it drifted.
 5. **Cut it:** `npm version <bump> && git push --follow-tags`.
 
-`npm version` runs two lifecycle scripts (see `package.json`):
+> **Gotcha — `npm version` silently skips changelog promotion when npm has
+> `ignore-scripts=true`.** The aicontainer sandbox image sets `npm config set
+> ignore-scripts true` (hardening: don't run arbitrary package install
+> scripts). That config *also* suppresses the `preversion`/`version` lifecycle
+> hooks below, so `npm version` bumps `package.json` but **never runs
+> `promote-changelog.mjs`** — the bump commit ships with `package.json` only and
+> no `## [X.Y.Z]` section, which then fails the `.githooks/pre-push` gate and the
+> `release.yml` CHANGELOG check. Check with `npm config get ignore-scripts`. If
+> it's `true`, cut the release with scripts enabled for that one command:
+> `npm version <bump> --ignore-scripts=false && git push --follow-tags`. (Don't
+> globally `npm config set ignore-scripts false` — that weakens the image
+> default.) If you've already run a plain `npm version` and the bump commit is
+> still **local** (not pushed), recover without redoing it: run `node
+> scripts/promote-changelog.mjs` by hand, `git commit --amend` to fold the
+> promoted `CHANGELOG.md` into the bump commit, `git tag -f -a vX.Y.Z -m X.Y.Z`
+> to move the (annotated) tag, then push — this is what was done for v0.1.4.
+
+`npm version` runs two lifecycle scripts (see `package.json`) — **unless
+`ignore-scripts=true` suppresses them; see the gotcha above:**
 
 - `preversion` → `promote-changelog.mjs --check`: aborts the bump *before*
   package.json is touched if `[Unreleased]` is empty — you can't release
@@ -210,6 +228,26 @@ Internal notes:
   `contents: write` while `publish` stays `contents: read`. Releases v0.0.1–
   v0.0.7 were created by hand before this existed; v0.0.8+ are automatic.
 
+## CHANGELOG entry style
+
+`[Unreleased]` bullets are written to be skimmed. Apply this to every new entry
+(the conventions `auto-bmad` uses, adopted here):
+
+- **One change = one bullet** under one heading. Never bundle — if you're
+  writing "three reinforcing fixes," that's three bullets.
+- **Bold headline first, ≤ ~12 words, stating the user-visible effect**
+  ("`aic sync` no longer clobbers `Dockerfile.project`"), not the internal
+  mechanism.
+- **At most ~2 sentences of detail** after the headline — the one fact a reader
+  needs. No "Previously…/the gap was…/chicken-and-egg" debugging narrative; the
+  *how* lives in this file, the README, and the commit body.
+- **No inline file-touch lists** — git history records touched files. If a
+  pointer genuinely helps, one terse trailing parenthetical (`(aic,
+  post-create.py)`), never woven into sentences.
+- **Past released `## [X.Y.Z]` sections are immutable** — apply this style to
+  new entries only; never rewrite a shipped section (`release.yml`'s
+  `github-release` job renders the GitHub Release from it).
+
 ## Workflow split rationale (so future edits don't undo it)
 
 The split exists because the npm CLI (`aic`) is tightly coupled to the
@@ -264,7 +302,8 @@ Earthly's floating-with-coupling model is the documented anti-pattern.
   right Keep-a-Changelog heading (`Added`/`Changed`/`Fixed`/`Removed`). Keep
   `[Unreleased]` current so release time is just "rename the heading," not
   "reconstruct history." The changelog is hand-maintained and is a release
-  precondition (CI blocks a version with no section) — see "Releasing".
+  precondition (CI blocks a version with no section) — see "Releasing" and
+  "CHANGELOG entry style".
 - **Don't force-push to `main` or rewrite tags.** GHCR has already received
   whatever the tag was bound to; ghost tags confuse users on pinned versions.
 - **Don't use `git rebase -i` or other interactive git commands** from a
