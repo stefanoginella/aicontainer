@@ -153,7 +153,7 @@ You can still use `aic` from a separate terminal at the same time — `aic rebui
   - writes to `/etc/aic/`, `/workspace/.devcontainer/`, and the login-shell rc files (`~/.zshrc` / `~/.bashrc` / fish config + their `.local` includes) — defense-in-depth on top of the RO mounts and root-locks above.
 - **Forced AI sandbox settings** — host config can't loosen these: Claude `permissions.defaultMode=bypassPermissions` + hook registration, Codex `approval_policy=never` + `sandbox_mode=danger-full-access` + hook registration. See [Config seeding from the host](#config-seeding-from-the-host) for the full allowlist/dropped fields.
 - **Container global gitignore** covers `.env*`, `.claude/`, `.codex/`, `node_modules/`, `.venv/`, `__pycache__/`, `.DS_Store` — fewer ways to accidentally commit a secret.
-- **No host credential forwarding**: no SSH-agent socket, no `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` passthrough, no host `gh` token. You log in once *inside* the container; tokens persist in `aic-auth-global`.
+- **No host credential forwarding**: no SSH-agent socket, no `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` passthrough, no host `gh` token. You log in once *inside* the container; tokens persist in `aic-auth-global`. Because the SSH agent and `~/.ssh` aren't forwarded, host **commit signing** can't work in here either — use [`aic signing`](#commit-signing) for the sandbox-key alternative.
 
 **Developer-experience defaults** (personal taste; override in `Dockerfile.project` if you disagree):
 
@@ -398,6 +398,31 @@ Seeded (when present on the host): Claude `env`, `statusLine`, `enabledPlugins`,
 
 **Host paths NOT mounted:** `~/.claude/projects/`, `~/.claude/.credentials.json`, `~/.claude.json`, `~/.codex/sessions/`, `~/.codex/auth.json`, `~/.codex/history.jsonl`. Chat history and auth tokens stay on the host; the container builds its own via `claude /login` etc. on first run.
 
+## Commit signing
+
+If you sign commits on your host (`commit.gpgsign=true`, SSH or GPG), that won't work inside the sandbox out of the box: your signing key lives on the host, and aicontainer deliberately does **not** forward `~/.ssh` or the SSH agent (see the [threat model](#threat-model)). Git would otherwise fail every commit with `Couldn't find key in agent`.
+
+So when a signing host has no sandbox key set up, aicontainer turns signing **off inside the container** (commits succeed, unsigned) and prints a one-line notice — rather than letting `git commit` fail cryptically.
+
+To get signed commits *without* weakening the boundary, provision a **sandbox-only signing key** with `aic signing`:
+
+```bash
+aic up                 # the container must be running
+aic signing auto       # mint an ed25519 signing key in the aic-auth-global volume
+                       #   (add --register to push its pubkey to GitHub via gh)
+aic rebuild            # apply — post-create wires the key into the container gitconfig
+```
+
+`aic signing auto` prints the public key; register it on GitHub as a **Signing Key** (Settings → SSH and GPG keys → New → *Signing Key*, **not** Authentication), or pass `--register` to have `gh` do it (needs the `write:ssh_signing_key` scope). Other modes:
+
+- `aic signing byok` — install a *separate* signing key you provide (`aic signing byok < your_key`, or drop it at `~/.config/aic-auth/signing/id_ed25519`).
+- `aic signing disable` — keep commits unsigned in the sandbox (silences the notice).
+- `aic signing status` — show the current state.
+
+The key lives only in the `aic-auth-global` volume (never on your host), is shared across all your projects (register once), and survives rebuilds. The choice is applied on the next `aic rebuild`, because the container gitconfig is regenerated and root-locked at create time — there's no live edit (and so no privileged unlock an in-container process could abuse).
+
+> **What this means for "Verified".** The signing key lives where the AI runs, so commits the agent makes will show as **Verified** on GitHub. That's exactly right if your goal is satisfying a branch-protection *"require signed commits"* rule — but it is *not* a statement that a human reviewed the commit. If you want sandbox commits to stay distinguishable and independently revocable, use a distinct signing key (and optionally a distinct committer identity) for it.
+
 ## Threat model
 
 **Sandboxed:**
@@ -408,7 +433,7 @@ Seeded (when present on the host): Claude `env`, `statusLine`, `enabledPlugins`,
 
 **Not sandboxed (unless you opt in):**
 - **Network**: full outbound access by default. Anything inside the container can reach `api.openai.com`, `api.anthropic.com`, your LAN, and cloud metadata services (`169.254.169.254`). To restrict this, opt in to the [iptables allowlist](#opt-in-network-allowlist) below.
-- **Git identity**: your `~/.gitconfig` is read-only mounted, so the AI can commit and push as you (via `gh auth` or stored credentials).
+- **Git identity**: your `~/.gitconfig` is read-only mounted, so the AI can commit and push as you (via `gh auth` or stored credentials). Your signing key is **not** forwarded; if you need signed commits in here, set up a sandbox-only key with [`aic signing`](#commit-signing) — note that this makes agent-authored commits show as Verified.
 - **Host credentials**: nothing is auto-forwarded. The AI only has access to what you explicitly `claude /login`, `codex auth`, `gh auth login` for inside the container.
 
 Don't run this on a network where reaching internal services or cloud metadata is a concern — or enable the allowlist below.

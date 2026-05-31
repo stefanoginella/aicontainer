@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`aic signing` sets up commit signing inside the sandbox.** Your host's
+  signing key is never forwarded, so `aic signing auto` mints a sandbox-only
+  SSH signing key (`--register` adds its pubkey to GitHub via `gh`), `byok`
+  installs one you provide, and `disable` turns signing off. The choice persists
+  in the `aic-auth-global` volume and applies on the next `aic rebuild`.
+
+### Fixed
+
+- **A signing host no longer hits failing commits inside the sandbox.** When the
+  host signs commits but no sandbox key is configured, signing is turned off
+  in-container with a notice — so `git commit` doesn't die with "Couldn't find
+  key in agent"; run `aic signing` to enable real signing instead.
+
 ## [0.1.4] - 2026-05-30
 
 ### Fixed

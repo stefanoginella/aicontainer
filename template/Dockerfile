@@ -22,6 +22,11 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # ---------------------------------------------------------------------------
 # System packages (base image already ships git, curl, sudo, etc.)
 # ---------------------------------------------------------------------------
+# openssh-client provides ssh-keygen, which Git invokes for SSH commit signing
+# (gpg.format=ssh: sign via `ssh-keygen -Y sign`, verify via `-Y verify`) and
+# which `aic signing` uses to mint the sandbox signing key. Required even just
+# to *sign*, not only to generate — so make the dependency explicit here rather
+# than relying on the base image happening to include it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       fd-find \
       ripgrep \
@@ -38,6 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       iproute2 \
       iptables \
       ipset \
+      openssh-client \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # git-delta
