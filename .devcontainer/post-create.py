@@ -33,6 +33,15 @@ HOME = Path.home()
 AUTH = HOME / ".config" / "aic-auth"            # global volume
 SESSIONS = HOME / ".claude-sessions"             # per-project volume
 HOST_GITCONFIG = HOME / ".gitconfig"             # bind-mounted RO from host
+
+# Sandbox commit-signing material, provisioned by `aic signing` and persisted
+# in the aic-auth-global volume (so the pubkey is registered on GitHub once and
+# survives rebuilds). The host's own signing key is never forwarded; see
+# setup_commit_signing().
+SIGNING = AUTH / "signing"
+SIGNING_KEY = SIGNING / "id_ed25519"             # private key (0600, vscode-owned)
+SIGNING_MODE = SIGNING / "mode"                  # "auto" | "byok" | "disabled"
+SIGNING_ALLOWED = SIGNING / "allowed_signers"    # for in-container verification
 HOST_SEED_CLAUDE = Path("/host-seed/claude")     # bind-mounted RO file/dir
 HOST_SEED_CODEX = Path("/host-seed/codex")       # bind-mounted RO file
 
@@ -133,6 +142,7 @@ def fix_volume_ownership() -> None:
     for path in (
         HOME / ".shell-history",
         AUTH,
+        SIGNING,
         SESSIONS,
         HOME / ".claude",
         HOME / ".codex",
@@ -389,6 +399,93 @@ def setup_codex() -> None:
     link(SESSIONS / "codex-history.jsonl", codex_dir / "history.jsonl")
 
 
+def _host_git_config(key: str) -> str:
+    """Read a single value straight from the read-only host ~/.gitconfig
+    (not the effective config, so we see the host's intent regardless of our
+    own override ordering). Empty string if unset or git is unavailable."""
+    try:
+        r = subprocess.run(
+            ["git", "config", "--file", str(HOST_GITCONFIG), "--get", key],
+            capture_output=True, text=True,
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except FileNotFoundError:
+        return ""
+
+
+def setup_commit_signing() -> str:
+    """Return the container-local commit-signing config to append to
+    ~/.gitconfig.local *after* the host [include] (so it overrides the host's
+    signing settings — inside the sandbox only; the host gitconfig is mounted
+    read-only and never touched).
+
+    Why this exists: the host's signing key never enters the container (~/.ssh
+    and the SSH agent are deliberately not forwarded), so a host configured for
+    SSH/GPG commit signing would otherwise fail every `git commit` here with
+    "Couldn't find key in agent". Instead `aic signing` provisions a
+    sandbox-only ed25519 signing key in the aic-auth-global volume; this wires
+    it up when present. Mode (set by `aic signing`, persisted in the volume):
+
+      - key present (auto/byok) -> sign with it via gpg.format=ssh, regardless
+        of whether the host signed with SSH or GPG (the switch is container-only).
+      - mode 'disabled'         -> signing off in the sandbox (quiet).
+      - host signs, but no key  -> signing off + LOUD notice (the safe default,
+        so commits don't fail cryptically before a key is set up).
+      - host doesn't sign       -> nothing.
+
+    Takes effect on container (re)create only: ~/.gitconfig.local is rewritten
+    fresh each creation and then root-locked, so a mode change via `aic signing`
+    lands on the next rebuild — no live edit of the locked file is needed (and
+    no privileged unlock primitive, which a compromised session could abuse)."""
+    off = "[commit]\n    gpgsign = false\n[tag]\n    gpgsign = false\n"
+    mode = SIGNING_MODE.read_text().strip() if SIGNING_MODE.is_file() else ""
+
+    if mode == "disabled":
+        log("commit signing: disabled in sandbox (your choice via 'aic signing')")
+        return off
+
+    if SIGNING_KEY.is_file():
+        # ssh-keygen refuses keys with loose perms; we own the file (it's
+        # created as vscode by `aic signing`), so tighten it each create.
+        try:
+            SIGNING_KEY.chmod(0o600)
+        except OSError as e:
+            log(f"warning: could not chmod signing key: {e}")
+        block = (
+            "[gpg]\n    format = ssh\n"
+            f"[user]\n    signingkey = {SIGNING_KEY}\n"
+            "[commit]\n    gpgsign = true\n"
+        )
+        # Also wire verification so in-container `git log --show-signature`
+        # works instead of erroring on the host's allowedSignersFile (a
+        # host-only path). Best-effort; signing itself doesn't need it.
+        email = _host_git_config("user.email")
+        pub = SIGNING_KEY.with_suffix(".pub")
+        if email and pub.is_file():
+            try:
+                SIGNING_ALLOWED.write_text(f"{email} {pub.read_text().strip()}\n")
+                block += f'[gpg "ssh"]\n    allowedSignersFile = {SIGNING_ALLOWED}\n'
+            except OSError as e:
+                log(f"warning: could not write allowed_signers: {e}")
+        fp = ""
+        try:
+            r = subprocess.run(["ssh-keygen", "-lf", str(pub)], capture_output=True, text=True)
+            if r.returncode == 0:
+                fp = r.stdout.split()[1]
+        except (FileNotFoundError, IndexError):
+            pass
+        log(f"commit signing: sandbox ssh key{(' ' + fp) if fp else ''} (mode={mode or 'auto'})")
+        return block
+
+    if _host_git_config("commit.gpgsign").lower() == "true":
+        log("commit signing: host enables it but no sandbox key — commits are "
+            "UNSIGNED here. Run 'aic signing' to provision a sandbox signing key "
+            "(or 'aic signing disable' to silence this).")
+        return off
+
+    return ""
+
+
 def setup_gitconfig() -> None:
     """Write ~/.gitconfig.local (pointed at by GIT_CONFIG_GLOBAL in
     devcontainer.json). Includes the read-only host gitconfig and adds
@@ -406,6 +503,10 @@ def setup_gitconfig() -> None:
         # (file is root:root 0444). Skip the rewrite — we'd hit EACCES and the
         # contents are stable anyway.
         return
+    # Commit-signing config goes LAST so it overrides the host [include] above
+    # (git takes the last value for single-valued keys; the include is inlined
+    # at the top, our block is appended at the bottom).
+    signing = setup_commit_signing()
     local.write_text(
         f"# aicontainer container-local git config\n"
         f"[include]\n    path = {HOST_GITCONFIG}\n"
@@ -416,6 +517,7 @@ def setup_gitconfig() -> None:
         f"[delta]\n    navigate = true\n    line-numbers = true\n"
         f"[merge]\n    conflictstyle = diff3\n"
         f"[diff]\n    colorMoved = default\n"
+        f"{signing}"
     )
     log(f"wrote {local}")
 

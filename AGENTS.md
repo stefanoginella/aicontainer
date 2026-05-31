@@ -354,6 +354,35 @@ should be reviewed for security regressions:
   `GITHUB_TOKEN`). The `publish` jobs only run on push/schedule/dispatch,
   never on `pull_request`, to keep fork PRs from triggering publishes.
 
+## Commit signing (`aic signing`)
+
+The host signing key is never forwarded (the no-`~/.ssh`/no-agent guarantee
+above), so `aic signing` provisions a *sandbox-only* ed25519 signing key in the
+`aic-auth-global` volume under `~/.config/aic-auth/signing/` (key + a `mode`
+marker: `auto`/`byok`/`disabled`). Load-bearing design choices, don't undo them:
+
+- **The signing config lives inside the root-locked `~/.gitconfig.local`,
+  appended by `setup_commit_signing()` *after* the host `[include]` so it
+  overrides host signing — container-only; the host gitconfig stays RO.** Keep
+  it in that one file: the existing "self-protection files are root-owned 0444"
+  smoke test then still covers it, and an in-session tool can't inject
+  `credential.helper` via a separate unlocked include.
+- **Applied on (re)create only, never live.** `~/.gitconfig.local` is rewritten
+  fresh each creation and re-locked; a `mode` change takes effect on the next
+  `aic rebuild`. This is deliberate — a live edit would need a privileged
+  *unlock* of the locked file, which a compromised session could abuse before
+  the next re-lock. Don't add an unlock primitive to "make it instant".
+- **`aic signing`'s mutating actions are unprivileged** — they `devcontainer
+  exec` as `vscode` (so the key gets correct owner + 0600), needing the
+  container up; no sudoers/NOPASSWD entry is involved. `status` reads the volume
+  host-side and works anytime. Generating the key in-container (not host-side)
+  is what keeps perms/ownership correct across the Linux UID-remap.
+- **`--register` writes to the user's GitHub account** (`gh api POST
+  /user/ssh_signing_keys`) and is opt-in only — never auto-register.
+- The "aic signing wires a sandbox signing key" smoke test (both workflows)
+  stages a key, recreates, and asserts signing is wired *and* `~/.gitconfig.local`
+  is still `root 444`. Extend it, don't weaken the root-lock assertion.
+
 ## Verifying changes locally
 
 The CI smoke tests run inside a real devcontainer. Approximate that locally

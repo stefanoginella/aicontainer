@@ -195,6 +195,40 @@ jobs:
             echo "OK: project hook ran as vscode in /workspace; non-zero exit non-fatal; no leaked VIRTUAL_ENV"
           '
 
+      - name: Smoke test - aic signing wires a sandbox signing key
+        working-directory: /tmp/proj
+        run: |
+          # The host signing key is never forwarded, so signing here only works
+          # via a sandbox-only key in aic-auth-global that post-create wires into
+          # ~/.gitconfig.local on (re)create. Stage a key the way `aic signing
+          # auto` does, give the mounted host gitconfig a committer identity (so
+          # post-create writes allowed_signers and verification can pass),
+          # recreate, then assert signing is wired and a commit verifies.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            dir="$HOME/.config/aic-auth/signing"; mkdir -p "$dir"
+            ssh-keygen -t ed25519 -N "" -C ci-signing -f "$dir/id_ed25519" >/dev/null
+            printf auto > "$dir/mode"
+          '
+          git config --global user.email ci@example.com
+          git config --global user.name  "CI Signer"
+          devcontainer up --workspace-folder . --remove-existing-container
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            key="$HOME/.config/aic-auth/signing/id_ed25519"
+            grep -qx "    gpgsign = true" ~/.gitconfig.local || { echo "FAIL: gpgsign not enabled"; cat ~/.gitconfig.local; exit 1; }
+            grep -qF "signingkey = $key" ~/.gitconfig.local || { echo "FAIL: signingkey not wired into ~/.gitconfig.local"; cat ~/.gitconfig.local; exit 1; }
+            # ~/.gitconfig.local must STILL be root-locked after adding signing.
+            perms=$(stat -c "%U %a" ~/.gitconfig.local)
+            [ "$perms" = "root 444" ] || { echo "FAIL: gitconfig.local not root-locked ($perms)"; exit 1; }
+            cd /workspace
+            git commit --allow-empty -m "signed commit" >/dev/null
+            v=$(git log -1 --format=%G?)
+            echo "signature status: $v"
+            [ "$v" = "G" ] || { echo "FAIL: commit signature not good (got $v)"; git log -1 --show-signature; exit 1; }
+            echo "OK: sandbox signing key wired; gitconfig.local still root-locked; commit signed and verified"
+          '
+
       - name: CLI test - aic sync warns on / bumps a stale Dockerfile.project base
         run: |
           # Host-only (no container). A project-owned Dockerfile.project that
