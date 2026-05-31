@@ -142,7 +142,6 @@ def fix_volume_ownership() -> None:
     for path in (
         HOME / ".shell-history",
         AUTH,
-        SIGNING,
         SESSIONS,
         HOME / ".claude",
         HOME / ".codex",
@@ -152,6 +151,12 @@ def fix_volume_ownership() -> None:
         path.mkdir(parents=True, exist_ok=True)
         if path.stat().st_uid != uid:
             needs_chown = True
+    # NOTE: the signing dir (AUTH/signing) is intentionally NOT created here.
+    # On first creation AUTH is a root-owned named volume, and mkdir-ing a NEW
+    # subdir as vscode before the chown below would EACCES (the other entries
+    # are pre-existing Docker mountpoints, so their mkdir is a harmless no-op).
+    # `aic signing` creates signing/ as vscode once the volume is writable, and
+    # aic-chown-volumes re-owns AUTH recursively, so it stays vscode-owned.
     # Project-declared mountpoints: don't mkdir (they're volume mounts that
     # exist iff the volume is attached); only flag a chown when one is present
     # and still root-owned — e.g. a rebuild where aic's own volumes are already
