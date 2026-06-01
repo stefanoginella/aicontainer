@@ -108,6 +108,36 @@ CODEX_ALLOWED_TABLES = frozenset({
     "features", "notice", "projects", "mcp_servers",
 })
 
+# A managed note written into each enabled tool's user-level memory file
+# (~/.claude/CLAUDE.md for Claude, ~/.codex/AGENTS.md for Codex — both auto-loaded
+# by their tool on every session), so an agent doesn't burn tokens "fixing" the
+# read-only git internals. .git/config, .git/hooks, and .devcontainer/ are
+# bind-mounted read-only (see docker-compose.yml); the resulting write failures
+# are by-design, not bugs. Marker-delimited so the note can evolve across
+# versions and any user-added content in the same file is preserved.
+SANDBOX_MEMORY_BEGIN = "<!-- BEGIN aicontainer sandbox notes (managed) -->"
+SANDBOX_MEMORY_END = "<!-- END aicontainer sandbox notes (managed) -->"
+SANDBOX_MEMORY_NOTE = """\
+## Sandbox: read-only git internals (don't try to "fix" this)
+
+This is an aicontainer sandbox. By design, `.git/config`, `.git/hooks`, and
+`.devcontainer/` are bind-mounted **read-only** so a tool can't rewrite its own
+sandbox or git's code-execution surface.
+
+These are **expected, not bugs** — don't investigate, retry, remount, or `sudo`
+around them:
+
+- Any write to `.git/config` fails: `could not write config file .git/config:
+  Device or resource busy` (EBUSY). This includes the upstream-tracking write
+  from `git push -u` / `git switch -c --track` — the push or branch itself
+  **succeeds**, only the local tracking config is skipped, so don't retry it.
+  Reading config and ordinary git (commit, push, pull, fetch, branch, switch) work.
+- Installing git hooks (`lefthook install`, `husky`, `pre-commit install`) fails
+  writing to `.git/hooks/`.
+
+If a change to `.git/config` or `.git/hooks` is genuinely required, make it from
+the host, outside the container."""
+
 
 def log(msg: str) -> None:
     print(f"[post-create] {msg}", file=sys.stderr)
@@ -296,6 +326,40 @@ def load_host_claude_settings() -> dict:
     return seeded
 
 
+def ensure_sandbox_memory(path: Path) -> None:
+    """Upsert the managed sandbox note (SANDBOX_MEMORY_NOTE) into a tool's
+    user-level memory file. Three cases, all idempotent:
+
+    - file absent → create it holding just the marker-wrapped note.
+    - markers already present → replace only what's between them (so the note
+      text can change in a future version without duplicating).
+    - file exists without our markers → append the block, preserving the user's
+      own content (they may keep personal notes in the same file).
+
+    Best-effort: a write failure is logged, not fatal, matching the rest of
+    post-create's defensive degradation."""
+    # No trailing newline on the block itself: in the in-place-replace branch
+    # the existing tail (the text after the END marker) supplies it, so a
+    # re-run is byte-identical. The create/append branches add the final "\n".
+    block = f"{SANDBOX_MEMORY_BEGIN}\n{SANDBOX_MEMORY_NOTE}\n{SANDBOX_MEMORY_END}"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text() if path.is_file() else ""
+        if SANDBOX_MEMORY_BEGIN in existing and SANDBOX_MEMORY_END in existing:
+            head, _, rest = existing.partition(SANDBOX_MEMORY_BEGIN)
+            _, _, tail = rest.partition(SANDBOX_MEMORY_END)
+            updated = f"{head}{block}{tail}"
+        elif existing.strip():
+            updated = f"{existing.rstrip(chr(10))}\n\n{block}\n"
+        else:
+            updated = f"{block}\n"
+        if updated != existing:
+            path.write_text(updated)
+            log(f"wrote sandbox note -> {path}")
+    except OSError as e:
+        log(f"warning: could not write sandbox note to {path}: {e}")
+
+
 def setup_claude() -> None:
     """Configure Claude Code: seed allowlisted host settings, then force
     bypassPermissions + the PreToolUse hook. ~/.claude itself is the
@@ -317,6 +381,9 @@ def setup_claude() -> None:
     settings["hooks"] = hook_spec["hooks"]
     settings_file.write_text(json.dumps(settings, indent=2) + "\n")
     log(f"wrote {settings_file}")
+
+    # User-level memory Claude auto-loads every session.
+    ensure_sandbox_memory(claude_dir / "CLAUDE.md")
 
     # sessions: ~/.claude/projects/ → per-project volume. This symlink lives
     # inside aic-auth-global (because claude_dir IS that mount) but its
@@ -397,6 +464,9 @@ def setup_codex() -> None:
     config_toml = codex_dir / "config.toml"
     config_toml.write_text(tomli_w.dumps(cfg))
     log(f"wrote {config_toml}")
+
+    # Global AGENTS.md Codex auto-loads for every project (verified on 0.135).
+    ensure_sandbox_memory(codex_dir / "AGENTS.md")
 
     # sessions: ~/.codex/sessions/ and history.jsonl → per-project volume.
     # Same cross-volume symlink trick as the claude projects/ symlink.

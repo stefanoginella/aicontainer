@@ -224,6 +224,31 @@ jobs:
             echo "OK: project hook ran as vscode in /workspace; non-zero exit non-fatal; no leaked VIRTUAL_ENV"
           '
 
+      - name: Smoke test - sandbox memory note lands in CLAUDE.md / AGENTS.md (idempotent)
+        working-directory: /tmp/proj
+        run: |
+          # post-create writes a managed note into the tools' user-level memory
+          # files (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, both auto-loaded every
+          # session) so an agent does not waste tokens trying to "fix" the
+          # by-design read-only .git/config / .git/hooks (writes fail EBUSY).
+          # Assert it lands after create, and that re-running post-create is
+          # idempotent: the marker-delimited upsert must not duplicate the block.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -e
+            begin="<!-- BEGIN aicontainer sandbox notes (managed) -->"
+            for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
+              [ -f "$f" ] || { echo "FAIL: $f missing"; exit 1; }
+              grep -qF "$begin" "$f" || { echo "FAIL: $f missing managed marker"; exit 1; }
+              grep -qF "Device or resource busy" "$f" || { echo "FAIL: $f missing EBUSY guidance"; exit 1; }
+            done
+            uv run --no-project /opt/post-create.py
+            for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
+              n=$(grep -cF "$begin" "$f")
+              [ "$n" = "1" ] || { echo "FAIL: $f has $n note blocks after re-run (want 1)"; exit 1; }
+            done
+            echo "OK: sandbox note in CLAUDE.md + AGENTS.md; upsert idempotent"
+          '
+
       - name: Smoke test - aic signing wires a sandbox signing key
         working-directory: /tmp/proj
         run: |

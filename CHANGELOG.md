@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Agents are told the read-only git internals are by design.** `post-create.py`
+  writes a managed note into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` so a
+  tool stops burning tokens "fixing" the expected `git config … Device or resource
+  busy` failure (and blocked `.git/hooks` installs). (post-create.py)
+
 ## [0.2.1] - 2026-06-01
 
 ### Changed
