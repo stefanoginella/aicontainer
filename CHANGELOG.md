@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-01
+
 ### Added
 
 - **Agents are told the read-only git internals are by design.** `post-create.py`
@@ -290,7 +292,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Initial release: a sandboxed devcontainer for Claude Code and Codex.** Runs
   them in bypass / auto-approve mode.
 
-[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/stefanoginella/aicontainer/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/stefanoginella/aicontainer/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/stefanoginella/aicontainer/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/stefanoginella/aicontainer/compare/v0.1.3...v0.1.4
