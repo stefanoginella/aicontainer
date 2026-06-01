@@ -2,7 +2,10 @@ name: rebuild
 
 on:
   schedule:
-    - cron: '0 6 * * 1'
+    # 03:17 UTC Monday. Offset off the top of the hour on purpose: GitHub
+    # delays/drops scheduled runs under load, and :00 slots are the most
+    # congested (the 0 6 slot ran ~2h late). An odd minute reduces contention.
+    - cron: '17 3 * * 1'
   push:
     branches: [main]
     # Anything under template/ is baked into the image or is the compose/
