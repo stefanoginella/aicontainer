@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-01
+
 ### Changed
 
 - **`aic rebuild` now refreshes Claude Code and Codex to the latest release.** The
@@ -281,7 +283,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Initial release: a sandboxed devcontainer for Claude Code and Codex.** Runs
   them in bypass / auto-approve mode.
 
-[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/stefanoginella/aicontainer/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/stefanoginella/aicontainer/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/stefanoginella/aicontainer/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/stefanoginella/aicontainer/compare/v0.1.2...v0.1.3
