@@ -13,7 +13,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "fileMatch": ["^template/Dockerfile$"],
+      "managerFilePatterns": ["/^template/Dockerfile$/"],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)(?: registryUrl=(?<registryUrl>.*?))?\\s+ARG \\w+_VERSION=(?<currentValue>.*)\\s"
       ]
