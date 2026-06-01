@@ -603,9 +603,41 @@ def run_project_hook() -> None:
         log(f"warning: project hook exited {e.returncode}; continuing")
 
 
+def refresh_ai_tools() -> None:
+    """Float Claude Code and Codex to their latest release on every container
+    (re)create. The image bakes a working copy of each (Dockerfile) as an
+    offline floor; this updates them in place when there is network. Fail-soft:
+    an offline or failed update is logged and the baked version is kept rather
+    than blocking the container from coming up. Gated on AIC_TOOLS; set
+    AIC_FREEZE_TOOLS=1 (e.g. in docker-compose.override.yml) to pin the baked
+    versions for a reproducible sandbox.
+
+    Both CLIs live in ~/.local/bin, which we force onto PATH for the updaters:
+    `codex update` re-runs the official installer, which only edits a login-shell
+    rc file (root-locked at runtime by aic-lock-gitconfig) when ~/.local/bin is
+    NOT already on PATH — keeping it on PATH makes the update a clean no-write."""
+    freeze = os.environ.get("AIC_FREEZE_TOOLS", "").strip().lower()
+    if freeze not in ("", "0", "false", "no"):
+        log("AIC_FREEZE_TOOLS set — keeping the baked Claude/Codex versions")
+        return
+    env = {**os.environ, "PATH": f"{HOME / '.local' / 'bin'}:{os.environ.get('PATH', '')}"}
+    updaters = []
+    if "claude-code" in ENABLED_TOOLS:
+        updaters.append(("claude", ["claude", "update"], 180))
+    if "codex" in ENABLED_TOOLS:
+        updaters.append(("codex", ["codex", "update"], 300))
+    for name, cmd, timeout in updaters:
+        try:
+            subprocess.run(cmd, check=True, timeout=timeout, env=env)
+            log(f"{name} refreshed to latest")
+        except (subprocess.SubprocessError, OSError) as e:
+            log(f"{name} refresh skipped ({e}); keeping baked version")
+
+
 def main() -> None:
     log(f"starting (tools: {','.join(sorted(ENABLED_TOOLS)) or 'none'})")
     fix_volume_ownership()
+    refresh_ai_tools()
     if "claude-code" in ENABLED_TOOLS:
         setup_claude()
     else:

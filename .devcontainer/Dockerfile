@@ -177,13 +177,21 @@ USER vscode
 
 ENV PATH="/home/vscode/.local/bin:$PATH"
 # Build-time mirror of devcontainer.json's containerEnv: skip npm lifecycle
-# scripts for the codex install below (and for any `npm install` baked into a
-# downstream Dockerfile.project).
+# scripts for any `npm install`/`npx` (MCP servers, a downstream
+# Dockerfile.project). Codex is no longer an npm package — it installs via the
+# official standalone installer below, alongside Claude Code.
 ENV NPM_CONFIG_IGNORE_SCRIPTS=true
 
-# Claude Code (official native installer to ~/.local/bin)
+# Claude Code + Codex: official standalone installers, both into ~/.local/bin
+# (already on PATH above). These are the baseline "floor" baked into the image;
+# post-create.py's refresh_ai_tools() floats them to the latest release on every
+# container (re)create, so `aic rebuild` always lands current AI CLIs. Each
+# installer skips editing the login-shell rc files (root-locked at runtime by
+# aic-lock-gitconfig) because ~/.local/bin is already on PATH.
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && claude --version
+RUN curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh \
+    && codex --version
 
 # Python toolchain (per-user; survives image rebuilds via base layer caching)
 RUN uv python install 3.13 --default
@@ -197,12 +205,6 @@ RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$FNM_D
     && eval "$(fnm env)" \
     && fnm install ${NODE_VERSION} \
     && fnm default ${NODE_VERSION}
-
-# Codex CLI (npm global into the fnm-managed Node ${NODE_VERSION})
-RUN export PATH="$FNM_DIR:$PATH" \
-    && eval "$(fnm env)" \
-    && npm install -g @openai/codex@latest \
-    && codex --version
 
 # Semgrep (used by Claude Code's semgrep plugin; installed into ~/.local/bin
 # via uv tool so the binary is on PATH for the vscode user). Auth (settings.yml)

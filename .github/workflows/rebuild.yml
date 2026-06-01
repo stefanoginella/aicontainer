@@ -65,13 +65,39 @@ jobs:
       - name: Bring up the devcontainer
         working-directory: /tmp/proj
         run: devcontainer up --workspace-folder .
-      - name: Smoke test - AI CLIs resolve
+      - name: Smoke test - AI CLIs resolve (Codex is standalone, not npm)
         working-directory: /tmp/proj
         run: |
           devcontainer exec --workspace-folder . claude --version
-          devcontainer exec --workspace-folder . bash -lc 'eval "$(fnm env)" && codex --version'
+          devcontainer exec --workspace-folder . codex --version
           devcontainer exec --workspace-folder . gh --version
           devcontainer exec --workspace-folder . uv --version
+          # Codex must be the official standalone install in ~/.local/bin, not an
+          # npm global. Dropping npm is deliberate (so `codex update` works and the
+          # CLI no longer rides the npm release-age quarantine); guard the swap so a
+          # revert to `npm i -g @openai/codex` is caught.
+          codex_path=$(devcontainer exec --workspace-folder . bash -lc 'command -v codex' | tr -d '\r' | tail -1)
+          echo "codex resolves to: $codex_path"
+          case "$codex_path" in
+            */.local/bin/codex) echo "OK: codex is the standalone install" ;;
+            *) echo "FAIL: codex not in ~/.local/bin (got '$codex_path'); npm install may have crept back"; exit 1 ;;
+          esac
+      - name: Smoke test - tool self-update works with rc files root-locked
+        working-directory: /tmp/proj
+        run: |
+          # refresh_ai_tools() runs `claude update` / `codex update` on every
+          # container create. `codex update` re-runs the official installer, which
+          # must NOT fail trying to edit the login-shell rc files (root-locked at
+          # runtime by aic-lock-gitconfig) — it skips that because ~/.local/bin is
+          # already on PATH. A regression would silently fall back to the baked
+          # version (refresh is fail-soft), so assert both updaters exit 0 here.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -e
+            [ "$(stat -c %U:%a "$HOME/.zshrc")" = "root:444" ] || { echo "precondition: .zshrc not root-locked"; exit 1; }
+            claude update
+            codex update
+            echo "OK: claude + codex self-update cleanly with rc files locked"
+          '
       - name: Smoke test - socket-proxy reachable, EXEC blocked
         working-directory: /tmp/proj
         run: |

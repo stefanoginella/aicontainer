@@ -118,6 +118,19 @@ so it stays host-only-editable. Non-zero exit is logged, not fatal — keep that
 defensive degradation; a flaky project step shouldn't block the devcontainer
 from coming up.
 
+**AI-tool refresh on every create.** `refresh_ai_tools()` runs early in
+`main()` and floats Claude Code + Codex to their latest release on every
+container (re)create — so a plain `aic rebuild` lands current CLIs without a new
+image. The Dockerfile bakes each as an offline *floor*; this updates them in
+place via `claude update` / `codex update`. It's `AIC_TOOLS`-gated, fail-soft
+(an offline/failed update keeps the baked version — don't make it fatal), and
+opt-out via `AIC_FREEZE_TOOLS=1` for a reproducible sandbox. The updaters MUST
+run with `~/.local/bin` on `PATH`: `codex update` re-runs the official
+installer, which otherwise tries to edit a login-shell rc file (root-locked at
+runtime by `aic-lock-gitconfig`) and fails — with the bin dir already on PATH it
+skips that step. The "tool self-update works with rc files root-locked" smoke
+test (both workflows) guards exactly this; don't weaken it.
+
 **Dockerfile.project base-tag drift.** Because `Dockerfile.project` is
 project-owned, `aic sync` re-pins `docker-compose.yml` to the new aic version
 but does **not** touch a `FROM ghcr.io/stefanoginella/aicontainer:vX.Y.Z` inside
@@ -321,6 +334,12 @@ should be reviewed for security regressions:
   bits. Adding a new `NOPASSWD` entry is a load-bearing decision. It also bakes
   `/etc/codex/requirements.toml` (root-owned), the **managed** Codex hook that
   wires `pre-tool-use.sh` into Codex — see the `pre-tool-use.sh` note below.
+  Codex installs via OpenAI's **standalone** installer
+  (`chatgpt.com/codex/install.sh`), not npm — deliberate, so `codex update` works
+  and it mirrors Claude's native installer; the trade-off is Codex is no longer
+  under the `NPM_CONFIG_MIN_RELEASE_AGE` quarantine (still covers npx MCPs). Both
+  CLIs are a baked *floor* that `refresh_ai_tools()` floats to latest on each
+  create (see "AI-tool refresh on every create").
 - `template/aic-firewall` — outbound iptables allowlist. Adding hosts here
   expands what an in-container AI can reach. `cmd_enable` resolves into a
   staging ipset and `ipset swap`s it in, and **never sets `policy ACCEPT`** —

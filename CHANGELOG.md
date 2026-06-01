@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`aic rebuild` now refreshes Claude Code and Codex to the latest release.** The
+  two CLIs self-update on every container create (both pull and build mode) via
+  `post-create.py`; the pinned image only fixes the baseline. Fail-soft when
+  offline; set `AIC_FREEZE_TOOLS=1` to keep the baked versions. (post-create.py)
+- **Codex now installs via OpenAI's official standalone installer, not npm.**
+  Mirrors Claude's native installer and enables `codex update`. Codex is no longer
+  subject to the `NPM_CONFIG_MIN_RELEASE_AGE` npm quarantine (still in force for
+  npx-based MCPs). (Dockerfile)
+
 ## [0.2.0] - 2026-05-31
 
 ### Added

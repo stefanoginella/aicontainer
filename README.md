@@ -335,6 +335,27 @@ The base `post-create.py` runs it last, after the AI tools, git config, and volu
 
 ## Updating AI tools
 
+Claude Code and Codex refresh to their latest release **on every `aic rebuild`**, in
+both pull and build mode: `post-create.py` runs `claude update` and `codex update`
+each time the container is (re)created. The pinned image is just the baseline they're
+layered on.
+
+```bash
+aic rebuild   # in a project: recreate the container → Claude + Codex update to latest
+```
+
+The refresh is fail-soft — with no network it keeps the version baked into the image
+and the container still comes up. For a fully reproducible sandbox, pin the tools too
+by setting `AIC_FREEZE_TOOLS=1` in `.devcontainer/docker-compose.override.yml`.
+
+> Codex installs via OpenAI's official standalone installer (not npm), mirroring
+> Claude's native installer — so `codex update` works and the Codex CLI is **not**
+> subject to the `NPM_CONFIG_MIN_RELEASE_AGE` npm quarantine (which still governs
+> npx-based MCP servers).
+
+To update **aicontainer itself** — the `aic` CLI, the template, and the pinned base
+image (base OS, Node, semgrep, hooks, …):
+
 ```bash
 npm update -g aicontainer   # latest aic + template
 aic sync                    # in each project: re-pin compose to the new aic version
@@ -343,7 +364,7 @@ aic rebuild                 # in each project: pull the new image
 
 The pull-mode compose file pins `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` to whatever aic version did `aic init` (or the last `aic sync`) — not `:latest`. This keeps the CLI and the in-container filesystem layout (hooks, sudoers, helper scripts) from drifting apart. To pick up a new image, bump aic and `aic sync` first; `aic rebuild` alone won't change the pinned tag.
 
-`:vX.Y.Z` tags are immutable once published — they capture the exact image built at release time. CI separately rebuilds and pushes a floating `ghcr.io/stefanoginella/aicontainer:latest` on a weekly schedule and on every template change merged to main, for users who prefer base-layer freshness over reproducibility; that tag isn't referenced by default, but you can opt in by editing `.devcontainer/docker-compose.yml`. In `--build` mode `aic rebuild` does a no-cache local build that re-runs the `claude` and `codex` installers.
+`:vX.Y.Z` tags are immutable once published — they capture the exact image built at release time. CI separately rebuilds and pushes a floating `ghcr.io/stefanoginella/aicontainer:latest` on a weekly schedule and on every template change merged to main, for users who prefer base-layer freshness over reproducibility; that tag isn't referenced by default, but you can opt in by editing `.devcontainer/docker-compose.yml`. In `--build` mode `aic rebuild` also does a no-cache local rebuild of the baked image layers (base OS, Node, semgrep, and the Claude/Codex floor); the post-create refresh above then floats the two CLIs to latest regardless of mode.
 
 The 2 files (pull mode) or full set (build mode) under `.devcontainer/` are not refreshed by `aic rebuild` on their own — they're created once by `aic init`. If a new template version changes them (e.g. a docker-compose mount), run `aic sync` to re-copy from the installed template into `./.devcontainer/`, then `aic rebuild`. `aic sync` auto-detects pull vs. build mode, preserves the project's `AIC_TOOLS` and `AIC_SHELL` selections (pass `--with` / `--shell` to change them), and leaves project-owned files (`Dockerfile.project`, `firewall-allowlist`, `chown-paths`, `post-create.project.sh`, `docker-compose.override.yml`) untouched — re-wiring an existing [`docker-compose.override.yml`](#per-project-overrides-that-survive-aic-sync) into `dockerComposeFile` so per-project compose tweaks survive the sync.
 
