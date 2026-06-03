@@ -249,6 +249,30 @@ jobs:
             echo "OK: sandbox note in CLAUDE.md + AGENTS.md; upsert idempotent"
           '
 
+      - name: Smoke test - missing git identity is flagged loudly at create time
+        working-directory: /tmp/proj
+        run: |
+          # The sandbox has no identity of its own — ~/.gitconfig.local [include]s
+          # the RO-mounted host ~/.gitconfig. A broken/empty host gitconfig leaves
+          # no identity in-container, and it can't be fixed from inside
+          # (~/.gitconfig.local is root-locked; /workspace/.git/config is RO), so
+          # post-create must surface it loudly at create time. The runner starts
+          # with no global identity (the signing test below sets it); unset
+          # defensively, recreate, and assert post-create warned + identity is
+          # genuinely absent. Keep this before the signing test (which sets it).
+          set -euo pipefail
+          git config --global --unset-all user.name  || true
+          git config --global --unset-all user.email || true
+          devcontainer up --workspace-folder . --remove-existing-container 2>&1 | tee /tmp/no-ident.log
+          grep -q "git identity: no user.name/user.email is configured" /tmp/no-ident.log \
+            || { echo "FAIL: post-create did not warn about missing git identity"; exit 1; }
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            [ -z "$(cd "$HOME" && git config --get user.email || true)" ] \
+              || { echo "FAIL: identity unexpectedly present"; exit 1; }
+          '
+          echo "OK: missing git identity flagged at create time"
+
       - name: Smoke test - aic signing wires a sandbox signing key
         working-directory: /tmp/proj
         run: |

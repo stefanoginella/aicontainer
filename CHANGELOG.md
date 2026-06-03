@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`post-create.py` warns loudly when no git identity is configured.** The
+  sandbox inherits `user.name`/`user.email` from the read-only host
+  `~/.gitconfig`; if that was empty/broken at build time, `git commit` failed
+  mid-session with a cryptic "Author identity unknown" and couldn't be fixed
+  from inside. Container creation now flags it last with the host-side fix.
+  (post-create.py)
+
 ## [0.2.2] - 2026-06-01
 
 ### Added

@@ -613,6 +613,45 @@ def lock_config() -> None:
         log(f"warning: aic-lock-gitconfig failed: {e}")
 
 
+def verify_git_identity() -> None:
+    """Loudly flag a missing commit identity at create time, so it surfaces here
+    instead of cryptically mid-session on the first `git commit` ("Author
+    identity unknown").
+
+    The sandbox has NO identity of its own: ~/.gitconfig.local [include]s the
+    read-only host ~/.gitconfig, so identity is whatever the host file provided
+    when the container was (re)created. A host gitconfig that was empty/broken at
+    that moment leaves no identity here — and it can't be fixed from inside:
+    `git config --global` writes to the root-locked ~/.gitconfig.local, and
+    `git config --local` writes to /workspace/.git/config, which is mounted
+    read-only. The only fix is on the host, so that's where we point. Non-fatal —
+    matches the rest of post-create's defensive degradation."""
+    def configured(key: str) -> bool:
+        # cwd=HOME (not a repo) reads system + global only — the include chain
+        # through ~/.gitconfig.local — with no repo-local config or
+        # dubious-ownership checks to muddy the result.
+        try:
+            r = subprocess.run(
+                ["git", "config", "--get", key],
+                capture_output=True, text=True, cwd=str(HOME),
+            )
+        except FileNotFoundError:
+            return True  # no git to check with — don't cry wolf
+        return r.returncode == 0 and bool(r.stdout.strip())
+
+    if configured("user.name") and configured("user.email"):
+        return
+    log("git identity: no user.name/user.email is configured — commits here will "
+        "fail with 'Author identity unknown' (unless the repo sets its own). The "
+        "sandbox inherits its identity "
+        "from your host ~/.gitconfig (mounted read-only), which was empty/unset "
+        "when this container was built. Fix it on the HOST, then 'aic rebuild' — "
+        "it can't be fixed from inside (~/.gitconfig.local is root-locked and "
+        "/workspace/.git/config is read-only): "
+        "git config --global user.name '<you>' && "
+        "git config --global user.email '<you@example.com>'.")
+
+
 def verify_socket_proxy() -> None:
     """Best-effort ping of the socket-proxy so we fail loudly if compose
     didn't bring it up. Non-fatal — devcontainer is still usable without
@@ -725,6 +764,9 @@ def main() -> None:
     lock_config()
     verify_socket_proxy()
     run_project_hook()
+    # Last, so a missing-identity warning is the final thing in `aic rebuild`
+    # output rather than scrolling past mid-flow.
+    verify_git_identity()
     log("done")
 
 
