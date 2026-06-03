@@ -19,6 +19,8 @@
         "BracketPairColorDLW.bracket-pair-color-dlw",
         "vincaslt.highlight-matching-tag",
         "yzhang.markdown-all-in-one"
+        // aic:vscode-extensions — project-owned .devcontainer/vscode-extensions
+        // is merged here by `aic sync` (one extension id per line).
       ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "zsh",
@@ -39,6 +41,8 @@
         "files.trimFinalNewlines": true,
         "claude-code.allowDangerouslySkipPermissions": true,
         "claude-code.terminalArgs": ["--dangerously-skip-permissions"]
+        // aic:vscode-settings — project-owned .devcontainer/vscode-settings.json
+        // (a JSON object) is merged here by `aic sync`.
       }
     }
   },

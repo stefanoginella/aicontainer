@@ -338,6 +338,34 @@ jobs:
           grep -Fxq 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.1' .devcontainer/Dockerfile.project && { echo "FAIL: stale tag still present"; exit 1; }
           echo "OK: sync warns on drift; --bump-base rewrites FROM to ${cur}"
 
+      - name: CLI test - aic sync merges project-owned vscode-extensions / vscode-settings.json
+        run: |
+          # Host-only (no container). devcontainer.json is regenerated wholesale
+          # each sync, so per-project editor config lives in two project-owned
+          # files merged at the JSONC markers. Assert: valid ids + settings land,
+          # invalid ids are rejected and don't leak into the file, the list is
+          # deduped, and a second sync is idempotent.
+          set -euo pipefail
+          tmp="$(mktemp -d)"; cd "$tmp"; git init -q
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
+          # the in-repo guide ships in pull mode too
+          test -f .devcontainer/README.md || { echo "FAIL: .devcontainer/README.md not shipped"; exit 1; }
+          grep -q 'do NOT edit' .devcontainer/README.md || { echo "FAIL: README.md missing the do-not-edit guidance"; exit 1; }
+          printf 'ms-python.python\ncharliermarsh.ruff\nms-python.python\n# a comment\nnot a valid id!!\n' > .devcontainer/vscode-extensions
+          printf '{\n  "python.defaultInterpreterPath": "/workspace/.venv/bin/python",\n  "ruff.importStrategy": "fromEnvironment"\n}\n' > .devcontainer/vscode-settings.json
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync 2>&1)"; echo "$out"
+          echo "$out" | grep -q "ignoring invalid vscode-extensions entry: not a valid id" || { echo "FAIL: invalid id not rejected"; exit 1; }
+          dc=.devcontainer/devcontainer.json
+          grep -q '"ms-python.python"'             "$dc" || { echo "FAIL: extension not merged"; exit 1; }
+          grep -q '"charliermarsh.ruff"'           "$dc" || { echo "FAIL: extension not merged"; exit 1; }
+          grep -q '"python.defaultInterpreterPath"' "$dc" || { echo "FAIL: setting not merged"; exit 1; }
+          grep -q 'not a valid id' "$dc" && { echo "FAIL: invalid id leaked into devcontainer.json"; exit 1; }
+          [ "$(grep -c '"ms-python.python"' "$dc")" = "1" ] || { echo "FAIL: extension not deduped"; exit 1; }
+          cp "$dc" "$tmp/dc-before"
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync >/dev/null 2>&1
+          diff -u "$tmp/dc-before" "$dc" || { echo "FAIL: merge not idempotent"; exit 1; }
+          echo "OK: vscode-extensions/settings merged, invalid id rejected, deduped, idempotent"
+
   publish:
     # Refresh `:latest` and the weekly tag on every push to main that touches
     # template files, the weekly cron, or manual dispatch — never on PRs (forks

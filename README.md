@@ -161,7 +161,7 @@ You can still use `aic` from a separate terminal at the same time — `aic rebui
 - **Editor**: `$EDITOR=nano`, `$VISUAL=nano`. `vim` is installed but isn't default.
 - **Runtimes**: Python 3.13 via [`uv`](https://github.com/astral-sh/uv); Node 24 LTS via [`fnm`](https://github.com/Schniz/fnm) (so projects can override per-`.nvmrc`).
 - **CLI utilities**: `ripgrep`, `fd-find`, `fzf`, `tmux`, `jq`, `gh`, `docker` CLI (+ buildx, compose), `semgrep`, [`git-delta`](https://github.com/dandavison/delta) (wired in as `core.pager` and `interactive.diffFilter`).
-- **VS Code extensions** auto-installed when you open in the editor: `anthropic.claude-code`, `openai.chatgpt` (each gated by `AIC_TOOLS`), `eamodio.gitlens`, `pflannery.vscode-versionlens`, `BracketPairColorDLW.bracket-pair-color-dlw`, `vincaslt.highlight-matching-tag`, `yzhang.markdown-all-in-one`.
+- **VS Code extensions** auto-installed when you open in the editor: `anthropic.claude-code`, `openai.chatgpt` (each gated by `AIC_TOOLS`), `eamodio.gitlens`, `pflannery.vscode-versionlens`, `BracketPairColorDLW.bracket-pair-color-dlw`, `vincaslt.highlight-matching-tag`, `yzhang.markdown-all-in-one`. Add your own per project (e.g. the Python or TypeScript editor stack) via [`.devcontainer/vscode-extensions` and `vscode-settings.json`](#project-specific-vs-code-extensions--settings).
 - **VS Code terminal settings**: default profile + font family follow the project's `AIC_SHELL` (zsh → `MesloLGS NF`; bash/fish → `monospace`), right-click pastes, only `http/https/mailto/vscode` link schemes opened (`file://` OSC 8 links suppressed to dodge [microsoft/vscode#211443](https://github.com/microsoft/vscode/issues/211443)).
 - **Misc env**: `PYTHONDONTWRITEBYTECODE=1`, `PIP_DISABLE_PIP_VERSION_CHECK=1`, `GIT_CONFIG_GLOBAL=/home/vscode/.gitconfig.local` (so the host gitconfig stays read-only).
 
@@ -264,6 +264,8 @@ Swap the compose `image:` line for the `build:` block shown above, then `aic reb
 
 `devcontainer.json` and `docker-compose.yml` are **template-managed** — `aic init` writes them and `aic sync` overwrites them (only your `AIC_TOOLS` / `AIC_SHELL` choices are carried across). So don't hand-edit those two files for project-specific tweaks; your edits get reset on the next sync/upgrade.
 
+> `aic` also drops a **`.devcontainer/README.md`** into every project spelling out this exact managed-vs-project-owned split — it's there mostly so an AI agent poking at the devcontainer edits the right files (and learns it can't edit `devcontainer.json`) instead of fighting the sync. That README is itself template-managed, so don't edit it either; the project-owned files below are where customization lives.
+
 Instead, drop a **`.devcontainer/docker-compose.override.yml`**. It's project-owned: `aic` never copies over it, and `aic init` / `aic sync` auto-append it to `dockerComposeFile` in `devcontainer.json`, so the wiring is re-applied every sync. Docker Compose merges it on top of the base file (override wins).
 
 This is the right home for anything you'd otherwise have put in `containerEnv` or the compose service — env vars, `extra_hosts`, extra mounts, ports:
@@ -332,6 +334,85 @@ lefthook install
 ```
 
 The base `post-create.py` runs it last, after the AI tools, git config, and volume ownership are all wired up, so your steps see a fully configured environment. Like `firewall-allowlist` and `chown-paths`, it's opt-in (run only if present), never touched by `aic sync`, and read-only inside the container — the [PreToolUse hook](#threat-model) blocks an in-container tool from editing anything under `.devcontainer/`, so the script stays host-only-editable. It's invoked via `bash <file>` (no executable bit needed), runs with no privilege the in-container agent doesn't already have, and a non-zero exit is logged as a warning during `aic up` without failing container creation — its output streams through so you can see what happened.
+
+### Project-specific VS Code extensions & settings
+
+`devcontainer.json` is the only place that auto-installs editor extensions and applies machine-scope settings, but it's **regenerated wholesale on every `aic init`/`aic sync`** — so hand-editing its `customizations.vscode` block doesn't survive (and an in-container agent can't edit anything under `.devcontainer/` at all). Two project-owned files are merged in instead, both opt-in by presence and never touched by sync:
+
+- **`.devcontainer/vscode-extensions`** — one [extension id](https://marketplace.visualstudio.com/) (`publisher.name`) per line, `#` comments allowed. Merged into `customizations.vscode.extensions`, so they auto-install when you reopen in the container.
+- **`.devcontainer/vscode-settings.json`** — a JSON object, merged into `customizations.vscode.settings`.
+
+```
+# .devcontainer/vscode-extensions
+ms-python.python
+ms-python.vscode-pylance
+```
+
+```jsonc
+// .devcontainer/vscode-settings.json
+{
+  "python.defaultInterpreterPath": "/workspace/.venv/bin/python"
+}
+```
+
+Run `aic sync` (host-side) then `aic rebuild`; verify with `grep ms-python .devcontainer/devcontainer.json`. Invalid extension lines (anything that isn't a `publisher.name` id) are warned about and skipped, so a stray line can't smuggle JSON into `devcontainer.json`.
+
+> **Conflict rule:** the merge lands your entries *before* aic's own, so on a key collision aic's default wins *inside `devcontainer.json`*. The common case (adding new keys like `python.*`) never collides. To override a key aic sets (e.g. a `terminal.integrated.*` value), use a standard workspace **`.vscode/settings.json`** — workspace settings beat devcontainer machine-scope settings, survive sync on their own, and aren't aic-managed.
+
+#### Recipe: Python LSP (editor **and** agent)
+
+There are two LSP surfaces. The **editor's** IntelliSense comes from the extensions + settings below. The **agent's** LSP tool (Claude Code's go-to-def / find-refs) is separate: it needs the `pyright-langserver` binary on `PATH`, which you install from [`post-create.project.sh`](#project-specific-post-create-steps) so it survives rebuilds:
+
+```
+# .devcontainer/vscode-extensions
+ms-python.python
+ms-python.vscode-pylance      # editor IntelliSense / LSP
+charliermarsh.ruff            # if the project uses ruff
+ms-python.mypy-type-checker   # if mypy is your type gate
+```
+
+```jsonc
+// .devcontainer/vscode-settings.json
+{
+  "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
+  "ruff.importStrategy": "fromEnvironment",
+  "mypy-type-checker.importStrategy": "fromEnvironment",
+  "python.analysis.typeCheckingMode": "off"  // mypy is the type gate; Pylance for nav only
+}
+```
+
+```bash
+# .devcontainer/post-create.project.sh — give the agent's LSP tool a Python server
+command -v pyright-langserver >/dev/null || npm i -g pyright || echo "[post-create] pyright install failed"
+```
+
+> Install `pyright`, **not** `basedpyright` — Claude Code's LSP tool looks for the `pyright-langserver` binary, which the `pyright` package provides (`basedpyright` ships `basedpyright-langserver`).
+
+#### Recipe: TypeScript / JavaScript LSP (editor **and** agent)
+
+VS Code bundles the TypeScript language service with the editor, so the editor half is mostly lint/format extensions. The agent's LSP tool wants the `typescript-language-server` binary on `PATH`:
+
+```
+# .devcontainer/vscode-extensions
+dbaeumer.vscode-eslint
+esbenp.prettier-vscode
+```
+
+```jsonc
+// .devcontainer/vscode-settings.json
+{
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "eslint.format.enable": true
+}
+```
+
+```bash
+# .devcontainer/post-create.project.sh — give the agent's LSP tool a TS server
+command -v typescript-language-server >/dev/null || npm i -g typescript typescript-language-server || echo "[post-create] ts language server install failed"
+```
+
+> Claude Code's built-in LSP tool reads the binary off `PATH` (on older Claude releases it's gated behind `ENABLE_LSP_TOOL=1`). The baked Node toolchain plus a global `npm i -g` is enough — no Dockerfile change needed.
 
 ## Updating AI tools
 

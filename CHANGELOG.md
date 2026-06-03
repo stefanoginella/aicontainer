@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-project VS Code extensions survive `aic sync`.** A project-owned
+  `.devcontainer/vscode-extensions` (one `publisher.name` id per line) is merged
+  into `customizations.vscode.extensions` on every init/sync; invalid lines are
+  warned about and skipped. (aic, template/devcontainer.json)
+- **Per-project VS Code settings survive `aic sync`.** A project-owned
+  `.devcontainer/vscode-settings.json` object is merged into
+  `customizations.vscode.settings`. README adds Python and TypeScript editor +
+  agent-LSP recipes. (aic, README.md)
+- **`.devcontainer/README.md` explains what to edit and what not to.** Shipped
+  into every project (both modes) to steer humans and AI agents away from
+  hand-editing the sync-overwritten `devcontainer.json` toward the project-owned
+  files. (template/README.md, aic)
+
 ## [0.2.3] - 2026-06-03
 
 ### Added

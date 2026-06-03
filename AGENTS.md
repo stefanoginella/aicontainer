@@ -19,6 +19,11 @@ agent-facing notes go here, not in `CLAUDE.md`.
     `aic-chown-volumes`, `aic-lock-gitconfig`, `.zshrc`
   - `docker-compose.pull.yml` — default (pull) mode
   - `docker-compose.build.yml` — `--build` mode
+  - `README.md` — copied into every project's `.devcontainer/` in **both**
+    modes (unconditional `cp` in `apply_template()`, before the mode `case`).
+    A managed/overwritten guide to the do-not-edit vs project-owned split, aimed
+    at stopping humans and AI agents from hand-editing `devcontainer.json`. Keep
+    its two lists in sync with `apply_template()` and the project-owned files.
 - `.github/workflows/`
   - `rebuild.yml` — **security-refresh track.** Runs on template-touching
     pushes to `main`, the weekly cron, and `workflow_dispatch`. Publishes
@@ -74,8 +79,8 @@ wholesale on every `init`/`sync`; only `AIC_TOOLS` / `AIC_SHELL` survive (they
 are re-derived from the old file and re-injected by `patch_devcontainer_json`).
 So users must **not** hand-edit those two files — per-project tweaks go in
 project-owned files that `apply_template()` never touches: `Dockerfile.project`,
-`firewall-allowlist`, `chown-paths`, `post-create.project.sh`, and
-`docker-compose.override.yml`.
+`firewall-allowlist`, `chown-paths`, `post-create.project.sh`,
+`docker-compose.override.yml`, `vscode-extensions`, and `vscode-settings.json`.
 
 The override is the sync-safe home for anything that would otherwise live in
 `containerEnv` or the compose service (env, `extra_hosts`, mounts, a
@@ -117,6 +122,33 @@ lacks) and the PreToolUse hook blocks in-container writes to `.devcontainer/`,
 so it stays host-only-editable. Non-zero exit is logged, not fatal — keep that
 defensive degradation; a flaky project step shouldn't block the devcontainer
 from coming up.
+
+`vscode-extensions` / `vscode-settings.json` are the sync-safe home for
+per-project **editor** customization, since `apply_template()` rewrites
+`devcontainer.json` (and its `customizations.vscode` block) wholesale every
+sync. Same opt-in-by-presence / survives-sync / read-only-inside-container
+contract as the files above. `patch_devcontainer_json()` merges them at two
+JSONC **marker comments** baked into `template/devcontainer.json`
+(`// aic:vscode-extensions` inside the extensions array,
+`// aic:vscode-settings` inside the settings object) — `build_vscode_ext_block`
+/ `build_vscode_settings_block` emit **leading-comma** blocks so the result is
+valid JSON no matter how the template array/object ends, and a JSONC trailing
+comma is tolerated before the closing brace. Load-bearing details, don't undo
+them: (1) **keep the markers** — they're the injection anchors; removing them
+silently drops the merge. (2) The merge re-reads the source files from the
+pristine template on every run, so it's **idempotent** across syncs — don't
+"optimize" it into editing in place. (3) Extension lines are validated against
+the `publisher.name` grammar and **warn+skipped** otherwise (mirrors
+`chown-paths`), and the settings file must be a JSON object whose inner content
+is injected **verbatim** — both go into the host-side `devcontainer.json` the
+user reviews via `git diff`, never into the container, so this isn't a sandbox-
+escape surface, but keep the id validation so a stray line can't smuggle JSON.
+(4) On a key collision aic's own settings win *inside* `devcontainer.json`
+(injected first); the documented escape hatch is the user's own
+`.vscode/settings.json`, which beats devcontainer machine-scope settings — don't
+reorder the injection to "make project win" without updating the README. The
+"aic sync merges project-owned vscode-extensions / vscode-settings.json" CLI
+test in both workflows guards this — extend it, don't weaken it.
 
 **AI-tool refresh on every create.** `refresh_ai_tools()` runs early in
 `main()` and floats Claude Code + Codex to their latest release on every

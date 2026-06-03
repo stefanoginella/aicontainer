@@ -278,6 +278,52 @@ read_aic_tools () {
   sed -n 's/.*"AIC_TOOLS"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n1
 }
 
+# Build the injection block for project-owned VS Code extensions. Reads the
+# given file (if present): skips blank/# lines, trims surrounding whitespace,
+# validates each remaining line against the publisher.extension id grammar and
+# warns+skips anything else (so a stray line can't smuggle arbitrary JSON into
+# devcontainer.json), dedups, and emits one leading-comma line per id. Leading
+# commas keep the result valid JSON no matter how the template array ends.
+# Echoes the (possibly empty) block; warnings go to stderr.
+build_vscode_ext_block () {
+  local file="$1" line id block="" seen=","
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    id="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    case "$id" in ''|\#*) continue ;; esac
+    if ! printf '%s' "$id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9._-]+$'; then
+      printf 'aic: ignoring invalid vscode-extensions entry: %s\n' "$id" >&2
+      continue
+    fi
+    case "$seen" in *",$id,"*) continue ;; esac
+    seen="$seen$id,"
+    block="$block        ,\"$id\"
+"
+  done < "$file"
+  printf '%s' "$block"
+}
+
+# Build the injection block for project-owned VS Code settings. Reads the given
+# file (if present): requires a JSON object (warns+skips otherwise), takes the
+# content strictly between the first { and the last } and emits it verbatim
+# (preserving nested objects, arrays, and JSONC comments) prefixed with a single
+# leading comma. A trailing comma in the object is tolerated by JSONC before the
+# closing brace. Echoes the (possibly empty) block; warnings go to stderr.
+build_vscode_settings_block () {
+  local file="$1" raw inner
+  [ -f "$file" ] || return 0
+  raw="$(cat "$file")"
+  case "$raw" in
+    *"{"*"}"*) ;;
+    *) printf 'aic: ignoring vscode-settings.json (not a JSON object: must be { ... })\n' >&2; return 0 ;;
+  esac
+  inner="${raw#*\{}"     # drop through the first {
+  inner="${inner%\}*}"   # drop from the last } onward
+  case "$inner" in
+    *[![:space:]]*) printf '        ,%s' "$inner" ;;  # non-empty object only
+  esac
+}
+
 patch_devcontainer_json () {
   # Patch the freshly-copied devcontainer.json:
   #   1. Inject "AIC_TOOLS" and "AIC_SHELL" inside containerEnv.
@@ -295,14 +341,29 @@ patch_devcontainer_json () {
   #      distinct label in VS Code's remote indicator. Re-derived from $PWD every
   #      run (like AIC_TOOLS/AIC_SHELL), so it's recomputed on each init/sync and
   #      the template can keep the bare "aicontainer" placeholder.
+  #   8. Merge project-owned .devcontainer/vscode-extensions (one extension id
+  #      per line) into customizations.vscode.extensions at the
+  #      "// aic:vscode-extensions" marker.
+  #   9. Merge project-owned .devcontainer/vscode-settings.json (a JSON object)
+  #      into customizations.vscode.settings at the "// aic:vscode-settings"
+  #      marker.
+  #      Both (8) and (9) are opt-in by file presence, never copied/overwritten
+  #      by apply_template, and RO inside the container — same contract as
+  #      firewall-allowlist / chown-paths. Injected blocks are leading-comma
+  #      so they stay valid JSON regardless of how the template array/object
+  #      ends; the source files are read fresh each run from the pristine
+  #      template, so re-injection is idempotent across syncs.
   # Operates line-wise so JSONC comments don't trip us up.
   local file="$1" tools="$2" shell="$3"
   local hc=0 hx=0 ov=0 tmp font dir pname cname
+  local ext_block="" settings_block=""
   case ",$tools," in *,claude-code,*) hc=1 ;; esac
   case ",$tools," in *,codex,*)       hx=1 ;; esac
 
   dir="$(dirname "$file")"
   [ -f "$dir/docker-compose.override.yml" ] && ov=1
+  ext_block="$(build_vscode_ext_block "$dir/vscode-extensions")"
+  settings_block="$(build_vscode_settings_block "$dir/vscode-settings.json")"
 
   # Project label from the cwd (project root for both init and sync). JSON-escape
   # backslashes and double-quotes so an odd folder name still yields valid JSON.
@@ -318,12 +379,28 @@ patch_devcontainer_json () {
 
   tmp="$(mktemp "${file}.XXXXXX")"
   AIC_DEVCONTAINER_NAME="$cname" \
+  AIC_VSCODE_EXT_BLOCK="$ext_block" \
+  AIC_VSCODE_SETTINGS_BLOCK="$settings_block" \
   awk -v tools="$tools" -v shell="$shell" -v font="$font" -v hc="$hc" -v hx="$hx" -v ov="$ov" '
     {
       # Rewrite the top-level "name" to the per-project label. Read from ENVIRON
       # (not -v) so awk does not re-interpret backslashes in the folder name.
       if ($0 ~ /^[[:space:]]*"name"[[:space:]]*:/) {
         print "  \"name\": \"" ENVIRON["AIC_DEVCONTAINER_NAME"] "\","
+        next
+      }
+
+      # Merge project-owned extensions / settings just before their markers.
+      # The blocks are built leading-comma (ENVIRON, so backslashes/quotes in
+      # settings values survive) and empty when the source file is absent.
+      if ($0 ~ /aic:vscode-extensions/) {
+        if (ENVIRON["AIC_VSCODE_EXT_BLOCK"] != "") printf "%s\n", ENVIRON["AIC_VSCODE_EXT_BLOCK"]
+        print
+        next
+      }
+      if ($0 ~ /aic:vscode-settings/) {
+        if (ENVIRON["AIC_VSCODE_SETTINGS_BLOCK"] != "") printf "%s\n", ENVIRON["AIC_VSCODE_SETTINGS_BLOCK"]
+        print
         next
       }
 
@@ -364,6 +441,10 @@ apply_template () {
   mkdir -p "$dst"
 
   cp "$src/devcontainer.json" "$dst/devcontainer.json"
+  # Copied in both modes: an in-repo guide to which .devcontainer/ files are
+  # aic-managed (overwritten on sync) vs project-owned (survive). Steers humans
+  # and AI agents away from hand-editing devcontainer.json. Itself aic-managed.
+  cp "$src/README.md" "$dst/README.md"
   case "$mode" in
     pull)
       cp "$src/docker-compose.pull.yml" "$dst/docker-compose.yml"
@@ -546,9 +627,16 @@ cmd_sync () {
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
   echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell)"
   echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
-  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, post-create.project.sh, docker-compose.override.yml) are untouched"
+  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, post-create.project.sh, docker-compose.override.yml, vscode-extensions, vscode-settings.json) are untouched"
   if [ -f .devcontainer/docker-compose.override.yml ]; then
     echo "aic: wired docker-compose.override.yml into dockerComposeFile"
+  fi
+  if [ -f .devcontainer/vscode-extensions ]; then
+    local extcount; extcount="$(grep -cvE '^[[:space:]]*(#|$)' .devcontainer/vscode-extensions 2>/dev/null)" || extcount=0
+    echo "aic: merged vscode-extensions ($extcount listed) into customizations.vscode.extensions"
+  fi
+  if [ -f .devcontainer/vscode-settings.json ]; then
+    echo "aic: merged vscode-settings.json into customizations.vscode.settings"
   fi
   check_dockerfile_project_base "$(read_aic_version)" "$bump_base"
 }
@@ -1031,10 +1119,13 @@ Usage:
                        AIC_SHELL selections are preserved unless overridden.
                        Project-owned files (Dockerfile.project, firewall-
                        allowlist, chown-paths, post-create.project.sh,
-                       docker-compose.override.yml) are untouched;
-                       an existing docker-compose.override.yml is auto-wired
-                       into dockerComposeFile so per-project compose tweaks
-                       (env, extra_hosts, build) survive the sync. Useful after
+                       docker-compose.override.yml, vscode-extensions,
+                       vscode-settings.json) are untouched; an existing
+                       docker-compose.override.yml is auto-wired into
+                       dockerComposeFile, and vscode-extensions /
+                       vscode-settings.json are merged into the editor
+                       customizations, so per-project tweaks survive the
+                       sync. Useful after
                        editing template/ in a checkout — saves a manual cp -R.
                        Review with 'git diff' afterward.
                        --bump-base: if Dockerfile.project pins an explicit
