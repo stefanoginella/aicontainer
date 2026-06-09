@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-09
+
 ### Added
 
 - **`aic up` / `aic shell` / `aic rebuild` warn when the pinned image lags your `aic`.**
@@ -351,7 +353,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Initial release: a sandboxed devcontainer for Claude Code and Codex.** Runs
   them in bypass / auto-approve mode.
 
-[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/stefanoginella/aicontainer/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/stefanoginella/aicontainer/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/stefanoginella/aicontainer/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/stefanoginella/aicontainer/compare/v0.2.3...v0.3.0
