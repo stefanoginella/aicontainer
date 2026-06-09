@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Starting the container from VS Code now runs the image/CLI drift check too.**
+  "Reopen/Rebuild in Container" drives `devcontainer up` directly (never the
+  `aic` CLI), so the warning previously only appeared on `aic up`/`shell`/`rebuild`;
+  it's now wired into the devcontainer's `initializeCommand` and logged to the
+  Dev Containers output channel. Best-effort and never blocks the container from
+  starting.
+
 ## [0.4.1] - 2026-06-09
 
 ### Added

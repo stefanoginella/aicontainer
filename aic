@@ -1121,6 +1121,19 @@ cmd_preflight () {
   print_boundary_summary preflight
 }
 
+# Internal. Surface the Tier-1 drift warning from a non-aic entry point: the
+# template's devcontainer.json `initializeCommand` calls this so a VS Code
+# "Reopen/Rebuild in Container" — which drives `devcontainer up` directly and
+# never the aic CLI — still gets the nudge that `aic up`/`shell`/`rebuild` print.
+# Deliberately lenient and undocumented (no require_in_project, always exits 0):
+# it runs inside the host-side initializeCommand chain, where a non-zero exit
+# would abort container startup, and outside a project it must simply no-op.
+# warn_compose_drift already covers both (empty pin / broken read → return 0).
+# Output lands in VS Code's Dev Containers output channel, not the terminal.
+cmd_check_drift () {
+  warn_compose_drift
+}
+
 cmd_rebuild () {
   require_in_project
   # Warn *before* the pull below: `aic rebuild` re-pulls the *currently pinned*
@@ -1331,7 +1344,8 @@ Usage:
 
 Env:
   AIC_HOME             Where the aicontainer files live (default: this script's dir)
-  AIC_NO_UPDATE_CHECK  Set to silence version notifications: the 'up'/'shell'
+  AIC_NO_UPDATE_CHECK  Set to silence version notifications: the
+                       'up'/'shell'/'rebuild' (and VS Code container-start)
                        drift warning (pinned image vs installed aic) and the
                        'version'/'upgrade' "newer aicontainer available" nudge.
 EOF
@@ -1521,6 +1535,7 @@ case "${1:-help}" in
   sync)    shift; cmd_sync "$@" ;;
   up)      shift; cmd_up "$@" ;;
   preflight) shift; cmd_preflight "$@" ;;
+  check-drift) cmd_check_drift ;;   # internal: VS Code initializeCommand hook
   signing) shift; cmd_signing "$@" ;;
   shell)   shift; cmd_shell "$@" ;;
   run)     shift; cmd_run "$@" ;;

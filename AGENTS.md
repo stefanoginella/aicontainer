@@ -89,12 +89,31 @@ the user actually ran) and both silence with `AIC_NO_UPDATE_CHECK=1`.
   `docker-compose.yml` (parsed by `read_pinned_compose_version()`, anchored on
   the repo path so comments/socket-proxy don't match) against the installed
   CLI's `read_aic_version()`, and warns either direction with a `sync &&
-  rebuild` hint. **Known, deliberate blind spots** (offline + zero-cost beats
-  full coverage): it compares CLI-vs-pin, not pin-vs-*running container* — so a
-  synced-but-not-rebuilt project (pin == CLI, stale container still up) is
-  silent (the hint resolves it anyway); and **build-mode projects have no pin,
-  so they're unchecked** (this includes the dogfood repo). Don't "fix" these by
-  adding a `docker inspect` to the hot path without re-reading this tradeoff.
+  rebuild` hint. **Also fires when the container is started from VS Code**
+  ("Reopen/Rebuild in Container"), which drives `devcontainer up` directly and
+  never the `aic` CLI: the template's `initializeCommand` (the only host-side
+  lifecycle hook) ends with a defensive `&& { command -v aic … && aic
+  check-drift >/dev/null; true; }`. `cmd_check_drift` is an internal, lenient
+  entry point (no `require_in_project`, always exits 0) that just calls
+  `warn_compose_drift`. Load-bearing details: (1) the suffix is `&&`-chained
+  **after** the bootstrap so a bootstrap failure still surfaces to VS Code, and
+  the trailing `; true` makes the group exit 0 so a missing/old/erroring `aic`
+  can never abort container startup; (2) `>/dev/null` suppresses stdout so an
+  *old* global `aic` (which lacks the `check-drift` command and would dump
+  `cmd_help`) stays quiet — the real warning is stderr-only; (3) visibility is
+  the **Dev Containers output channel**, not a popup or the terminal (the only
+  way to force a popup is to fail init, which we refuse to do) — so it's strictly
+  additive over the `aic`-CLI path, not equally prominent. The check needs `aic`
+  on PATH in VS Code's `initializeCommand` env (GUI-launched VS Code may have a
+  trimmed PATH); a miss is a silent no-op, never a break. **Known, deliberate
+  blind spots** (offline + zero-cost beats full coverage): it compares
+  CLI-vs-pin, not pin-vs-*running container* — so a synced-but-not-rebuilt
+  project (pin == CLI, stale container still up) is silent (the hint resolves it
+  anyway); and **build-mode projects have no pin, so they're unchecked** (this
+  includes the dogfood repo — so the `check-drift` wiring is mirrored into its
+  `.devcontainer/devcontainer.json` to avoid template drift, but is a no-op
+  there). Don't "fix" these by adding a `docker inspect` to the hot path without
+  re-reading this tradeoff.
 - **Tier 2 — `check_for_update()` (network, off hot path).** Runs only on `aic
   version`/`aic upgrade`. Asks **npm** for the latest published version — *not*
   GHCR, whose `:latest` floats on `rebuild.yml`'s weekly cron independent of

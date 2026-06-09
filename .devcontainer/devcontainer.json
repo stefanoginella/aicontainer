@@ -80,7 +80,7 @@
   //      added later (e.g. npm), existing users' volumes are already non-empty
   //      and the mount fails with "no such file or directory". busybox is tiny
   //      (~5MB) and pulled once.
-  "initializeCommand": "mkdir -p \"$HOME/.claude/statusline\" \"$HOME/.codex\" \"$HOME/.config/opencode\" && touch \"$HOME/.claude/settings.json\" \"$HOME/.codex/config.toml\" \"$HOME/.config/opencode/opencode.json\" \"$HOME/.gitconfig\" \"$HOME/.zshrc.local\" \"$HOME/.p10k.zsh\" && docker volume create aic-auth-global >/dev/null && docker volume create aic-shell-history >/dev/null && docker run --rm -v aic-auth-global:/v busybox mkdir -p /v/claude /v/codex /v/opencode /v/gh /v/npm",
+  "initializeCommand": "mkdir -p \"$HOME/.claude/statusline\" \"$HOME/.codex\" \"$HOME/.config/opencode\" && touch \"$HOME/.claude/settings.json\" \"$HOME/.codex/config.toml\" \"$HOME/.config/opencode/opencode.json\" \"$HOME/.gitconfig\" \"$HOME/.zshrc.local\" \"$HOME/.p10k.zsh\" && docker volume create aic-auth-global >/dev/null && docker volume create aic-shell-history >/dev/null && docker run --rm -v aic-auth-global:/v busybox mkdir -p /v/claude /v/codex /v/opencode /v/gh /v/npm && { command -v aic >/dev/null 2>&1 && aic check-drift >/dev/null; true; }",
 
   "postCreateCommand": "uv run --no-project /opt/post-create.py"
 }

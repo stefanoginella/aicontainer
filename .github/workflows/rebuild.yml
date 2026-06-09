@@ -406,6 +406,30 @@ jobs:
           diff -u "$tmp/dc-before" "$dc" || { echo "FAIL: merge not idempotent"; exit 1; }
           echo "OK: vscode-extensions/settings merged, invalid id rejected, deduped, idempotent"
 
+      - name: CLI test - aic check-drift warns on drift; wired into initializeCommand
+        run: |
+          # Host-only (no container). The pinned-vs-CLI drift warning must also
+          # reach VS Code "Reopen/Rebuild in Container", which drives
+          # `devcontainer up` directly and never the aic CLI: the template's
+          # initializeCommand calls `aic check-drift`. Assert the command warns
+          # on a mismatch (and only then), honors the opt-out, and is wired in.
+          set -euo pipefail
+          tmp="$(mktemp -d)"; cd "$tmp"; git init -q
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
+          # init pins the current version -> no drift -> check-drift is silent.
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
+          [ -z "$out" ] || { echo "FAIL: check-drift warned with no drift: $out"; exit 1; }
+          # Force drift by repinning the compose tag to a bogus version.
+          sed -i -E 's#(aicontainer:)v[0-9]+\.[0-9]+\.[0-9]+#\1v9.9.9#' .devcontainer/docker-compose.yml
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"; echo "$out"
+          echo "$out" | grep -q "pins the v9.9.9 image" || { echo "FAIL: check-drift did not warn on drift"; exit 1; }
+          # AIC_NO_UPDATE_CHECK silences it; exit stays 0 either way.
+          out="$(AIC_NO_UPDATE_CHECK=1 AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
+          [ -z "$out" ] || { echo "FAIL: AIC_NO_UPDATE_CHECK did not silence check-drift: $out"; exit 1; }
+          # The generated devcontainer.json must wire check-drift into initializeCommand.
+          grep -q 'aic check-drift' .devcontainer/devcontainer.json || { echo "FAIL: initializeCommand missing check-drift wiring"; exit 1; }
+          echo "OK: check-drift warns only on drift, honors opt-out, and is wired into initializeCommand"
+
   publish:
     # Refresh `:latest` and the weekly tag on every push to main that touches
     # template files, the weekly cron, or manual dispatch — never on PRs (forks

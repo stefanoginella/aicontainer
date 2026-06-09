@@ -453,6 +453,7 @@ The pull-mode compose file pins `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` to w
 aic nudges you when those versions drift, so a stale container doesn't go unnoticed:
 
 - **`aic up` / `aic shell` / `aic rebuild`** print a warning (offline, no network) when this project's pinned image tag and your installed `aic` disagree — exactly the state you land in after `npm update -g aicontainer` before you've re-synced. The fix it points at is `aic sync && aic rebuild`. On `aic rebuild` it fires *before* the pull — handy, because `rebuild` re-pulls the currently pinned tag, so you can abort and `aic sync` first instead of re-fetching the stale image. (Build-mode projects have no pinned tag, so they aren't checked.)
+- **VS Code "Reopen / Rebuild in Container"** runs the same check (via the devcontainer's `initializeCommand`, host-side), since that path drives `devcontainer up` directly and never the `aic` CLI. The warning lands in the **Dev Containers output channel** (View → Output → "Dev Containers"), not a notification — so it's there if you go looking, but less in-your-face than the terminal warning above. It's best-effort: if `aic` isn't on the PATH VS Code launched with, the check is silently skipped and never blocks the container from coming up.
 - **`aic version` / `aic upgrade`** tell you when a newer `aicontainer` has been published to npm. This check is cached for a day, fails silently when offline, and is skipped in CI.
 
 Set `AIC_NO_UPDATE_CHECK=1` to silence both.
