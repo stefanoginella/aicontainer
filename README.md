@@ -393,6 +393,20 @@ command -v pyright-langserver >/dev/null || npm i -g pyright || echo "[post-crea
 
 > Install `pyright`, **not** `basedpyright` — Claude Code's LSP tool looks for the `pyright-langserver` binary, which the `pyright` package provides (`basedpyright` ships `basedpyright-langserver`).
 
+#### Recipe: Stop VS Code auto-activating a `.venv` in the terminal
+
+With the Python extension installed (e.g. from the recipe above) **and** a project `.venv`, VS Code auto-activates it by *typing and running* `source /workspace/.venv/bin/activate` in every new integrated terminal. In this container the terminal mostly exists to launch AI CLIs, so that injected line lands at the prompt and clobbers the command you're starting (`claude`, `opencode`, `codex`). Turn it off — the first key covers the classic `ms-python.python`, the second the newer **Python Environments** extension (whose default `command` mode is the usual culprit):
+
+```jsonc
+// .devcontainer/vscode-settings.json
+{
+  "python.terminal.activateEnvironment": false,
+  "python-envs.terminal.autoActivationType": "off"
+}
+```
+
+Then `aic sync` (host-side) and `aic rebuild`. This is the editor injecting *and running* the line — distinct from the harmless Claude Code prompt *pre-fill* covered in [Troubleshooting](#troubleshooting), which never executes.
+
 #### Recipe: TypeScript / JavaScript LSP (editor **and** agent)
 
 VS Code bundles the TypeScript language service with the editor, so the editor half is mostly lint/format extensions. The agent's LSP tool wants the `typescript-language-server` binary on `PATH`:
@@ -619,6 +633,8 @@ fi
 ```
 
 Setting the vars directly — rather than `source`-ing `/workspace/.venv/bin/activate` — is deliberate: it gives Claude the signal it checks for without executing a script out of the tool-writable workspace on every shell start. The `[[ -d … ]]` guard keeps it a no-op in projects with no root `.venv` (the file is shared across all your projects on this host). zsh only — bash/fish have no host `.local` include.
+
+If instead the same line is being *typed and run* into the terminal (clobbering a `claude`/`opencode` you just launched), that's the VS Code Python extension, not Claude — see [Recipe: Stop VS Code auto-activating a `.venv` in the terminal](#recipe-stop-vs-code-auto-activating-a-venv-in-the-terminal).
 
 **`aic shell` succeeds but `claude` errors with permission issues.** `post-create.py` runs during `aic up`, not on shell entry — scroll the `aic up` output for `[post-create]` warnings (volume ownership, hook setup, settings write). `aic rebuild` re-runs it cleanly.
 
