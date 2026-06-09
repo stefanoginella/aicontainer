@@ -48,7 +48,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # git-delta
 # renovate: datasource=github-releases depName=dandavison/delta
-ARG GIT_DELTA_VERSION=0.18.2
+ARG GIT_DELTA_VERSION=0.19.2
 RUN ARCH=$(dpkg --print-architecture) && \
     curl -fsSL "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" -o /tmp/git-delta.deb && \
     dpkg -i /tmp/git-delta.deb && \
