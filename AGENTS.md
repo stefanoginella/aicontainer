@@ -75,6 +75,37 @@ of**: the template (`docker-compose.pull.yml`), the sed pattern in
 `apply_template()` inside `aic`, the README's GHCR references, the
 `aic-firewall` allowlist's `ghcr.io` entry, and both workflows' image tags.
 
+## Version drift / update notifications
+
+Two best-effort version checks live next to `read_aic_version()` in `aic`; both
+fail soft (every error path `return 0` — they must **never** abort the command
+the user actually ran) and both silence with `AIC_NO_UPDATE_CHECK=1`.
+
+- **Tier 1 — `warn_compose_drift()` (offline, hot path).** Runs on `aic
+  up`/`aic shell`/`aic rebuild` (on `rebuild`, **before** the `docker pull` —
+  `rebuild` re-pulls the *currently pinned* tag and never re-pins, so without the
+  early warning it would silently re-fetch the stale image; firing first lets the
+  user abort and `aic sync`). Compares the `:vX.Y.Z` pinned in the project's
+  `docker-compose.yml` (parsed by `read_pinned_compose_version()`, anchored on
+  the repo path so comments/socket-proxy don't match) against the installed
+  CLI's `read_aic_version()`, and warns either direction with a `sync &&
+  rebuild` hint. **Known, deliberate blind spots** (offline + zero-cost beats
+  full coverage): it compares CLI-vs-pin, not pin-vs-*running container* — so a
+  synced-but-not-rebuilt project (pin == CLI, stale container still up) is
+  silent (the hint resolves it anyway); and **build-mode projects have no pin,
+  so they're unchecked** (this includes the dogfood repo). Don't "fix" these by
+  adding a `docker inspect` to the hot path without re-reading this tradeoff.
+- **Tier 2 — `check_for_update()` (network, off hot path).** Runs only on `aic
+  version`/`aic upgrade`. Asks **npm** for the latest published version — *not*
+  GHCR, whose `:latest` floats on `rebuild.yml`'s weekly cron independent of
+  releases and would mis-report "behind." `fetch_latest_version()` is bounded
+  (`curl --max-time`, npm-view fallback) and its result is gated through
+  `is_semver()` before any `printf` — that validation is also the
+  terminal-escape defense against a hostile registry response; keep it. Cached
+  24h under `$XDG_CACHE_HOME/aicontainer/update-check`, and **skipped when `CI`
+  is set** — which is what keeps the workflow CLI tests offline; don't remove
+  that guard.
+
 ## Project-owned override files (don't break the auto-wire)
 
 `apply_template()` overwrites `devcontainer.json` and `docker-compose.yml`

@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`aic up` / `aic shell` / `aic rebuild` warn when the pinned image lags your `aic`.**
+  An offline check compares the `:vX.Y.Z` pinned in `docker-compose.yml` against
+  the installed CLI and points at `aic sync && aic rebuild` to reconcile; on
+  `rebuild` it fires before the pull, so you can abort and re-pin first.
+  (Build-mode projects have no pin and are not checked.)
+- **`aic version` / `aic upgrade` flag a newer published `aicontainer`.** Queried
+  from npm (the upgrade source of truth), cached for 24h, fail-silent, and
+  skipped in CI. Silence both notifications with `AIC_NO_UPDATE_CHECK=1`.
+
 ## [0.4.0] - 2026-06-09
 
 ### Added
