@@ -12,8 +12,9 @@
   ],
   "customManagers": [
     {
+      "description": "Keep the ARG *_VERSION pins in sync across both Dockerfiles. .devcontainer/Dockerfile is a build-mode copy of template/Dockerfile; the built-in dockerfile manager already bumps FROM digests in both, so scope this regex manager to both too — otherwise fzf/git-delta bumps land only in template/ and the dogfood drifts every cycle (reconciled previously by a manual `aic sync`).",
       "customType": "regex",
-      "managerFilePatterns": ["/^template/Dockerfile$/"],
+      "managerFilePatterns": ["/^template/Dockerfile$/", "/^\\.devcontainer/Dockerfile$/"],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)(?: registryUrl=(?<registryUrl>.*?))?\\s+ARG \\w+_VERSION=(?<currentValue>.*)\\s"
       ]
