@@ -7,13 +7,13 @@
 [![Container: GHCR](https://img.shields.io/badge/container-ghcr.io-2188ff?logo=github)](https://github.com/stefanoginella/aicontainer/pkgs/container/aicontainer)
 [![Devcontainer spec](https://img.shields.io/badge/devcontainer-spec-blue?logo=visualstudiocode)](https://containers.dev/)
 
-A sandboxed devcontainer for running [Claude Code](https://claude.ai/code) and [Codex](https://github.com/openai/codex) in bypass / auto-approve mode safely across multiple projects.
+A sandboxed devcontainer for running [Claude Code](https://claude.ai/code), [Codex](https://github.com/openai/codex), and [OpenCode](https://opencode.ai) in bypass / auto-approve mode safely across multiple projects.
 
 **Why?** Auto-approve is the only way these CLIs actually fly — but pointed at your real `$HOME` it also lets a prompt-injected dependency read `.env`, exfiltrate shell history, or push through your `gh` token. `aicontainer` puts the AI behind a devcontainer boundary so you can keep auto-approve on without rebuilding your machine each time.
 
 **What you get:** filesystem isolation, a filtered Docker socket via [Tecnativa's docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy), a minimal PreToolUse hook, and an **opt-in** iptables outbound allowlist. No AI-generated config, no per-project re-login. Defaults are listed in [What's in the box](#whats-in-the-box) so you know exactly what you're adopting.
 
-> Adjacent work: same shape as the [Trail of Bits devcontainer](https://github.com/trailofbits/claude-code-devcontainer), with Codex added, Docker access turned on by default, and host shell look-and-feel preserved.
+> Adjacent work: same shape as the [Trail of Bits devcontainer](https://github.com/trailofbits/claude-code-devcontainer), with Codex and OpenCode added, Docker access turned on by default, and host shell look-and-feel preserved.
 
 ## What crosses the boundary
 
@@ -25,7 +25,7 @@ shown automatically at the end of every `aic up`).
 |---|---|
 | Project directory | **Yes, read-write** (`/workspace`) — the one writable host path. |
 | `~/.gitconfig`, `~/.p10k.zsh`, `~/.zshrc.local` | Read-only (shell look-and-feel). |
-| `~/.claude/settings.json`, `~/.codex/config.toml` | Read-only **seed** — an allowlisted subset of fields; security-critical ones are force-overridden. See [Config seeding](#config-seeding-from-the-host). |
+| `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.config/opencode/opencode.json` | Read-only **seed** — an allowlisted subset of fields; security-critical ones are force-overridden (and inline provider API keys are stripped from the OpenCode seed). See [Config seeding](#config-seeding-from-the-host). |
 | Host home, `~/.ssh`, SSH-agent socket | **No** — not mounted, not forwarded. |
 | Host credentials (API keys, `gh` token, keychain) | **No** — nothing auto-forwarded; you log in once *inside* the container. |
 | Package-manager caches | **No** — container-local volumes, not your host caches. |
@@ -64,7 +64,7 @@ echo 'eval "$(aic completion zsh)"'  >> ~/.zshrc
 aic completion fish > ~/.config/fish/completions/aic.fish
 ```
 
-Then reopen your shell. You'll get tab-completion for subcommands (`init`, `sync`, `up`, …), their flags (`--build`, `--force`, `--with`, `--pull`, `--shell`), and the `--with` / `--shell` values (`claude-code`, `codex`, `claude-code,codex` and `zsh`, `bash`, `fish`).
+Then reopen your shell. You'll get tab-completion for subcommands (`init`, `sync`, `up`, …), their flags (`--build`, `--force`, `--with`, `--pull`, `--shell`), and the `--with` / `--shell` values (`claude-code`, `codex`, `opencode`, `claude-code,codex,opencode` and `zsh`, `bash`, `fish`).
 
 ## First-time auth
 
@@ -79,6 +79,7 @@ aic shell
 # Inside the container:
 claude /login           # OAuth flow in your host browser
 codex auth login        # OpenAI auth
+opencode auth login     # pick a provider (Anthropic, OpenAI, OpenCode Zen, …)
 gh auth login           # GitHub (use a fine-grained PAT if you can)
 npm login               # only if you publish packages — token persists too
 ```
@@ -94,6 +95,7 @@ aic up             # pulls ghcr.io/stefanoginella/aicontainer:vX.Y.Z (pinned to 
 aic shell          # opens the configured interactive shell (zsh by default)
 claude             # runs in bypass mode (permissions skip)
 codex              # runs in auto-approve mode (sandbox off)
+opencode           # runs with permissions set to allow (guardrail still on)
 ```
 
 `aic init` defaults to **pull mode**: it drops in only `devcontainer.json` and `docker-compose.yml`, and `aic up` pulls the prebuilt image from GHCR (≈30s on a warm runtime, vs. several minutes to build from scratch). Everything else — the Dockerfile, `post-create.py`, the firewall script, hooks — is baked into the image.
@@ -104,15 +106,16 @@ Other commands: `aic run CMD ...` runs a one-shot inside the container without o
 
 ### Choosing tools per project
 
-By default `aic init` enables both Claude Code and Codex. To pick a subset, either answer the interactive checkbox prompt (↑/↓ move, space toggles, enter confirms) or pass `--with`:
+By default `aic init` enables Claude Code, Codex, and OpenCode. To pick a subset, either answer the interactive checkbox prompt (↑/↓ move, space toggles, enter confirms) or pass `--with`:
 
 ```bash
-aic init --with claude-code         # claude only
-aic init --with codex               # codex only
-aic init --with claude-code,codex   # both (same as the default)
+aic init --with claude-code                  # claude only
+aic init --with codex                        # codex only
+aic init --with opencode                     # opencode only
+aic init --with claude-code,codex,opencode   # all three (same as the default)
 ```
 
-The selection is persisted as `containerEnv.AIC_TOOLS` in `.devcontainer/devcontainer.json`. `post-create.py` reads it to decide which tool's settings to seed, and the VS Code extensions list is filtered to match (the `anthropic.claude-code` and `openai.chatgpt` extensions are dropped when their tool isn't selected). Both CLIs are still present in the image either way — you can re-enable a tool later with `aic sync --with claude-code,codex`. When stdin isn't a TTY (CI, piped installers), the prompt is skipped and both tools default to on.
+The selection is persisted as `containerEnv.AIC_TOOLS` in `.devcontainer/devcontainer.json`. `post-create.py` reads it to decide which tool's settings to seed, and the VS Code extensions list is filtered to match (the `anthropic.claude-code`, `openai.chatgpt`, and `sst-dev.opencode` extensions are dropped when their tool isn't selected). All three CLIs are still present in the image either way — you can re-enable a tool later with `aic sync --with claude-code,codex,opencode`. When stdin isn't a TTY (CI, piped installers), the prompt is skipped and all tools default to on.
 
 ### Choosing a shell per project
 
@@ -135,7 +138,7 @@ If you work in VS Code, you can skip `aic up` and `aic shell` entirely — the e
 3. Open the project folder in the editor.
 4. `Cmd+Shift+P` → **Dev Containers: Reopen in Container**.
 
-The editor builds the image, brings up the compose stack (devcontainer + socket-proxy), runs `postCreateCommand`, and drops you into an integrated terminal that's already inside the container. `claude` and `codex` are available immediately.
+The editor builds the image, brings up the compose stack (devcontainer + socket-proxy), runs `postCreateCommand`, and drops you into an integrated terminal that's already inside the container. `claude`, `codex`, and `opencode` are available immediately.
 
 You can still use `aic` from a separate terminal at the same time — `aic rebuild`, `aic destroy`, etc. operate on the same compose project as the editor, so the two paths don't conflict.
 
@@ -147,11 +150,13 @@ You can still use `aic` from a separate terminal at the same time — `aic rebui
 
 - **npm hardening**: `NPM_CONFIG_IGNORE_SCRIPTS=true` blocks `postinstall` RCE, the most common supply-chain vector. `NPM_CONFIG_MIN_RELEASE_AGE=1` rejects any package published in the last 24h (mitigates fast-moving malicious releases — npm interprets the value in days). `audit=true`, `fund=false`.
 - **Locked config + shell rc**: `~/.gitconfig.local` is chowned `root:root 0444` after first run, so a compromised AI session can't inject `credential.helper` or `core.sshCommand` to capture tokens during in-container `git push` / `gh` flows. The baked login-shell rc files (`~/.zshrc`, `~/.bashrc`, fish config) are root-locked the same way, so a session can't plant a payload that runs on the next `aic shell`. Host `~/.gitconfig` is included read-only.
-- **PreToolUse hook** (Claude + Codex, fires even with bypass/auto-approve on) blocks:
+- **PreToolUse hook** (Claude, Codex + OpenCode, fires even with bypass/auto-approve/allow on) blocks:
   - reads of `.env*` files — via `Read`/`Edit`/`Write`/`Grep`/`Glob` and in Bash commands (allowing `.env.example|.sample|.template|.defaults`),
   - `curl|sh` / `wget|bash` fetch-and-execute in Bash (including `| sudo bash`, `| tee | sh`, and `bash -c "$(curl …)"` variants),
   - writes to `/etc/aic/`, `/workspace/.devcontainer/`, and the login-shell rc files (`~/.zshrc` / `~/.bashrc` / fish config + their `.local` includes) — defense-in-depth on top of the RO mounts and root-locks above.
-- **Forced AI sandbox settings** — host config can't loosen these: Claude `permissions.defaultMode=bypassPermissions` + hook registration, Codex `approval_policy=never` + `sandbox_mode=danger-full-access` + hook registration. See [Config seeding from the host](#config-seeding-from-the-host) for the full allowlist/dropped fields.
+
+  One script (`/etc/aic/hooks/pre-tool-use.sh`) is the single source of truth for all three tools: Claude registers it in `settings.json`, Codex via a managed hook, and OpenCode via a small plugin (`opencode-guardrail.js`) that translates its tool calls and shells out to the same script.
+- **Forced AI sandbox settings** — host config can't loosen these: Claude `permissions.defaultMode=bypassPermissions` + hook registration, Codex `approval_policy=never` + `sandbox_mode=danger-full-access` + hook registration, OpenCode `permission."*"=allow` + the guardrail plugin. See [Config seeding from the host](#config-seeding-from-the-host) for the full allowlist/dropped fields.
 - **Container global gitignore** covers `.env*`, `.claude/`, `.codex/`, `node_modules/`, `.venv/`, `__pycache__/`, `.DS_Store` — fewer ways to accidentally commit a secret.
 - **No host credential forwarding**: no SSH-agent socket, no `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` passthrough, no host `gh` token. You log in once *inside* the container; tokens persist in `aic-auth-global`. Because the SSH agent and `~/.ssh` aren't forwarded, host **commit signing** can't work in here either — use [`aic signing`](#commit-signing) for the sandbox-key alternative.
 
@@ -161,7 +166,7 @@ You can still use `aic` from a separate terminal at the same time — `aic rebui
 - **Editor**: `$EDITOR=nano`, `$VISUAL=nano`. `vim` is installed but isn't default.
 - **Runtimes**: Python 3.13 via [`uv`](https://github.com/astral-sh/uv); Node 24 LTS via [`fnm`](https://github.com/Schniz/fnm) (so projects can override per-`.nvmrc`).
 - **CLI utilities**: `ripgrep`, `fd-find`, `fzf`, `tmux`, `jq`, `gh`, `docker` CLI (+ buildx, compose), `semgrep`, [`git-delta`](https://github.com/dandavison/delta) (wired in as `core.pager` and `interactive.diffFilter`).
-- **VS Code extensions** auto-installed when you open in the editor: `anthropic.claude-code`, `openai.chatgpt` (each gated by `AIC_TOOLS`), `eamodio.gitlens`, `pflannery.vscode-versionlens`, `BracketPairColorDLW.bracket-pair-color-dlw`, `vincaslt.highlight-matching-tag`, `yzhang.markdown-all-in-one`. Add your own per project (e.g. the Python or TypeScript editor stack) via [`.devcontainer/vscode-extensions` and `vscode-settings.json`](#project-specific-vs-code-extensions--settings).
+- **VS Code extensions** auto-installed when you open in the editor: `anthropic.claude-code`, `openai.chatgpt`, `sst-dev.opencode` (each gated by `AIC_TOOLS`), `eamodio.gitlens`, `pflannery.vscode-versionlens`, `BracketPairColorDLW.bracket-pair-color-dlw`, `vincaslt.highlight-matching-tag`, `yzhang.markdown-all-in-one`. Add your own per project (e.g. the Python or TypeScript editor stack) via [`.devcontainer/vscode-extensions` and `vscode-settings.json`](#project-specific-vs-code-extensions--settings).
 - **VS Code terminal settings**: default profile + font family follow the project's `AIC_SHELL` (zsh → `MesloLGS NF`; bash/fish → `monospace`), right-click pastes, only `http/https/mailto/vscode` link schemes opened (`file://` OSC 8 links suppressed to dodge [microsoft/vscode#211443](https://github.com/microsoft/vscode/issues/211443)).
 - **Misc env**: `PYTHONDONTWRITEBYTECODE=1`, `PIP_DISABLE_PIP_VERSION_CHECK=1`, `GIT_CONFIG_GLOBAL=/home/vscode/.gitconfig.local` (so the host gitconfig stays read-only).
 
@@ -416,23 +421,23 @@ command -v typescript-language-server >/dev/null || npm i -g typescript typescri
 
 ## Updating AI tools
 
-Claude Code and Codex refresh to their latest release **on every `aic rebuild`**, in
-both pull and build mode: `post-create.py` runs `claude update` and `codex update`
-each time the container is (re)created. The pinned image is just the baseline they're
-layered on.
+Claude Code, Codex and OpenCode refresh to their latest release **on every `aic
+rebuild`**, in both pull and build mode: `post-create.py` runs `claude update`,
+`codex update` and `opencode upgrade` each time the container is (re)created. The
+pinned image is just the baseline they're layered on.
 
 ```bash
-aic rebuild   # in a project: recreate the container → Claude + Codex update to latest
+aic rebuild   # in a project: recreate the container → all enabled CLIs update to latest
 ```
 
 The refresh is fail-soft — with no network it keeps the version baked into the image
 and the container still comes up. For a fully reproducible sandbox, pin the tools too
 by setting `AIC_FREEZE_TOOLS=1` in `.devcontainer/docker-compose.override.yml`.
 
-> Codex installs via OpenAI's official standalone installer (not npm), mirroring
-> Claude's native installer — so `codex update` works and the Codex CLI is **not**
-> subject to the `NPM_CONFIG_MIN_RELEASE_AGE` npm quarantine (which still governs
-> npx-based MCP servers).
+> Codex and OpenCode install via their official standalone installers (not npm),
+> mirroring Claude's native installer — so `codex update` / `opencode upgrade` work
+> and neither CLI is subject to the `NPM_CONFIG_MIN_RELEASE_AGE` npm quarantine
+> (which still governs npx-based MCP servers).
 
 To update **aicontainer itself** — the `aic` CLI, the template, and the pinned base
 image (base OS, Node, semgrep, hooks, …):
@@ -445,41 +450,43 @@ aic rebuild                 # in each project: pull the new image
 
 The pull-mode compose file pins `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` to whatever aic version did `aic init` (or the last `aic sync`) — not `:latest`. This keeps the CLI and the in-container filesystem layout (hooks, sudoers, helper scripts) from drifting apart. To pick up a new image, bump aic and `aic sync` first; `aic rebuild` alone won't change the pinned tag.
 
-`:vX.Y.Z` tags are immutable once published — they capture the exact image built at release time. CI separately rebuilds and pushes a floating `ghcr.io/stefanoginella/aicontainer:latest` on a weekly schedule and on every template change merged to main, for users who prefer base-layer freshness over reproducibility; that tag isn't referenced by default, but you can opt in by editing `.devcontainer/docker-compose.yml`. In `--build` mode `aic rebuild` also does a no-cache local rebuild of the baked image layers (base OS, Node, semgrep, and the Claude/Codex floor); the post-create refresh above then floats the two CLIs to latest regardless of mode.
+`:vX.Y.Z` tags are immutable once published — they capture the exact image built at release time. CI separately rebuilds and pushes a floating `ghcr.io/stefanoginella/aicontainer:latest` on a weekly schedule and on every template change merged to main, for users who prefer base-layer freshness over reproducibility; that tag isn't referenced by default, but you can opt in by editing `.devcontainer/docker-compose.yml`. In `--build` mode `aic rebuild` also does a no-cache local rebuild of the baked image layers (base OS, Node, semgrep, and the Claude/Codex/OpenCode floor); the post-create refresh above then floats all three CLIs to latest regardless of mode.
 
 The 2 files (pull mode) or full set (build mode) under `.devcontainer/` are not refreshed by `aic rebuild` on their own — they're created once by `aic init`. If a new template version changes them (e.g. a docker-compose mount), run `aic sync` to re-copy from the installed template into `./.devcontainer/`, then `aic rebuild`. `aic sync` auto-detects pull vs. build mode, preserves the project's `AIC_TOOLS` and `AIC_SHELL` selections (pass `--with` / `--shell` to change them), and leaves project-owned files (`Dockerfile.project`, `firewall-allowlist`, `chown-paths`, `post-create.project.sh`, `docker-compose.override.yml`) untouched — re-wiring an existing [`docker-compose.override.yml`](#per-project-overrides-that-survive-aic-sync) into `dockerComposeFile` so per-project compose tweaks survive the sync.
 
 ## Multi-project model
 
 > **Your transcripts survive.** Session history is a first-class part of the
-> model, not an afterthought. `~/.claude/projects/` and `~/.codex/sessions/`
-> live in a **per-project named volume** (`<proj>_aic-sessions`), so they
-> survive container recreation (`aic rebuild`, `aic up`) without ever being
-> written back to your host home — the host's `~/.claude/projects/` is *not*
-> mounted. The only thing that clears them is `aic destroy` (which says so
-> before it does). So you get isolation *and* durable decision history.
+> model, not an afterthought. `~/.claude/projects/`, `~/.codex/sessions/`, and
+> OpenCode's session db live in a **per-project named volume**
+> (`<proj>_aic-sessions`), so they survive container recreation (`aic rebuild`,
+> `aic up`) without ever being written back to your host home — the host's
+> `~/.claude/projects/` is *not* mounted. The only thing that clears them is
+> `aic destroy` (which says so before it does). So you get isolation *and*
+> durable decision history.
 
 What's shared across all aicontainer projects on your host vs. what's per-project:
 
 | | Scope | Volume |
 |---|---|---|
-| `~/.claude`, `~/.codex`, `~/.config/gh`, `~/.config/npm` (auth + plugins + recent-session metadata), `semgrep` login token | **Global** | `aic-auth-global` (subpath mounts + `SEMGREP_SETTINGS_FILE`) |
+| `~/.claude`, `~/.codex`, `~/.local/share/opencode`, `~/.config/gh`, `~/.config/npm` (auth + plugins + recent-session metadata), `semgrep` login token | **Global** | `aic-auth-global` (subpath mounts + `SEMGREP_SETTINGS_FILE`) |
 | Shell history (`.zsh_history`) | **Global** | `aic-shell-history` |
 | Claude session JSONLs (`~/.claude/projects/`) | **Per-project** | `<proj>_aic-sessions` |
 | Codex session history (`~/.codex/sessions/`, `history.jsonl`) | **Per-project** | `<proj>_aic-sessions` |
+| OpenCode session db (`OPENCODE_DB`) + storage | **Per-project** | `<proj>_aic-sessions` |
 | Project source code | Bind mount | `${PWD}` |
 | p10k theme, host gitconfig | Bind mount RO | host `~/.p10k.zsh`, host `~/.gitconfig` |
-| Claude / Codex global config (seed) | Bind mount RO | host `~/.claude/settings.json`, `~/.claude/statusline/`, `~/.codex/config.toml` |
+| Claude / Codex / OpenCode global config (seed) | Bind mount RO | host `~/.claude/settings.json`, `~/.claude/statusline/`, `~/.codex/config.toml`, `~/.config/opencode/opencode.json` |
 
-The per-project rows are dir-level symlinks pointing out of `aic-auth-global` into `<proj>_aic-sessions`, so atomic-rename writes to files *inside* those directories stay project-scoped.
+The Claude/Codex per-project rows are dir-level symlinks pointing out of `aic-auth-global` into `<proj>_aic-sessions`, so atomic-rename writes to files *inside* those directories stay project-scoped. OpenCode keeps its sessions in a sqlite db, which is relocated into the same per-project volume via the `OPENCODE_DB` env var (with its `storage/` and `snapshot/` dirs symlinked there too, so working-tree checkpoints stay project-scoped).
 
 Two consequences:
 - Log in once, work on twenty projects.
-- Per-project chat history (`~/.claude/projects/`, `~/.codex/sessions/`) is isolated — a compromised AI in project A can't read project B's transcripts. **But** anything else under `~/.claude` / `~/.codex` — recent-session metadata, plugins, caches, `history.jsonl` — is shared across projects via `aic-auth-global`, alongside the auth tokens. Accept this trade-off knowingly.
+- Per-project chat history (`~/.claude/projects/`, `~/.codex/sessions/`, OpenCode's db) is isolated — a compromised AI in project A can't read project B's transcripts. **But** anything else under `~/.claude` / `~/.codex` / `~/.local/share/opencode` — recent-session metadata, plugins, caches, `history.jsonl` — is shared across projects via `aic-auth-global`, alongside the auth tokens. Accept this trade-off knowingly.
 
 ### Config seeding from the host
 
-On first container creation, `post-create.py` reads `~/.claude/settings.json` and `~/.codex/config.toml` from the read-only seed mounts above and copies an **allowlisted subset** of fields into the container's config. Security-critical fields are then force-overwritten:
+On first container creation, `post-create.py` reads `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.config/opencode/opencode.json` from the read-only seed mounts above and copies an **allowlisted subset** of fields into the container's config. Security-critical fields are then force-overwritten:
 
 | Field | Container always sets |
 |---|---|
@@ -487,18 +494,22 @@ On first container creation, `post-create.py` reads `~/.claude/settings.json` an
 | Claude `hooks` | the aicontainer PreToolUse hook |
 | Codex `approval_policy` | `never` |
 | Codex `sandbox_mode` | `danger-full-access` |
+| OpenCode `permission` | `{ "*": "allow" }` |
+| OpenCode `plugin` | the aicontainer guardrail plugin |
 
-Claude's PreToolUse hook is forced into `~/.claude/settings.json`. Codex's isn't seeded into `config.toml` (a hook there is *untrusted* and skipped in autonomous mode) — it's baked as a **managed** hook in `/etc/codex/requirements.toml`, which Codex auto-trusts and the in-container user can't disable.
+Claude's PreToolUse hook is forced into `~/.claude/settings.json`. Codex's isn't seeded into `config.toml` (a hook there is *untrusted* and skipped in autonomous mode) — it's baked as a **managed** hook in `/etc/codex/requirements.toml`, which Codex auto-trusts and the in-container user can't disable. OpenCode's guardrail is forced in as a `plugin` entry pointing at the root-owned `opencode-guardrail.js`, which calls the same shared script.
 
-Seeded (when present on the host): Claude `env`, `statusLine`, `enabledPlugins`, `mcpServers` / `enabledMcpjsonServers`, `theme`, `model`, `effortLevel`, `editorMode`, `verbose`, `fileCheckpointingEnabled`, `outputStyle`, plus a handful of other preference fields. Codex `model`, `model_reasoning_effort`, `personality`, `[features]`, `[notice]`, `[projects.*]`, `[mcp_servers.*]`.
+Seeded (when present on the host): Claude `env`, `statusLine`, `enabledPlugins`, `mcpServers` / `enabledMcpjsonServers`, `theme`, `model`, `effortLevel`, `editorMode`, `verbose`, `fileCheckpointingEnabled`, `outputStyle`, plus a handful of other preference fields. Codex `model`, `model_reasoning_effort`, `personality`, `[features]`, `[notice]`, `[projects.*]`, `[mcp_servers.*]`. OpenCode `provider`, `model`, `small_model`, `mcp`, `agent`, `instructions`, `theme`, `keybinds`, `formatter`, `lsp`.
 
-**Dropped from the host (never seeded):** Claude `permissions.allow/deny/ask`, Claude `hooks`, Claude `apiKeyHelper` / `awsAuthRefresh` / `awsCredentialExpiration`, Codex top-level `approval_policy` / `sandbox_mode`, Codex `[hooks.*]`. These either defeat the in-container sandbox or carry host-specific auth secrets.
+**Dropped from the host (never seeded):** Claude `permissions.allow/deny/ask`, Claude `hooks`, Claude `apiKeyHelper` / `awsAuthRefresh` / `awsCredentialExpiration`, Codex top-level `approval_policy` / `sandbox_mode`, Codex `[hooks.*]`, OpenCode `permission` / `plugin` (we force them) **and any inline provider API key** (`provider.*.options.apiKey` and similar — scrubbed recursively). These either defeat the in-container sandbox or carry host-specific auth secrets.
 
-**MCPs:** seeded for both Claude and Codex. An MCP that references a host-only binary (e.g. `/Applications/Foo.app/...`) won't start in the container — the agent logs the failure and continues. URL-based MCPs (`context7`, `openaiDeveloperDocs`, etc.) and npm-installed MCPs work as on the host. If you want a different MCP set in the container than on the host, edit `~/.claude/settings.json` or `~/.codex/config.toml` inside the container (both are writable by the dev user).
+**MCPs:** seeded for all three tools. An MCP that references a host-only binary (e.g. `/Applications/Foo.app/...`) won't start in the container — the agent logs the failure and continues. URL-based MCPs (`context7`, `openaiDeveloperDocs`, etc.) and npm-installed MCPs work as on the host. MCP server secrets carried in env/headers ride along with the seed (same accepted trade-off across all three tools). If you want a different MCP set in the container than on the host, edit `~/.claude/settings.json`, `~/.codex/config.toml`, or `~/.config/opencode/opencode.json` inside the container (all writable by the dev user).
+
+**Providers (OpenCode):** custom provider/model definitions in your host `opencode.json` (e.g. a DeepSeek endpoint or a local model list) carry over so they're available as options — but **provider API keys are never forwarded** (the inline `apiKey` is stripped from the seed). Run `opencode auth login` inside the container once; the credential persists across rebuilds in `aic-auth-global`.
 
 **Statusline:** if your host `statusLine.command` references a script under `~/.claude/`, the path is rewritten to `/host-seed/claude/...` and the script is run from the RO mount. Scripts that live elsewhere on the host need a custom bind mount added to `.devcontainer/docker-compose.yml`.
 
-**Host paths NOT mounted:** `~/.claude/projects/`, `~/.claude/.credentials.json`, `~/.claude.json`, `~/.codex/sessions/`, `~/.codex/auth.json`, `~/.codex/history.jsonl`. Chat history and auth tokens stay on the host; the container builds its own via `claude /login` etc. on first run.
+**Host paths NOT mounted:** `~/.claude/projects/`, `~/.claude/.credentials.json`, `~/.claude.json`, `~/.codex/sessions/`, `~/.codex/auth.json`, `~/.codex/history.jsonl`, `~/.local/share/opencode/auth.json`. Chat history and auth tokens stay on the host; the container builds its own via `claude /login`, `opencode auth login`, etc. on first run.
 
 ## Commit signing
 
@@ -528,7 +539,7 @@ The key lives only in the `aic-auth-global` volume (never on your host), is shar
 ## Threat model
 
 **Sandboxed:**
-- **Filesystem**: host is inaccessible except for the project directory (RW) and a handful of read-only mounts: shell look-and-feel (`~/.gitconfig`, `~/.p10k.zsh`, `~/.zshrc.local`) and the AI-config seeds (`~/.claude/settings.json`, `~/.claude/statusline/`, `~/.codex/config.toml`) covered in [Config seeding from the host](#config-seeding-from-the-host).
+- **Filesystem**: host is inaccessible except for the project directory (RW) and a handful of read-only mounts: shell look-and-feel (`~/.gitconfig`, `~/.p10k.zsh`, `~/.zshrc.local`) and the AI-config seeds (`~/.claude/settings.json`, `~/.claude/statusline/`, `~/.codex/config.toml`, `~/.config/opencode/opencode.json`) covered in [Config seeding from the host](#config-seeding-from-the-host).
 - **Process namespace**: container processes don't see host processes.
 - **Docker daemon**: API surface reduced via socket-proxy. `EXEC`, `AUTH`, `SECRETS`, `SWARM`, `SYSTEM` (and friends) are blocked. `POST` to `/containers` and `/build` is **enabled** so testcontainers, `docker compose up`, and sibling-container tooling work from inside the devcontainer — but this also means anyone with shell access here can `docker run --privileged -v /:/host` against the host daemon. Treat the proxy as a footgun reducer, not a host-isolation boundary; don't run untrusted code inside.
 - **AI guardrails**: `.devcontainer/`, `.git/config`, `.git/hooks` are mounted **read-only** so the AI cannot rewrite its own configuration. The PreToolUse hook lives at `/etc/aic/hooks/` and is root-owned, not writable by the dev user. The scoped sudoers entry only exposes hardcoded-target wrappers (`aic-chown-volumes`, `aic-lock-gitconfig`, `aic-firewall`) — no bare `chown`, so AI cannot take ownership of `/etc/sudoers.d/` or `/etc/aic/` to escalate.
@@ -536,7 +547,7 @@ The key lives only in the `aic-auth-global` volume (never on your host), is shar
 **Not sandboxed (unless you opt in):**
 - **Network**: full outbound access by default. Anything inside the container can reach `api.openai.com`, `api.anthropic.com`, your LAN, and cloud metadata services (`169.254.169.254`). To restrict this, opt in to the [iptables allowlist](#opt-in-network-allowlist) below.
 - **Git identity**: your `~/.gitconfig` is read-only mounted, so the AI can commit and push as you (via `gh auth` or stored credentials). Your signing key is **not** forwarded; if you need signed commits in here, set up a sandbox-only key with [`aic signing`](#commit-signing) — note that this makes agent-authored commits show as Verified.
-- **Host credentials**: nothing is auto-forwarded. The AI only has access to what you explicitly `claude /login`, `codex auth`, `gh auth login` for inside the container.
+- **Host credentials**: nothing is auto-forwarded. The AI only has access to what you explicitly `claude /login`, `codex auth login`, `opencode auth login`, `gh auth login` for inside the container.
 
 Don't run this on a network where reaching internal services or cloud metadata is a concern — or enable the allowlist below.
 
@@ -550,7 +561,7 @@ sudo aic-firewall enable          # apply DROP-default policy with curated allow
 sudo aic-firewall status          # inspect rules + resolved IPs
 ```
 
-The default allowlist covers Anthropic / OpenAI / GitHub / npm / PyPI / Docker registries. Per-project extras go in `.devcontainer/firewall-allowlist` (one domain per line, `#` comments allowed). Re-run `sudo aic-firewall enable` after editing.
+The default allowlist covers Anthropic / OpenAI / OpenCode (`opencode.ai`, `models.dev`) / GitHub / npm / PyPI / Docker registries. Per-project extras go in `.devcontainer/firewall-allowlist` (one domain per line, `#` comments allowed). Re-run `sudo aic-firewall enable` after editing.
 
 Design notes:
 - The script is **enable-only**. There is no `disable` or `pause` subcommand and the scoped sudoers entry only allows this single script — so an AI that gets shell access can call it, but only to *strengthen* the policy, never to remove it.
@@ -588,6 +599,18 @@ brew install powerlevel10k && p10k configure
 ```
 
 After `~/.p10k.zsh` exists on the host, the next `aic shell` picks it up automatically. Running `p10k configure` *inside* the container won't work — the mount is read-only by design (so AI can't rewrite your shell).
+
+**Claude Code pre-fills `source /workspace/.venv/bin/activate` in the prompt on startup.** Harmless — Claude spots a project `.venv/` that isn't active and *suggests* (never runs) activating it. It shows up because aicontainer deliberately keeps `VIRTUAL_ENV` unset, so `uv` always resolves the project environment cleanly. To suppress it, mark the venv active for interactive shells from your host `~/.zshrc.local` — bind-mounted **read-only**, so it survives rebuilds/syncs and an in-container tool can't edit it:
+
+```bash
+# On the host, in ~/.zshrc.local (sourced on every `aic shell`):
+if [[ -d /workspace/.venv ]]; then
+  export VIRTUAL_ENV=/workspace/.venv
+  export PATH="/workspace/.venv/bin:$PATH"
+fi
+```
+
+Setting the vars directly — rather than `source`-ing `/workspace/.venv/bin/activate` — is deliberate: it gives Claude the signal it checks for without executing a script out of the tool-writable workspace on every shell start. The `[[ -d … ]]` guard keeps it a no-op in projects with no root `.venv` (the file is shared across all your projects on this host). zsh only — bash/fish have no host `.local` include.
 
 **`aic shell` succeeds but `claude` errors with permission issues.** `post-create.py` runs during `aic up`, not on shell entry — scroll the `aic up` output for `[post-create]` warnings (volume ownership, hook setup, settings write). `aic rebuild` re-runs it cleanly.
 

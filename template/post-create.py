@@ -9,8 +9,10 @@ Runs once per container creation. Wires up:
 
 - bypassPermissions for Claude Code + PreToolUse hook registration
 - Auto-approve / sandbox-off for Codex
-- Allowlisted seeding of host ~/.claude/settings.json and ~/.codex/config.toml
-  (security-critical fields are forced to container defaults)
+- permission=allow for OpenCode + shared guardrail wired as a plugin
+- Allowlisted seeding of host ~/.claude/settings.json, ~/.codex/config.toml and
+  ~/.config/opencode/opencode.json (security-critical fields forced to container
+  defaults; inline provider API keys are stripped from the opencode seed)
 - Per-project session symlinks (~/.claude-sessions). Tool credentials (claude
   .credentials.json, codex auth.json, gh hosts.yml) persist via subpath
   mounts of aic-auth-global declared in docker-compose.yml — no leaf-file
@@ -44,6 +46,15 @@ SIGNING_MODE = SIGNING / "mode"                  # "auto" | "byok" | "disabled"
 SIGNING_ALLOWED = SIGNING / "allowed_signers"    # for in-container verification
 HOST_SEED_CLAUDE = Path("/host-seed/claude")     # bind-mounted RO file/dir
 HOST_SEED_CODEX = Path("/host-seed/codex")       # bind-mounted RO file
+HOST_SEED_OPENCODE = Path("/host-seed/opencode") # bind-mounted RO file
+
+# OpenCode splits config from data. The config dir holds opencode.json + the
+# global AGENTS.md (rewritten fresh each create, like claude settings.json); the
+# data dir is the aic-auth-global:opencode subpath mount where auth.json /
+# account.json persist. The session db lives per-project, relocated via
+# OPENCODE_DB (devcontainer.json) into the SESSIONS volume.
+OPENCODE_CONFIG_DIR = HOME / ".config" / "opencode"
+OPENCODE_DATA_DIR = HOME / ".local" / "share" / "opencode"
 
 # Optional project-declared volume mountpoints to re-own, one path per line in
 # .devcontainer/chown-paths. The prefix allowlist mirrors (advisory-only) the
@@ -61,9 +72,9 @@ PROJECT_POST_CREATE = Path("/workspace/.devcontainer/post-create.project.sh")
 # containerEnv.AIC_TOOLS in .devcontainer/devcontainer.json. Empty/unset
 # defaults to both tools (preserves behavior for projects pinned before the
 # flag existed).
-KNOWN_TOOLS = frozenset({"claude-code", "codex"})
+KNOWN_TOOLS = frozenset({"claude-code", "codex", "opencode"})
 ENABLED_TOOLS = frozenset(
-    t.strip() for t in os.environ.get("AIC_TOOLS", "claude-code,codex").split(",") if t.strip()
+    t.strip() for t in os.environ.get("AIC_TOOLS", "claude-code,codex,opencode").split(",") if t.strip()
 ) or KNOWN_TOOLS
 
 # Claude settings.json fields safe to copy from the host. Anything outside
@@ -108,9 +119,29 @@ CODEX_ALLOWED_TABLES = frozenset({
     "features", "notice", "projects", "mcp_servers",
 })
 
+# OpenCode opencode.json: keys safe to seed from the host. We force `permission`
+# (-> allow, the bypass/autonomous boundary) and `plugin` (-> the shared
+# guardrail) regardless, and never seed `$schema` (we write our own). `provider`
+# is seeded so custom providers (e.g. a DeepSeek endpoint) carry over — but any
+# inline API key under it is scrubbed (see _scrub_provider_secrets): credentials
+# are never forwarded; the user runs `opencode auth login` inside. `mcp` is
+# seeded verbatim (parallel to Claude/Codex MCP seeding — server secrets in
+# env/headers ride along under the same accepted trade-off).
+OPENCODE_ALLOWED_KEYS = frozenset({
+    "provider", "model", "small_model",
+    "mcp", "agent", "instructions",
+    "theme", "keybinds", "formatter", "lsp",
+})
+
+# Substrings (case-insensitive) marking a secret-bearing key to strip from the
+# seeded `provider` subtree, so an inline apiKey/token in the host opencode.json
+# (or an unforwarded "{env:...}" reference) is not written into the sandbox config.
+OPENCODE_SECRET_KEY_HINTS = ("key", "token", "secret", "password")
+
 # A managed note written into each enabled tool's user-level memory file
-# (~/.claude/CLAUDE.md for Claude, ~/.codex/AGENTS.md for Codex — both auto-loaded
-# by their tool on every session), so an agent doesn't burn tokens "fixing" the
+# (~/.claude/CLAUDE.md for Claude, ~/.codex/AGENTS.md for Codex,
+# ~/.config/opencode/AGENTS.md for OpenCode — all auto-loaded by their tool on
+# every session), so an agent doesn't burn tokens "fixing" the
 # read-only git internals. .git/config, .git/hooks, and .devcontainer/ are
 # bind-mounted read-only (see docker-compose.yml); the resulting write failures
 # are by-design, not bugs. Marker-delimited so the note can evolve across
@@ -175,6 +206,7 @@ def fix_volume_ownership() -> None:
         SESSIONS,
         HOME / ".claude",
         HOME / ".codex",
+        OPENCODE_DATA_DIR,
         HOME / ".config" / "gh",
         HOME / ".config" / "npm",
     ):
@@ -474,6 +506,101 @@ def setup_codex() -> None:
     link(SESSIONS / "codex-history.jsonl", codex_dir / "history.jsonl")
 
 
+def _scrub_provider_secrets(provider: dict) -> bool:
+    """Recursively delete inline secret-bearing keys (apiKey/token/...) anywhere
+    under the seeded `provider` table, so a host opencode.json that inlines an
+    API key (or a non-forwarded "{env:VAR}" reference) does not leak it into the
+    sandbox config. Returns True if anything was removed (so the caller can warn
+    the user to `opencode auth login` inside)."""
+    removed = False
+
+    def walk(obj: object) -> None:
+        nonlocal removed
+        if isinstance(obj, dict):
+            for k in list(obj):
+                if isinstance(k, str) and any(h in k.lower() for h in OPENCODE_SECRET_KEY_HINTS):
+                    del obj[k]
+                    removed = True
+                else:
+                    walk(obj[k])
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(provider)
+    return removed
+
+
+def load_host_opencode_config() -> dict:
+    """Read host's ~/.config/opencode/opencode.json (bind-mounted RO), keep only
+    keys in OPENCODE_ALLOWED_KEYS, and scrub inline provider secrets. `permission`
+    and `plugin` are dropped here (we force them in setup_opencode). Returns an
+    empty dict if no host file or unparseable."""
+    src = HOST_SEED_OPENCODE / "opencode.json"
+    if not src.exists() or src.stat().st_size == 0:
+        return {}
+    try:
+        host = json.loads(src.read_text())
+    except json.JSONDecodeError as e:
+        log(f"warning: host opencode.json invalid JSON ({e}); skipping seed")
+        return {}
+    if not isinstance(host, dict):
+        return {}
+
+    seeded = {k: v for k, v in host.items() if k in OPENCODE_ALLOWED_KEYS}
+    dropped = sorted(k for k in host if k not in OPENCODE_ALLOWED_KEYS and k != "$schema")
+    if dropped:
+        log(f"seed: dropped host opencode.json keys {dropped} (forced by container or unsafe to seed)")
+
+    prov = seeded.get("provider")
+    if isinstance(prov, dict) and _scrub_provider_secrets(prov):
+        log("seed: stripped inline provider API key(s) from opencode.json — host "
+            "credentials are not forwarded; run 'opencode auth login' inside the container")
+    return seeded
+
+
+def setup_opencode() -> None:
+    """Configure OpenCode: seed allowlisted host config, then force
+    permission=allow (the bypass/autonomous boundary) and wire the shared
+    PreToolUse guardrail as a plugin (absolute path to the root-owned shim).
+
+    ~/.local/share/opencode is the aic-auth-global:opencode subpath mount, so
+    auth.json / account.json persist inside it across rebuilds. Session
+    transcripts stay project-scoped: the sqlite db is relocated per-project via
+    OPENCODE_DB (devcontainer.json) into ~/.claude-sessions, and the file-based
+    storage dir is symlinked there too — same cross-volume trick as setup_claude's
+    projects/ symlink."""
+    cfg = load_host_opencode_config()
+    # Force the sandbox boundary regardless of what the host had.
+    cfg["$schema"] = "https://opencode.ai/config.json"
+    cfg["permission"] = {"*": "allow"}
+    cfg["plugin"] = ["/etc/aic/hooks/opencode-guardrail.js"]
+
+    OPENCODE_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config_json = OPENCODE_CONFIG_DIR / "opencode.json"
+    config_json.write_text(json.dumps(cfg, indent=2) + "\n")
+    log(f"wrote {config_json}")
+
+    # Global AGENTS.md OpenCode auto-loads for every session (it takes precedence
+    # over ~/.claude/CLAUDE.md).
+    ensure_sandbox_memory(OPENCODE_CONFIG_DIR / "AGENTS.md")
+
+    # Per-project session isolation. OPENCODE_DB points the sqlite session db at
+    # ~/.claude-sessions/opencode/opencode.db (the per-project SESSIONS volume) —
+    # sqlite creates the file but not the parent dir, so make it here. Also
+    # symlink the file-based session-artifact dirs out into SESSIONS so they stay
+    # project-scoped too (kept on the SAME per-project side as the db, so it never
+    # indexes them across a volume boundary). `storage/` is current; `snapshot/`
+    # holds working-tree checkpoints — in 1.16 these are db-backed, but symlink it
+    # anyway so a future version that revives file-based snapshots can't bleed one
+    # project's file contents into another. (repos/ and log/ deliberately stay in
+    # the shared global volume — clones and logs, the same accepted trade-off as
+    # claude/codex shared metadata.)
+    (SESSIONS / "opencode").mkdir(parents=True, exist_ok=True)
+    link(SESSIONS / "opencode-storage", OPENCODE_DATA_DIR / "storage")
+    link(SESSIONS / "opencode-snapshot", OPENCODE_DATA_DIR / "snapshot")
+
+
 def _host_git_config(key: str) -> str:
     """Read a single value straight from the read-only host ~/.gitconfig
     (not the effective config, so we see the host's intent regardless of our
@@ -713,28 +840,32 @@ def run_project_hook() -> None:
 
 
 def refresh_ai_tools() -> None:
-    """Float Claude Code and Codex to their latest release on every container
-    (re)create. The image bakes a working copy of each (Dockerfile) as an
-    offline floor; this updates them in place when there is network. Fail-soft:
-    an offline or failed update is logged and the baked version is kept rather
-    than blocking the container from coming up. Gated on AIC_TOOLS; set
-    AIC_FREEZE_TOOLS=1 (e.g. in docker-compose.override.yml) to pin the baked
+    """Float Claude Code, Codex and OpenCode to their latest release on every
+    container (re)create. The image bakes a working copy of each (Dockerfile) as
+    an offline floor; this updates them in place when there is network.
+    Fail-soft: an offline or failed update is logged and the baked version is
+    kept rather than blocking the container from coming up. Gated on AIC_TOOLS;
+    set AIC_FREEZE_TOOLS=1 (e.g. in docker-compose.override.yml) to pin the baked
     versions for a reproducible sandbox.
 
-    Both CLIs live in ~/.local/bin, which we force onto PATH for the updaters:
-    `codex update` re-runs the official installer, which only edits a login-shell
-    rc file (root-locked at runtime by aic-lock-gitconfig) when ~/.local/bin is
-    NOT already on PATH — keeping it on PATH makes the update a clean no-write."""
+    Claude/Codex live in ~/.local/bin and OpenCode in ~/.opencode/bin, both of
+    which we force onto PATH for the updaters: `codex update` re-runs the official
+    installer, which only edits a login-shell rc file (root-locked at runtime by
+    aic-lock-gitconfig) when its bin dir is NOT already on PATH — keeping it on
+    PATH makes the update a clean no-write. (`opencode upgrade` replaces the
+    binary in place and was installed with --no-modify-path.)"""
     freeze = os.environ.get("AIC_FREEZE_TOOLS", "").strip().lower()
     if freeze not in ("", "0", "false", "no"):
         log("AIC_FREEZE_TOOLS set — keeping the baked Claude/Codex versions")
         return
-    env = {**os.environ, "PATH": f"{HOME / '.local' / 'bin'}:{os.environ.get('PATH', '')}"}
+    env = {**os.environ, "PATH": f"{HOME / '.local' / 'bin'}:{HOME / '.opencode' / 'bin'}:{os.environ.get('PATH', '')}"}
     updaters = []
     if "claude-code" in ENABLED_TOOLS:
         updaters.append(("claude", ["claude", "update"], 180))
     if "codex" in ENABLED_TOOLS:
         updaters.append(("codex", ["codex", "update"], 300))
+    if "opencode" in ENABLED_TOOLS:
+        updaters.append(("opencode", ["opencode", "upgrade"], 300))
     for name, cmd, timeout in updaters:
         try:
             subprocess.run(cmd, check=True, timeout=timeout, env=env)
@@ -755,6 +886,10 @@ def main() -> None:
         setup_codex()
     else:
         log("skipping codex setup (not in AIC_TOOLS)")
+    if "opencode" in ENABLED_TOOLS:
+        setup_opencode()
+    else:
+        log("skipping opencode setup (not in AIC_TOOLS)")
     # gh + semgrep: no setup needed. ~/.config/gh is a direct subpath mount of
     # aic-auth-global:gh, so `gh auth login` writes straight into the persistent
     # volume; semgrep is pointed at ~/.config/aic-auth/semgrep/settings.yml via

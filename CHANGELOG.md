@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **OpenCode joins Claude Code and Codex as a first-class tool.** Baked into the
+  image and auto-updated on every `aic rebuild`, with persistent login,
+  per-project transcripts, and the shared `.env`/`curl|sh` guardrail wired in as
+  an OpenCode plugin. Host `~/.config/opencode/opencode.json` provider/model
+  definitions are seeded read-only (inline API keys stripped — log in inside with
+  `opencode auth login`); it's on by default, or choose it with
+  `aic init --with …,opencode`. (aic, template/)
+
 ## [0.3.1] - 2026-06-09
 
 ### Changed

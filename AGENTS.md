@@ -17,6 +17,9 @@ agent-facing notes go here, not in `CLAUDE.md`.
   repo.
   - `Dockerfile`, `post-create.py`, `hooks/`, `aic-firewall`,
     `aic-chown-volumes`, `aic-lock-gitconfig`, `.zshrc`
+  - `hooks/` holds the shared guardrail `pre-tool-use.sh` (Claude + Codex) plus
+    `opencode-guardrail.js`, the thin OpenCode plugin that shells out to it — all
+    copied root-owned to `/etc/aic/hooks/` (Dockerfile chmods `*.sh`/`*.json`/`*.js`).
   - `docker-compose.pull.yml` — default (pull) mode
   - `docker-compose.build.yml` — `--build` mode
   - `README.md` — copied into every project's `.devcontainer/` in **both**
@@ -151,17 +154,21 @@ reorder the injection to "make project win" without updating the README. The
 test in both workflows guards this — extend it, don't weaken it.
 
 **AI-tool refresh on every create.** `refresh_ai_tools()` runs early in
-`main()` and floats Claude Code + Codex to their latest release on every
-container (re)create — so a plain `aic rebuild` lands current CLIs without a new
-image. The Dockerfile bakes each as an offline *floor*; this updates them in
-place via `claude update` / `codex update`. It's `AIC_TOOLS`-gated, fail-soft
-(an offline/failed update keeps the baked version — don't make it fatal), and
-opt-out via `AIC_FREEZE_TOOLS=1` for a reproducible sandbox. The updaters MUST
-run with `~/.local/bin` on `PATH`: `codex update` re-runs the official
-installer, which otherwise tries to edit a login-shell rc file (root-locked at
-runtime by `aic-lock-gitconfig`) and fails — with the bin dir already on PATH it
-skips that step. The "tool self-update works with rc files root-locked" smoke
-test (both workflows) guards exactly this; don't weaken it.
+`main()` and floats Claude Code + Codex + OpenCode to their latest release on
+every container (re)create — so a plain `aic rebuild` lands current CLIs without
+a new image. The Dockerfile bakes each as an offline *floor*; this updates them
+in place via `claude update` / `codex update` / `opencode upgrade`. It's
+`AIC_TOOLS`-gated, fail-soft (an offline/failed update keeps the baked version —
+don't make it fatal), and opt-out via `AIC_FREEZE_TOOLS=1` for a reproducible
+sandbox. The updaters MUST run with their bin dir on `PATH` (`~/.local/bin` for
+Claude/Codex, `~/.opencode/bin` for OpenCode — both are prepended to the env
+`refresh_ai_tools()` builds): `codex update` re-runs the official installer,
+which otherwise tries to edit a login-shell rc file (root-locked at runtime by
+`aic-lock-gitconfig`) and fails — with the bin dir already on PATH it skips that
+step. OpenCode is installed with `--no-modify-path` and `opencode upgrade`
+replaces the binary in place, so it doesn't touch the rc files at all. The "tool
+self-update works with rc files root-locked" smoke test (both workflows) guards
+exactly this; don't weaken it.
 
 **Dockerfile.project base-tag drift.** Because `Dockerfile.project` is
 project-owned, `aic sync` re-pins `docker-compose.yml` to the new aic version
@@ -369,9 +376,12 @@ should be reviewed for security regressions:
   Codex installs via OpenAI's **standalone** installer
   (`chatgpt.com/codex/install.sh`), not npm — deliberate, so `codex update` works
   and it mirrors Claude's native installer; the trade-off is Codex is no longer
-  under the `NPM_CONFIG_MIN_RELEASE_AGE` quarantine (still covers npx MCPs). Both
-  CLIs are a baked *floor* that `refresh_ai_tools()` floats to latest on each
-  create (see "AI-tool refresh on every create").
+  under the `NPM_CONFIG_MIN_RELEASE_AGE` quarantine (still covers npx MCPs).
+  OpenCode likewise installs via its standalone installer
+  (`opencode.ai/install`, with `--no-modify-path`) into `~/.opencode/bin`, same
+  quarantine trade-off. All three CLIs are a baked *floor* that
+  `refresh_ai_tools()` floats to latest on each create (see "AI-tool refresh on
+  every create").
 - `template/aic-firewall` — outbound iptables allowlist. Adding hosts here
   expands what an in-container AI can reach. `cmd_enable` resolves into a
   staging ipset and `ipset swap`s it in, and **never sets `policy ACCEPT`** —
@@ -381,12 +391,23 @@ should be reviewed for security regressions:
   sensitive paths. Loosening the deny list (the `is_blocked_env` /
   `bash_touches_env` / `is_curl_pipe_sh` / `is_protected_path` matchers, or the
   `Bash|Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob` matcher in
-  `claude-settings.json`) weakens the model. The script is shared by Claude and
-  Codex: Claude registers it via `~/.claude/settings.json` (post-create), Codex
+  `claude-settings.json`) weakens the model. The script is shared by all three
+  tools: Claude registers it via `~/.claude/settings.json` (post-create), Codex
   via the **managed** `/etc/codex/requirements.toml` baked in the Dockerfile.
   Codex command hooks defined in `~/.codex/config.toml` are non-managed →
   untrusted → silently skipped in autonomous mode, so **don't** move it back
   there (a prior version did, and the hook never ran for Codex).
+- `template/hooks/opencode-guardrail.js` — OpenCode's slice of that same
+  guardrail. A dependency-free OpenCode plugin whose `tool.execute.before`
+  translates OpenCode's `{tool, args}` into the JSON `pre-tool-use.sh` reads on
+  stdin, `spawnSync`s the script, and `throw`s on exit 2. `setup_opencode()`
+  wires it via `"plugin": ["/etc/aic/hooks/opencode-guardrail.js"]` (absolute
+  path to the root-owned shim) in the generated `~/.config/opencode/opencode.json`
+  — no trust prompt (unlike Codex), and it fires even with
+  `permission."*"=allow`. Keep the logic in `pre-tool-use.sh` (single source of
+  truth); the shim only maps + dispatches. Don't add a second native
+  `permission` deny that could diverge. The "opencode guardrail blocks a .env
+  read" smoke test guards this — extend it, don't weaken it.
 - `template/aic-chown-volumes`, `template/aic-lock-gitconfig` — the only
   scripts allowed via `NOPASSWD` sudo. Touching them changes the privileged
   surface. `aic-lock-gitconfig` locks a hardcoded list to `root:root 0444`:

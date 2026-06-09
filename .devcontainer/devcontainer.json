@@ -15,6 +15,7 @@
         "anthropic.claude-code",
         "eamodio.gitlens",
         "openai.chatgpt",
+        "sst-dev.opencode",
         "pflannery.vscode-versionlens",
         "BracketPairColorDLW.bracket-pair-color-dlw",
         "vincaslt.highlight-matching-tag",
@@ -48,10 +49,11 @@
   },
 
   "containerEnv": {
-    "AIC_TOOLS": "claude-code,codex",
+    "AIC_TOOLS": "claude-code,codex,opencode",
     "AIC_SHELL": "zsh",
     "DEVCONTAINER": "true",
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
+    "OPENCODE_DB": "/home/vscode/.claude-sessions/opencode/opencode.db",
     "SEMGREP_SETTINGS_FILE": "/home/vscode/.config/aic-auth/semgrep/settings.yml",
     "NPM_CONFIG_IGNORE_SCRIPTS": "true",
     "NPM_CONFIG_AUDIT": "true",
@@ -78,7 +80,7 @@
   //      added later (e.g. npm), existing users' volumes are already non-empty
   //      and the mount fails with "no such file or directory". busybox is tiny
   //      (~5MB) and pulled once.
-  "initializeCommand": "mkdir -p \"$HOME/.claude/statusline\" \"$HOME/.codex\" && touch \"$HOME/.claude/settings.json\" \"$HOME/.codex/config.toml\" \"$HOME/.gitconfig\" \"$HOME/.zshrc.local\" \"$HOME/.p10k.zsh\" && docker volume create aic-auth-global >/dev/null && docker volume create aic-shell-history >/dev/null && docker run --rm -v aic-auth-global:/v busybox mkdir -p /v/claude /v/codex /v/gh /v/npm",
+  "initializeCommand": "mkdir -p \"$HOME/.claude/statusline\" \"$HOME/.codex\" \"$HOME/.config/opencode\" && touch \"$HOME/.claude/settings.json\" \"$HOME/.codex/config.toml\" \"$HOME/.config/opencode/opencode.json\" \"$HOME/.gitconfig\" \"$HOME/.zshrc.local\" \"$HOME/.p10k.zsh\" && docker volume create aic-auth-global >/dev/null && docker volume create aic-shell-history >/dev/null && docker run --rm -v aic-auth-global:/v busybox mkdir -p /v/claude /v/codex /v/opencode /v/gh /v/npm",
 
   "postCreateCommand": "uv run --no-project /opt/post-create.py"
 }

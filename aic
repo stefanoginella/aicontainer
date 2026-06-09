@@ -61,16 +61,16 @@ require_in_project () {
 }
 
 # ---------------------------------------------------------------------------
-# Per-project tool selection (claude-code, codex).
+# Per-project tool selection (claude-code, codex, opencode).
 #
 # Stored in .devcontainer/devcontainer.json as containerEnv.AIC_TOOLS, e.g.
-# "claude-code,codex". post-create.py reads it to gate setup_claude /
-# setup_codex; the VSCode extensions array is filtered to match.
+# "claude-code,codex,opencode". post-create.py reads it to gate setup_claude /
+# setup_codex / setup_opencode; the VSCode extensions array is filtered to match.
 #
 # Default for old projects without AIC_TOOLS (and for non-TTY init without
-# --with) is both tools, preserving pre-flag behavior.
+# --with) is all tools. Projects pinned with an explicit AIC_TOOLS keep it.
 # ---------------------------------------------------------------------------
-KNOWN_TOOLS="claude-code codex"
+KNOWN_TOOLS="claude-code codex opencode"
 
 # ---------------------------------------------------------------------------
 # Per-project shell selection (zsh, bash, fish).
@@ -179,23 +179,27 @@ read_aic_version () {
 
 validate_tools () {
   # Normalize a user-supplied list ("codex,claude-code", "claude-code ,codex")
-  # to canonical "claude-code,codex" order. Dies on unknown tools or empty input.
+  # to canonical "claude-code,codex,opencode" order. Dies on unknown tools or
+  # empty input.
   local raw="$1"
   raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
   [ -n "$raw" ] || die "no tools selected (valid: $KNOWN_TOOLS)"
-  local has_claude=0 has_codex=0
+  local has_claude=0 has_codex=0 has_opencode=0
   case ",$raw," in *,claude-code,*) has_claude=1 ;; esac
   case ",$raw," in *,codex,*)       has_codex=1 ;; esac
+  case ",$raw," in *,opencode,*)    has_opencode=1 ;; esac
   # Validate by elimination: strip known tokens and separators; anything left
   # is an unknown tool (avoids touching IFS or spawning a subshell).
   local rest="$raw"
   rest="${rest//claude-code/}"
   rest="${rest//codex/}"
+  rest="${rest//opencode/}"
   rest="${rest//,/}"
   [ -z "$rest" ] || die "unknown tool(s) in '$1' (valid: $KNOWN_TOOLS)"
   local result=""
-  [ "$has_claude" = "1" ] && result="claude-code"
-  [ "$has_codex"  = "1" ] && result="${result:+$result,}codex"
+  [ "$has_claude" = "1" ]   && result="claude-code"
+  [ "$has_codex"  = "1" ]   && result="${result:+$result,}codex"
+  [ "$has_opencode" = "1" ] && result="${result:+$result,}opencode"
   [ -n "$result" ] || die "no tools selected (valid: $KNOWN_TOOLS)"
   echo "$result"
 }
@@ -208,13 +212,13 @@ prompt_tools () {
   # node even in non-interactive contexts, but opening it fails. We probe
   # in a subshell so the test never leaves stale fds in the parent.
   if ! (exec 3</dev/tty 4>/dev/tty) 2>/dev/null; then
-    echo "claude-code,codex"
+    echo "claude-code,codex,opencode"
     return
   fi
 
-  local opts=("claude-code" "codex")
-  local sel=("1" "1")
-  local n=2 cur=0 i mark prefix
+  local opts=("claude-code" "codex" "opencode")
+  local sel=("1" "1" "1")
+  local n=3 cur=0 i mark prefix
 
   exec 3</dev/tty 4>/dev/tty
 
@@ -226,7 +230,7 @@ prompt_tools () {
   printf "\033[?25l" >&4
 
   draw_tools_menu () {
-    for i in 0 1; do
+    for ((i=0; i<n; i++)); do
       [ "${sel[$i]}" = "1" ] && mark="[✓]" || mark="[ ]"
       [ "$i" = "$cur" ] && prefix="❯ " || prefix="  "
       printf "\033[K%s%s %s\n" "$prefix" "$mark" "${opts[$i]}" >&4
@@ -248,7 +252,7 @@ prompt_tools () {
       if [ "${sel[$cur]}" = "1" ]; then sel[$cur]="0"; else sel[$cur]="1"; fi
     elif [ -z "$k" ]; then
       any=0
-      for i in 0 1; do [ "${sel[$i]}" = "1" ] && any=1; done
+      for ((i=0; i<n; i++)); do [ "${sel[$i]}" = "1" ] && any=1; done
       if [ "$any" = "1" ]; then break; fi
     elif [ "$k" = "q" ] || [ "$k" = "Q" ]; then
       printf "\n\033[?25h" >&4
@@ -265,8 +269,9 @@ prompt_tools () {
   trap - INT TERM
 
   local result=""
-  [ "${sel[0]}" = "1" ] && result="claude-code"
-  [ "${sel[1]}" = "1" ] && result="${result:+$result,}codex"
+  for ((i=0; i<n; i++)); do
+    [ "${sel[$i]}" = "1" ] && result="${result:+$result,}${opts[$i]}"
+  done
   echo "$result"
 }
 
@@ -329,6 +334,7 @@ patch_devcontainer_json () {
   #   1. Inject "AIC_TOOLS" and "AIC_SHELL" inside containerEnv.
   #   2. Drop "anthropic.claude-code" extension when claude-code not selected.
   #   3. Drop "openai.chatgpt" extension when codex not selected.
+  #      (and "sst-dev.opencode" when opencode not selected.)
   #   4. Patch terminal.integrated.defaultProfile.linux to the chosen shell.
   #   5. Patch terminal.integrated.fontFamily — MesloLGS NF for zsh (p10k icons),
   #      plain monospace for bash/fish (no nerd font required on the host).
@@ -355,10 +361,11 @@ patch_devcontainer_json () {
   #      template, so re-injection is idempotent across syncs.
   # Operates line-wise so JSONC comments don't trip us up.
   local file="$1" tools="$2" shell="$3"
-  local hc=0 hx=0 ov=0 tmp font dir pname cname
+  local hc=0 hx=0 hoc=0 ov=0 tmp font dir pname cname
   local ext_block="" settings_block=""
   case ",$tools," in *,claude-code,*) hc=1 ;; esac
   case ",$tools," in *,codex,*)       hx=1 ;; esac
+  case ",$tools," in *,opencode,*)    hoc=1 ;; esac
 
   dir="$(dirname "$file")"
   [ -f "$dir/docker-compose.override.yml" ] && ov=1
@@ -381,7 +388,7 @@ patch_devcontainer_json () {
   AIC_DEVCONTAINER_NAME="$cname" \
   AIC_VSCODE_EXT_BLOCK="$ext_block" \
   AIC_VSCODE_SETTINGS_BLOCK="$settings_block" \
-  awk -v tools="$tools" -v shell="$shell" -v font="$font" -v hc="$hc" -v hx="$hx" -v ov="$ov" '
+  awk -v tools="$tools" -v shell="$shell" -v font="$font" -v hc="$hc" -v hx="$hx" -v hoc="$hoc" -v ov="$ov" '
     {
       # Rewrite the top-level "name" to the per-project label. Read from ENVIRON
       # (not -v) so awk does not re-interpret backslashes in the folder name.
@@ -406,6 +413,7 @@ patch_devcontainer_json () {
 
       if ($0 ~ /^[[:space:]]*"anthropic\.claude-code",[[:space:]]*$/ && hc == 0) next
       if ($0 ~ /^[[:space:]]*"openai\.chatgpt",[[:space:]]*$/        && hx == 0) next
+      if ($0 ~ /^[[:space:]]*"sst-dev\.opencode",[[:space:]]*$/      && hoc == 0) next
 
       # Per-shell terminal defaults (only act on the relevant lines so
       # generic "zsh" tokens elsewhere in the file are untouched).
@@ -482,7 +490,7 @@ cmd_init () {
       --with=*) tools="${1#--with=}" ;;
       --shell) shift; shell="${1:-}" ;;
       --shell=*) shell="${1#--shell=}" ;;
-      *) die "unknown init flag: $1 (try --build, --force, --with claude-code,codex, or --shell zsh|bash|fish)" ;;
+      *) die "unknown init flag: $1 (try --build, --force, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
     esac
     shift
   done
@@ -592,7 +600,7 @@ cmd_sync () {
       --shell) shift; shell="${1:-}" ;;
       --shell=*) shell="${1#--shell=}" ;;
       --bump-base) bump_base="1" ;;
-      *) die "unknown sync flag: $1 (try --pull, --build, --bump-base, --with claude-code,codex, or --shell zsh|bash|fish)" ;;
+      *) die "unknown sync flag: $1 (try --pull, --build, --bump-base, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
     esac
     shift
   done
@@ -608,10 +616,10 @@ cmd_sync () {
   fi
 
   # Preserve the existing tool selection across syncs unless overridden with
-  # --with. Projects created before AIC_TOOLS existed fall back to both tools.
+  # --with. Projects created before AIC_TOOLS existed fall back to all tools.
   if [ -z "$tools" ]; then
     tools="$(read_aic_tools)"
-    [ -n "$tools" ] || tools="claude-code,codex"
+    [ -n "$tools" ] || tools="claude-code,codex,opencode"
   fi
   tools="$(validate_tools "$tools")"
 
@@ -681,7 +689,7 @@ print_boundary_summary () {
   printf "  %sFilesystem%s\n" "$b" "$rst"
   printf "    rw   /workspace                               your project (the only writable host path)\n"
   printf "    ro   ~/.gitconfig ~/.p10k.zsh ~/.zshrc.local    shell look-and-feel\n"
-  printf "    ro   ~/.claude/settings.json ~/.codex/config.toml   AI-config seeds (allowlisted fields only)\n"
+  printf "    ro   ~/.claude/settings.json ~/.codex/config.toml ~/.config/opencode/opencode.json   AI-config seeds (allowlisted)\n"
   printf "    ro   .devcontainer/ .git/config .git/hooks     AI cannot rewrite its own sandbox\n"
   printf "    %s--   host home, ~/.ssh, host credentials: NOT mounted%s\n" "$dim" "$rst"
 
@@ -1047,9 +1055,9 @@ cmd_destroy () {
 
   echo "aic: 'aic destroy' will remove the container and these PER-PROJECT volumes for '$project':"
   if [ -n "$size" ]; then
-    echo "       $vol  ($size of Claude/Codex session transcripts)"
+    echo "       $vol  ($size of Claude/Codex/OpenCode session transcripts)"
   else
-    echo "       $vol  (Claude/Codex session transcripts)"
+    echo "       $vol  (Claude/Codex/OpenCode session transcripts)"
   fi
   echo "aic: global volumes aic-auth-global and aic-shell-history are PRESERVED."
   echo "aic: this is irreversible. To stop the container but KEEP history, use 'aic down' instead."
@@ -1090,7 +1098,7 @@ cmd_version () {
 
 cmd_help () {
   cat <<'EOF'
-aic — sandboxed devcontainer for running Claude Code + Codex in bypass mode
+aic — sandboxed devcontainer for running Claude Code + Codex + OpenCode in bypass mode
 
 Usage:
   aic init [--build] [--force] [--with TOOLS] [--shell SHELL]
@@ -1102,10 +1110,11 @@ Usage:
                        --build: full local build from template/Dockerfile (slow
                                 first run, but you own the image).
                        --with:  comma-separated tools to enable for this project
-                                (claude-code, codex, or both). Defaults to an
-                                interactive checkbox prompt; selecting both is
-                                the historical behavior. The choice is stored
-                                as containerEnv.AIC_TOOLS in devcontainer.json.
+                                (claude-code, codex, opencode — any subset).
+                                Defaults to an interactive checkbox prompt; all
+                                three are selected by default. The choice is
+                                stored as containerEnv.AIC_TOOLS in
+                                devcontainer.json.
                        --shell: interactive shell — zsh (default, with oh-my-zsh
                                 + powerlevel10k), bash, or fish. Defaults to an
                                 interactive radio prompt. Stored as
@@ -1200,7 +1209,7 @@ _aic_complete () {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
   local commands="init sync up preflight signing shell run rebuild down destroy upgrade completion version help"
-  local tools="claude-code codex claude-code,codex"
+  local tools="claude-code codex opencode claude-code,codex,opencode"
   local shells="zsh bash fish"
 
   if [ "$COMP_CWORD" -eq 1 ]; then
@@ -1264,7 +1273,7 @@ _aic () {
     'version:Print this aic'\''s version'
     'help:Show help'
   )
-  tools=('claude-code' 'codex' 'claude-code,codex')
+  tools=('claude-code' 'codex' 'opencode' 'claude-code,codex,opencode')
   shells=('zsh' 'bash' 'fish')
 
   _arguments -C \
@@ -1338,13 +1347,13 @@ for cmd in aic aicontainer
 
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l build -d 'full local build from template/Dockerfile'
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l force -d 'overwrite existing .devcontainer/'
-  complete -c $cmd -n "__fish_seen_subcommand_from init" -l with  -d 'comma-separated tools' -xa 'claude-code codex claude-code,codex'
+  complete -c $cmd -n "__fish_seen_subcommand_from init" -l with  -d 'comma-separated tools' -xa 'claude-code codex opencode claude-code,codex,opencode'
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l shell -d 'interactive shell' -xa 'zsh bash fish'
 
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l pull  -d 'force pull-mode template'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l build -d 'force build-mode template'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l bump-base -d 'bump Dockerfile.project FROM tag to this aic version'
-  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l with  -d 'comma-separated tools' -xa 'claude-code codex claude-code,codex'
+  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l with  -d 'comma-separated tools' -xa 'claude-code codex opencode claude-code,codex,opencode'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l shell -d 'interactive shell' -xa 'zsh bash fish'
 
   complete -c $cmd -n "__fish_seen_subcommand_from signing" -a 'auto byok disable status'

@@ -91,6 +91,8 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
 RUN mkdir -p /workspace \
              /home/vscode/.claude \
              /home/vscode/.codex \
+             /home/vscode/.config/opencode \
+             /home/vscode/.local/share/opencode \
              /home/vscode/.semgrep \
              /home/vscode/.config/gh \
              /home/vscode/.config/npm \
@@ -98,7 +100,7 @@ RUN mkdir -p /workspace \
              /home/vscode/.claude-sessions \
              /home/vscode/.shell-history \
              /opt \
-    && chown -R vscode:vscode /workspace /home/vscode/.claude /home/vscode/.codex /home/vscode/.semgrep /home/vscode/.config /home/vscode/.config/aic-auth /home/vscode/.claude-sessions /home/vscode/.shell-history /opt
+    && chown -R vscode:vscode /workspace /home/vscode/.claude /home/vscode/.codex /home/vscode/.config/opencode /home/vscode/.local /home/vscode/.semgrep /home/vscode/.config /home/vscode/.config/aic-auth /home/vscode/.claude-sessions /home/vscode/.shell-history /opt
 
 ENV DEVCONTAINER=true
 ENV SHELL=/bin/zsh
@@ -131,7 +133,7 @@ RUN chmod 0755 /usr/local/bin/aic-firewall \
 # ---------------------------------------------------------------------------
 COPY hooks/ /etc/aic/hooks/
 RUN chmod 755 /etc/aic/hooks /etc/aic /etc/aic/hooks/*.sh \
-    && chmod 644 /etc/aic/hooks/*.json \
+    && chmod 644 /etc/aic/hooks/*.json /etc/aic/hooks/*.js \
     && chown -R root:root /etc/aic
 
 # ---------------------------------------------------------------------------
@@ -175,23 +177,28 @@ RUN chmod 0755 /opt/post-create.py
 
 USER vscode
 
-ENV PATH="/home/vscode/.local/bin:$PATH"
+ENV PATH="/home/vscode/.local/bin:/home/vscode/.opencode/bin:$PATH"
 # Build-time mirror of devcontainer.json's containerEnv: skip npm lifecycle
 # scripts for any `npm install`/`npx` (MCP servers, a downstream
 # Dockerfile.project). Codex is no longer an npm package — it installs via the
 # official standalone installer below, alongside Claude Code.
 ENV NPM_CONFIG_IGNORE_SCRIPTS=true
 
-# Claude Code + Codex: official standalone installers, both into ~/.local/bin
-# (already on PATH above). These are the baseline "floor" baked into the image;
-# post-create.py's refresh_ai_tools() floats them to the latest release on every
-# container (re)create, so `aic rebuild` always lands current AI CLIs. Each
-# installer skips editing the login-shell rc files (root-locked at runtime by
-# aic-lock-gitconfig) because ~/.local/bin is already on PATH.
+# Claude Code + Codex + OpenCode: official standalone installers. Claude/Codex
+# land in ~/.local/bin, OpenCode in ~/.opencode/bin (both already on PATH above).
+# These are the baseline "floor" baked into the image; post-create.py's
+# refresh_ai_tools() floats all three to the latest release on every container
+# (re)create, so `aic rebuild` always lands current AI CLIs. The Claude/Codex
+# installers skip editing the login-shell rc files (root-locked at runtime by
+# aic-lock-gitconfig) because ~/.local/bin is already on PATH; OpenCode's
+# installer is told not to touch them with --no-modify-path (zsh-in-docker owns
+# the rc files and we set PATH explicitly above + in each rc below).
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && claude --version
 RUN curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh \
     && codex --version
+RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
+    && opencode --version
 
 # Python toolchain (per-user; survives image rebuilds via base layer caching)
 RUN uv python install 3.13 --default

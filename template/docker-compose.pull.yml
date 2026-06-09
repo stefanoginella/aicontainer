@@ -53,6 +53,7 @@ services:
       - ${HOME}/.claude/settings.json:/host-seed/claude/settings.json:ro
       - ${HOME}/.claude/statusline:/host-seed/claude/statusline:ro
       - ${HOME}/.codex/config.toml:/host-seed/codex/config.toml:ro
+      - ${HOME}/.config/opencode/opencode.json:/host-seed/opencode/opencode.json:ro
 
       # Persistence — see README "Multi-project model".
       - aic-shell-history:/home/vscode/.shell-history
@@ -75,6 +76,17 @@ services:
         target: /home/vscode/.codex
         volume:
           subpath: codex
+      # OpenCode keeps auth (auth.json / account.json) at the top level of its
+      # data dir; mounting the dir as a volume subpath persists the login across
+      # rebuilds (same atomic-rename reasoning as claude/codex). Session
+      # transcripts do NOT bleed across projects: the sqlite db is relocated
+      # per-project via OPENCODE_DB (devcontainer.json) and storage/ is symlinked
+      # into the per-project sessions volume by post-create.py.
+      - type: volume
+        source: aic-auth-global
+        target: /home/vscode/.local/share/opencode
+        volume:
+          subpath: opencode
       - type: volume
         source: aic-auth-global
         target: /home/vscode/.config/gh

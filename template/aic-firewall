@@ -34,11 +34,15 @@ DEFAULT_ALLOWLIST=(
   api.openai.com
   auth.openai.com
   chatgpt.com
+  # OpenCode (zen API, auth, install) + the model registry it queries
+  opencode.ai
+  models.dev
   # GitHub
   api.github.com
   github.com
   raw.githubusercontent.com
   objects.githubusercontent.com
+  release-assets.githubusercontent.com
   codeload.github.com
   # Package registries
   registry.npmjs.org

@@ -67,6 +67,7 @@ jobs:
         run: |
           devcontainer exec --workspace-folder . claude --version
           devcontainer exec --workspace-folder . codex --version
+          devcontainer exec --workspace-folder . opencode --version
           devcontainer exec --workspace-folder . gh --version
           devcontainer exec --workspace-folder . uv --version
           # Codex must be the official standalone install in ~/.local/bin, not an
@@ -79,21 +80,32 @@ jobs:
             */.local/bin/codex) echo "OK: codex is the standalone install" ;;
             *) echo "FAIL: codex not in ~/.local/bin (got '$codex_path'); npm install may have crept back"; exit 1 ;;
           esac
+          # OpenCode is the standalone installer into ~/.opencode/bin (so
+          # `opencode upgrade` works and it skips the npm quarantine).
+          oc_path=$(devcontainer exec --workspace-folder . bash -lc 'command -v opencode' | tr -d '\r' | tail -1)
+          echo "opencode resolves to: $oc_path"
+          case "$oc_path" in
+            */.opencode/bin/opencode) echo "OK: opencode is the standalone install" ;;
+            *) echo "FAIL: opencode not in ~/.opencode/bin (got '$oc_path')"; exit 1 ;;
+          esac
       - name: Smoke test - tool self-update works with rc files root-locked
         working-directory: /tmp/proj
         run: |
-          # refresh_ai_tools() runs `claude update` / `codex update` on every
-          # container create. `codex update` re-runs the official installer, which
-          # must NOT fail trying to edit the login-shell rc files (root-locked at
-          # runtime by aic-lock-gitconfig) — it skips that because ~/.local/bin is
-          # already on PATH. A regression would silently fall back to the baked
-          # version (refresh is fail-soft), so assert both updaters exit 0 here.
+          # refresh_ai_tools() runs `claude update` / `codex update` /
+          # `opencode upgrade` on every container create. `codex update` re-runs
+          # the official installer, which must NOT fail trying to edit the
+          # login-shell rc files (root-locked at runtime by aic-lock-gitconfig) —
+          # it skips that because ~/.local/bin is already on PATH. opencode was
+          # installed with --no-modify-path so `opencode upgrade` never touches
+          # them. A regression would silently fall back to the baked version
+          # (refresh is fail-soft), so assert all three updaters exit 0 here.
           devcontainer exec --workspace-folder . bash -lc '
             set -e
             [ "$(stat -c %U:%a "$HOME/.zshrc")" = "root:444" ] || { echo "precondition: .zshrc not root-locked"; exit 1; }
             claude update
             codex update
-            echo "OK: claude + codex self-update cleanly with rc files locked"
+            opencode upgrade
+            echo "OK: claude + codex + opencode self-update cleanly with rc files locked"
           '
       - name: Smoke test - socket-proxy reachable, EXEC blocked
         working-directory: /tmp/proj
@@ -132,6 +144,34 @@ jobs:
             else
               echo "hook correctly blocked .env"
             fi
+          '
+
+      - name: Smoke test - OpenCode guardrail blocks a .env read
+        working-directory: /tmp/proj
+        run: |
+          # post-create must force permission=allow + wire the guardrail plugin,
+          # and the shim must block a .env read by shelling out to the shared
+          # pre-tool-use.sh. (A full `opencode run` needs an authed model, so we
+          # exercise the plugin's tool.execute.before hook directly via node —
+          # this proves the mapping + script integration; plugin-load-without-
+          # trust-prompt is checked manually per the release notes.)
+          devcontainer exec --workspace-folder . bash -lc '
+            set -e
+            cfg=$HOME/.config/opencode/opencode.json
+            grep -qF "\"*\": \"allow\"" "$cfg" || { echo "FAIL: opencode permission not forced to allow"; exit 1; }
+            grep -qF "/etc/aic/hooks/opencode-guardrail.js" "$cfg" || { echo "FAIL: guardrail plugin not wired in opencode.json"; exit 1; }
+            cd /workspace
+            printf "SECRET=hunter2\n" > .env
+            node --input-type=module -e "
+              import { AicGuardrail } from \"/etc/aic/hooks/opencode-guardrail.js\";
+              const h = await AicGuardrail();
+              let blocked = false;
+              try { await h[\"tool.execute.before\"]({tool:\"read\"}, {args:{filePath:\"/workspace/.env\"}}); }
+              catch { blocked = true; }
+              if (!blocked) { console.error(\"FAIL: guardrail did not block .env read\"); process.exit(1); }
+              await h[\"tool.execute.before\"]({tool:\"read\"}, {args:{filePath:\"/workspace/.devcontainer/devcontainer.json\"}});
+              console.log(\"OK: opencode guardrail blocks .env, allows a normal read\");
+            "
           '
 
       - name: Smoke test - scoped sudo cannot chown arbitrary paths

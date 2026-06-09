@@ -43,6 +43,7 @@ for d in /home/vscode/.shell-history \
          /home/vscode/.claude-sessions \
          /home/vscode/.claude \
          /home/vscode/.codex \
+         /home/vscode/.local/share/opencode \
          /home/vscode/.config/gh \
          /home/vscode/.config/npm; do
   [ -d "$d" ] && chown_safe "$d"
