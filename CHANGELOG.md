@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Refreshed bundled tools and base image.** uv 0.11, fzf 0.73.1, and
+  git-delta 0.19.2, plus a current Ubuntu 24.04 base-image digest.
+  (template/Dockerfile)
+
 ## [0.3.0] - 2026-06-03
 
 ### Added
