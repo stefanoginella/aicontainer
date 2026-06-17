@@ -6,7 +6,7 @@
 # versions stay current.
 # =============================================================================
 
-FROM ghcr.io/astral-sh/uv:0.11@sha256:b46b03ddfcfbf8f547af7e9eaefdf8a39c8cebcba7c98858d3162bd28cf536f6 AS uv
+FROM ghcr.io/astral-sh/uv:0.11@sha256:ff07b86af50d4d9391d9daf4ff89ce427bc544f9aae87057e69a1cc0aa369946 AS uv
 FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04@sha256:405175cbb232701dc27c47a2f178da555ea3ad20f85ea4142ad6a24f877af399
 
 # OCI labels: lets GitHub auto-link the GHCR package back to this repo.
