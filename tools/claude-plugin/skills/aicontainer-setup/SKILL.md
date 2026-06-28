@@ -1,6 +1,6 @@
 ---
 name: aicontainer-setup
-description: "Manual setup of aicontainer (the sandboxed devcontainer for running AI coding agents in bypass/auto-approve mode) in a project: detect and confirm the stack, check devcontainer suitability, then apply project-level customization. User-invoked via its slash command; not intended for automatic use."
+description: "Manual setup of aicontainer (the sandboxed devcontainer for running AI coding agents in bypass/auto-approve mode) in a project: detect and confirm the stack, check devcontainer suitability, then apply project-level customization. Also handles re-setup of a project that already has aicontainer — auditing the existing personalization and updating only what's missing, stale, or drifted. User-invoked via its slash command; not intended for automatic use."
 disable-model-invocation: true
 ---
 
@@ -60,9 +60,52 @@ Before anything, confirm the ground is solid:
    — note it rather than blocking.
 5. **Is there already an aic setup here?** If `.devcontainer/devcontainer.json`
    exists and references aicontainer (the GHCR image or `AIC_TOOLS`), this is a
-   *re-setup*: prefer `aic sync` over `aic init` in Step 7, and focus on
-   adding/adjusting the project-owned override files rather than regenerating from
-   scratch.
+   *re-setup*, not a fresh install — you're in **update mode**. Don't regenerate
+   from scratch and don't re-propose files that already exist and are correct.
+   Still read the README (Step 1) and re-detect/confirm the stack (Steps 2–3),
+   then follow "Update mode" below instead of the greenfield Step 5. (If no
+   `.devcontainer/` exists, it's a fresh setup — continue straight through
+   Steps 1–8.)
+
+## Update mode — auditing an existing setup
+
+When Step 0 found an existing aic setup, the job is **not** "generate config." It
+is "check whether this project's personalization still fits its stack, and update
+only what's missing, stale, or drifted." A project set up months ago may have
+gained a language, a service, browser e2e tests, or new build artifacts — or had
+the global `aic` upgraded under it. Read the README (Step 1) and refresh the
+stack profile (Steps 2–3) first, then:
+
+1. **Inventory what's already there.** List which project-owned files exist and
+   **read their contents**: `Dockerfile.project`, `docker-compose.override.yml`,
+   `chown-paths`, `post-create.project.sh`, `vscode-extensions`,
+   `vscode-settings.json`, `firewall-allowlist`. Also note the current
+   `AIC_TOOLS` / `AIC_SHELL` in `devcontainer.json` (the only managed values that
+   survive `aic sync`). This is your baseline — what's already covered.
+2. **Compute the delta against the refreshed stack — look for three things:**
+   - **Missing coverage** — a stack fact with no matching personalization: a new
+     language with no LSP server in `post-create.project.sh` and no editor
+     extension; a Python project with no writable `.venv` volume; a newly-added
+     Postgres/Redis service not wired in `docker-compose.override.yml`;
+     Playwright/Chromium added with no `Dockerfile.project`.
+   - **Stale / incorrect entries** — personalization that no longer matches: a
+     `chown-paths` line for a volume that's no longer declared; a
+     `vscode-settings.json` interpreter path that no longer exists; an LSP install
+     or extension for a language the project dropped; a tool in `AIC_TOOLS` the
+     user no longer wants.
+   - **Version / base drift** — the tooling flags this one: after
+     `npm update -g aicontainer`, a `Dockerfile.project` whose `FROM …:vX.Y.Z`
+     lags the tag now pinned in `docker-compose.yml`. `aic sync` **warns**; the
+     fix is `aic sync --bump-base` (it rewrites the `FROM` in place — never
+     hand-edit a project-owned file's base for this).
+3. **If nothing is missing, stale, or drifted, say so and stop.** "Your
+   personalization already matches your stack; nothing to update" is a valid,
+   useful outcome — don't invent changes to look busy.
+4. **Otherwise present only the delta (Step 6) and apply it (Step 7).** Write the
+   new/changed project-owned files, leave correct existing ones untouched, then
+   run `aic sync` (the re-setup verb) so override wiring and the
+   `vscode-extensions` / `vscode-settings.json` merges refresh. Stop before
+   `aic up` / `aic rebuild`.
 
 ## Step 1 — Read the current aicontainer README
 
