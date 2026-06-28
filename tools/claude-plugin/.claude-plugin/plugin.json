@@ -1,0 +1,11 @@
+{
+  "name": "aicontainer",
+  "version": "0.0.1",
+  "description": "Setup aicontainer in your project.",
+  "author": {
+    "name": "Stefano Ginella",
+    "url": "https://stefanoginella.com"
+  },
+  "keywords": ["aicontainer", "devcontainer", "sandbox"],
+  "license": "MIT"
+}
