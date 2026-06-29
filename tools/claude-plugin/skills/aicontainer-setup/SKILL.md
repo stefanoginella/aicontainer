@@ -1,6 +1,6 @@
 ---
 name: aicontainer-setup
-description: "Manual setup of aicontainer (the sandboxed devcontainer for running AI coding agents in bypass/auto-approve mode) in a project: detect and confirm the stack, check devcontainer suitability, then apply project-level customization. Also handles re-setup of a project that already has aicontainer — auditing the existing personalization and updating only what's missing, stale, or drifted. User-invoked via its slash command; not intended for automatic use."
+description: "Manual setup of aicontainer (the sandboxed devcontainer for running AI coding agents in bypass/auto-approve mode) in a project."
 disable-model-invocation: true
 ---
 
@@ -52,9 +52,23 @@ Before anything, confirm the ground is solid:
 2. **Is this a git repo?** `aic init` expects a project directory. If there's no
    repo, that's fine, but note it (the sandbox bind-mounts `$PWD` as `/workspace`
    regardless).
-3. **Is the `aic` CLI installed?** Check `command -v aic`. If missing, offer to
-   run `npm install -g aicontainer` (needs Node 18+). Don't install silently —
-   it's a global package install; confirm first.
+3. **Is the `aic` CLI installed?** Check `command -v aic`. If it's missing,
+   don't abort — **offer to install it**, since nothing else in this skill works
+   without it:
+   - **Confirm Node.js 18+ first** (`node --version`) — it's the one
+     prerequisite for the npm install (and the bundled `@devcontainers/cli`). If
+     Node is too old or absent, say so and point the user at it rather than
+     attempting the install.
+   - **Offer the install and wait for a yes** — this is a global package
+     install, so never run it silently. The default method is
+     `npm install -g aicontainer`. If the user prefers a git checkout, the
+     alternative is
+     `git clone https://github.com/stefanoginella/aicontainer ~/.aicontainer && ~/.aicontainer/install.sh`
+     (a checkout also needs `npm install -g @devcontainers/cli` separately).
+   - **Verify after installing** — re-run `command -v aic` (or `aic --version`)
+     and confirm it's now on `PATH` before continuing. If the install failed or
+     `aic` still isn't found, stop and surface the error; don't push ahead into
+     the steps below.
 4. **Is Docker running?** `docker info` should succeed (Docker Desktop / OrbStack
    / Colima). Setup can still proceed without it, but `aic up` later will need it
    — note it rather than blocking.
