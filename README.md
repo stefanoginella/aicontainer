@@ -157,8 +157,8 @@ convenience layer over `aic init` / `aic sync`, not a requirement.
 Install it from inside Claude Code:
 
 ```text
-/plugin marketplace add stefanoginella/aicontainer
-/plugin install aicontainer-setup@aicontainer
+/plugin marketplace add stefanoginella/claude-code-plugins
+/plugin install aicontainer-setup@stefanoginella-plugins
 ```
 
 Then run it from a Claude Code session **on your host** — not inside the sandbox,
@@ -175,8 +175,8 @@ yourself.
 Uninstall the plugin and drop the marketplace:
 
 ```text
-/plugin uninstall aicontainer-setup@aicontainer
-/plugin marketplace remove aicontainer
+/plugin uninstall aicontainer-setup@stefanoginella-plugins
+/plugin marketplace remove stefanoginella-plugins
 ```
 
 ## What's in the box
