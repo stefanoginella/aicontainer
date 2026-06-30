@@ -481,7 +481,7 @@ patch_devcontainer_json () {
   #      `environment:`, extra_hosts, build.dockerfile) survive `aic sync`. The
   #      override file itself is never copied or overwritten by apply_template;
   #      this only re-applies the reference, which the template ships without.
-  #   7. Rewrite "name" to "aicontainer-<project folder>" so each project shows a
+  #   7. Rewrite "name" to "<project folder>-aicontainer" so each project shows a
   #      distinct label in VS Code's remote indicator. Re-derived from $PWD every
   #      run (like AIC_TOOLS/AIC_SHELL), so it's recomputed on each init/sync and
   #      the template can keep the bare "aicontainer" placeholder.
@@ -515,7 +515,7 @@ patch_devcontainer_json () {
   pname="$(basename "$PWD")"
   pname="${pname//\\/\\\\}"
   pname="${pname//\"/\\\"}"
-  cname="aicontainer-$pname"
+  cname="$pname-aicontainer"
 
   case "$shell" in
     zsh) font="'MesloLGS NF', monospace" ;;

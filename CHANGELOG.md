@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Devcontainer name flipped back to the `<folder>-aicontainer` suffix.** Was
+  `aicontainer-<folder>`; leads each label with the project name so it reads
+  first in VS Code's remote indicator. Re-derived on every `aic init`/`aic sync`
+  and not hand-editable.
+
 ## [0.4.2] - 2026-06-09
 
 ### Added
