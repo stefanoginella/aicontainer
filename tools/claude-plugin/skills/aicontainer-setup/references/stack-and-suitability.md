@@ -26,7 +26,7 @@ Read these files to infer the profile. Presence is the signal; versions refine i
 | `docker-compose.yml` services (postgres, redis, mysql, mongo, …) | App depends on those services → host-service wiring or sibling containers |
 | `.env.example` keys (`DATABASE_URL`, `REDIS_URL`, `*_HOST`) | Same — needs the service reachable; wire via the override |
 | `@playwright/test` / `cypress` / `puppeteer` in deps | Browser e2e → `Dockerfile.project` (baked Chromium); README has the Playwright recipe |
-| `.md` design docs (ARCHITECTURE, PRD, specs, `docs/`) | Authoritative when code is sparse/greenfield — a spec naming the stack is a real signal |
+| `.md` design docs (ARCHITECTURE, PRD, TECH-STACK, DESIGN, specs, `docs/`, `_bmad-output`, `.specstral`, `.specify/`) | Authoritative when code is sparse/greenfield — a spec naming the stack is a real signal |
 
 Output of this step: **language(s) + package manager(s) + runtime versions +
 services + test tooling + GUI/mobile/native/hardware flags.**
