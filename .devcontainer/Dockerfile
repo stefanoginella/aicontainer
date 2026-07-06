@@ -7,7 +7,7 @@
 # =============================================================================
 
 FROM ghcr.io/astral-sh/uv:0.11@sha256:1e3808aa9023d0980e7c15b1fa7c1ac16ff35925780cf5c459858b2d693f01a9 AS uv
-FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04@sha256:6e5abd134eb1c2b747927487c3d59590bcc17815d5d7b3afd494e1be5de0f6b4
+FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04@sha256:c5cc2b45afe06a1df3aba17e58ba0dc4a02b999493198dab37dd0ccd4e2b0705
 
 # OCI labels: lets GitHub auto-link the GHCR package back to this repo.
 LABEL org.opencontainers.image.source="https://github.com/stefanoginella/aicontainer" \
