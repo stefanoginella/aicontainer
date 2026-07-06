@@ -38,8 +38,10 @@ that silently gets wiped or breaks `aic sync`.
   `post-create.project.sh`, `vscode-extensions`, `vscode-settings.json`,
   `firewall-allowlist`. These are opt-in by presence.
 - **Show the plan, then apply.** Detect and confirm first, present the full plan,
-  get a yes, then write files and run `aic init` / `aic sync`. **Stop before
-  `aic up`** — it pulls a multi-gigabyte image; hand that command to the user.
+  get a yes, then write files and run `aic init` / `aic sync`. **Confirm before
+  `aic up`** — it pulls or builds a multi-gigabyte image and can take minutes —
+  but once the user says go, drive it yourself: verify the container actually
+  boots and fix what's broken (Step 8). Don't just hand back a command and hope.
 
 ## Step 0 — Preconditions
 
@@ -70,8 +72,8 @@ Before anything, confirm the ground is solid:
      `aic` still isn't found, stop and surface the error; don't push ahead into
      the steps below.
 4. **Is Docker running?** `docker info` should succeed (Docker Desktop / OrbStack
-   / Colima). Setup can still proceed without it, but `aic up` later will need it
-   — note it rather than blocking.
+   / Colima). Setup can still proceed without it, but Step 8's boot verification
+   (and `aic up` generally) will need it — note it rather than blocking.
 5. **Is there already an aic setup here?** If `.devcontainer/devcontainer.json`
    exists and references aicontainer (the GHCR image or `AIC_TOOLS`), this is a
    *re-setup*, not a fresh install — you're in **update mode**. Don't regenerate
@@ -79,7 +81,7 @@ Before anything, confirm the ground is solid:
    Still read the README (Step 1) and re-detect/confirm the stack (Steps 2–3),
    then follow "Update mode" below instead of the greenfield Step 5. (If no
    `.devcontainer/` exists, it's a fresh setup — continue straight through
-   Steps 1–8.)
+   Steps 1–9.)
 
 ## Update mode — auditing an existing setup
 
@@ -118,8 +120,9 @@ stack profile (Steps 2–3) first, then:
 4. **Otherwise present only the delta (Step 6) and apply it (Step 7).** Write the
    new/changed project-owned files, leave correct existing ones untouched, then
    run `aic sync` (the re-setup verb) so override wiring and the
-   `vscode-extensions` / `vscode-settings.json` merges refresh. Stop before
-   `aic up` / `aic rebuild`.
+   `vscode-extensions` / `vscode-settings.json` merges refresh. Then move to
+   Step 8 to confirm the refreshed setup actually boots — an update that
+   "should" fix a gap isn't done until you've watched it come up clean.
 
 ## Step 1 — Read the current aicontainer README
 
@@ -251,8 +254,9 @@ Show the user, before touching anything:
 2. The `aic init` invocation (with `--with` / `--shell`).
 3. Each project-owned file you'll create, **with its contents**, and one line on
    *why* (which stack fact drives it).
-4. The exact next commands they'll run after you're done (`aic up` or VS Code
-   "Reopen in Container", then how to verify).
+4. That you'll offer to verify the setup boots (`aic up`, watched to
+   completion, fixing anything broken) before handing off — pending their okay
+   since it's a multi-gigabyte pull/build.
 
 Get an explicit yes. If they want changes, fold them in and re-show.
 
@@ -272,23 +276,71 @@ Order matters (so the override gets wired into `dockerComposeFile`):
    `grep dockerComposeFile .devcontainer/devcontainer.json` — both files should
    appear.
 
-Do **not** run `aic up` / `aic rebuild` (large image pull) — that's the user's
-call.
+Config is on disk now, not yet proven to work. Move to Step 8 before calling
+this done.
 
-## Step 8 — Hand off
+## Step 8 — Verify it boots
 
-Tell the user exactly what to run next and how to confirm it worked:
+Writing the files isn't the job — a sandbox the project can't actually start in
+isn't done. Prove it boots and that Step 5's customization took effect before
+reporting success.
 
-- **CLI path:** `aic up` (pulls the image, starts the stack), then `aic shell`,
-  then `claude` / `codex` / `opencode`.
-- **VS Code path:** install the Dev Containers extension, then
+1. **Ask before pulling/building.** `aic up` pulls a multi-gigabyte GHCR image
+   (pull mode) or builds one locally (`--build` mode, or any `Dockerfile.project`)
+   — either can take minutes and use real disk. Confirm with the user before
+   running it. If they'd rather run it themselves, or Step 0 flagged Docker
+   isn't running, skip straight to Step 9 and hand off the commands instead.
+2. **Run `aic up`** and watch it through to completion, not just the exit code
+   — a `Dockerfile.project` build failure, a bad `docker-compose.override.yml`
+   key, or a stale pinned tag all surface here.
+3. **If it fails, fix it — don't punt a broken container to the user.** Read the
+   actual error, then match it to the likely project-owned file:
+   - Image build error → check `Dockerfile.project`'s `FROM` matches the pinned
+     tag (`grep image: .devcontainer/docker-compose.yml`).
+   - Compose parse/validation error → check `docker-compose.override.yml`
+     syntax and that it only extends the `devcontainer` service.
+   - Container starts but a volume mount is unwritable → confirm the path is
+     both declared as a volume in the override **and** listed in
+     `chown-paths`, under an allowed prefix (`/workspace/`,
+     `/home/vscode/.cache/`).
+   - `post-create.project.sh` step didn't take effect (its failures are logged,
+     not fatal to boot) → fix the script, then `aic rebuild` (or
+     `aic destroy && aic up` if state needs a clean slate) to re-run it.
+   After any project-owned-file fix, re-run `aic sync` so wiring stays current,
+   then retry `aic up` / `aic rebuild`. Iterate until it's clean — don't stop at
+   the first fix without confirming it actually resolved the failure.
+4. **Spot-check the plan actually landed**, using `aic run <cmd>` (no need for
+   an interactive shell):
+   - LSP binary on `PATH`: `aic run command -v pyright-langserver` (or whatever
+     Step 5 installed).
+   - Named volume writable: `aic run test -w /workspace/.venv && echo ok`.
+   - Host service reachable: `aic run curl -sS host.docker.internal:5432` (or
+     whatever the stack needs).
+   - `aic preflight` to confirm the trust boundary (firewall mode, mounts)
+     matches the plan.
+5. **Leave it running or tear it down?** Ask the user — `aic down` stops the
+   container (volumes persist) if they're not about to start working; leave it
+   up if they are.
+
+If verification genuinely isn't possible (no Docker, offline, user declined),
+say so plainly and fall back to the Step 9 handoff.
+
+## Step 9 — Hand off
+
+Tell the user what to run next and how to confirm it worked. This differs a
+little depending on whether Step 8 ran:
+
+- **If Step 8 verified it:** say so, state whether it's still up or you ran
+  `aic down`, and give them the resume path — `aic shell` (or `aic up` again
+  if stopped), then `claude` / `codex` / `opencode`.
+- **If verification was skipped or declined:** hand off the full CLI path —
+  `aic up` (pulls/builds the image, starts the stack), then `aic shell`, then
+  `claude` / `codex` / `opencode`.
+- **VS Code path** (either case): install the Dev Containers extension, then
   `Cmd+Shift+P → Dev Containers: Reopen in Container`.
-- **Verify:** `aic preflight` prints exactly what crosses the boundary for this
-  config. After the container is up, check LSP servers are on `PATH`
-  (`command -v pyright-langserver`), the named volume is writable, and host
-  services resolve.
-- **Mention if relevant:** `aic signing` if they sign commits (the host signing
-  key isn't forwarded); the firewall opt-in for stricter network containment.
+- **Mention if relevant:** `aic preflight` to re-print the trust boundary;
+  `aic signing` if they sign commits (the host signing key isn't forwarded);
+  the firewall opt-in for stricter network containment.
 
 Keep the handoff concrete — these are copy-pasteable commands, not prose.
 
