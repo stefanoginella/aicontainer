@@ -219,6 +219,30 @@ read_pinned_compose_version () {
     "$f" | head -n1
 }
 
+# ---------------------------------------------------------------------------
+# Docker socket write access (opt-in). The socket-proxy ships read-only
+# (POST/BUILD = 0) so an in-container agent cannot `docker run --privileged
+# -v /:/host` to escape, nor spawn sibling containers that dodge the opt-in
+# aic-firewall. `--docker` flips POST/BUILD to 1 for projects that genuinely
+# need testcontainers / in-container `docker compose`. The choice lives in the
+# generated compose file itself (the honest source of truth the boundary
+# summary reports); `aic sync` preserves it by reading the old file first.
+# ---------------------------------------------------------------------------
+DEFAULT_DOCKER="ro"
+
+# Echo the Docker mode encoded in an existing compose file: "rw" if the
+# socket-proxy has POST enabled, else "ro". Empty output if there's no file to
+# read (fresh init). Anchored on the bare `POST: 1` toggle line.
+read_compose_docker_mode () {
+  local f=".devcontainer/docker-compose.yml"
+  [ -f "$f" ] || return 0
+  if grep -qE '^[[:space:]]*POST:[[:space:]]*1[[:space:]]*$' "$f"; then
+    echo rw
+  else
+    echo ro
+  fi
+}
+
 # Tier 1. Warn (to stderr, yellow on a TTY) when the project's pinned image tag
 # and the installed aic disagree — the hot-path nudge for `aic up`/`aic shell`.
 # Known blind spots, by design (offline + zero-cost beats full coverage here):
@@ -578,11 +602,28 @@ patch_devcontainer_json () {
   ' "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
+# Flip the socket-proxy POST/BUILD toggles in the freshly-copied compose file
+# to match the project's Docker mode. The template ships read-only (POST/BUILD
+# 0); "rw" flips both to 1. Matches only the bare `KEY: <0|1>` toggle lines, so
+# nothing else in the file is touched, and it's idempotent across syncs.
+apply_docker_mode () {
+  local file="$1" docker="$2" want tmp
+  [ -f "$file" ] || return 0
+  case "$docker" in
+    rw) want=1 ;;
+    *)  want=0 ;;
+  esac
+  tmp="$(mktemp "${file}.XXXXXX")"
+  sed -E "s/^([[:space:]]*)POST:[[:space:]]*[01][[:space:]]*\$/\1POST: ${want}/; \
+          s/^([[:space:]]*)BUILD:[[:space:]]*[01][[:space:]]*\$/\1BUILD: ${want}/" \
+    "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
 # Copy template files into .devcontainer/, picking the right compose variant
 # for $mode (pull or build) and only the files that mode needs. Idempotent:
 # overwrites any existing target files; safe to call from init or sync.
 apply_template () {
-  local mode="$1" src="$2" dst="$3"
+  local mode="$1" src="$2" dst="$3" docker="${4:-$DEFAULT_DOCKER}"
   [ -d "$src" ] || die "template not found at $src (set AIC_HOME or reinstall aic)"
   mkdir -p "$dst"
 
@@ -616,10 +657,12 @@ apply_template () {
       ;;
     *) die "internal error: unknown mode '$mode'" ;;
   esac
+  # Apply the project's Docker socket write mode to the copied compose file.
+  apply_docker_mode "$dst/docker-compose.yml" "$docker"
 }
 
 cmd_init () {
-  local mode="pull" force="" tools="" shell=""
+  local mode="pull" force="" tools="" shell="" docker="$DEFAULT_DOCKER"
   while [ $# -gt 0 ]; do
     case "$1" in
       --build) mode="build" ;;
@@ -628,7 +671,9 @@ cmd_init () {
       --with=*) tools="${1#--with=}" ;;
       --shell) shift; shell="${1:-}" ;;
       --shell=*) shell="${1#--shell=}" ;;
-      *) die "unknown init flag: $1 (try --build, --force, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
+      --docker) docker="rw" ;;
+      --no-docker) docker="ro" ;;
+      *) die "unknown init flag: $1 (try --build, --force, --docker, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
     esac
     shift
   done
@@ -647,9 +692,12 @@ cmd_init () {
   fi
   shell="$(validate_shell "$shell")"
 
-  apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer"
+  apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer" "$docker"
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
-  echo "aic: copied $mode-mode template into .devcontainer/ (tools: $tools, shell: $shell)"
+  echo "aic: copied $mode-mode template into .devcontainer/ (tools: $tools, shell: $shell, docker: $docker)"
+  if [ "$docker" = "rw" ]; then
+    echo "aic: Docker socket write access ENABLED (POST/BUILD on) — the agent can create/build containers on the host daemon."
+  fi
   [ -f .devcontainer/docker-compose.override.yml ] && \
     echo "aic: wired existing docker-compose.override.yml into dockerComposeFile"
   if [ "$mode" = "pull" ]; then
@@ -728,7 +776,7 @@ check_dockerfile_project_base () {
 
 cmd_sync () {
   require_in_project
-  local mode="" tools="" shell="" bump_base=""
+  local mode="" tools="" shell="" bump_base="" docker=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --pull)  mode="pull" ;;
@@ -738,10 +786,20 @@ cmd_sync () {
       --shell) shift; shell="${1:-}" ;;
       --shell=*) shell="${1#--shell=}" ;;
       --bump-base) bump_base="1" ;;
-      *) die "unknown sync flag: $1 (try --pull, --build, --bump-base, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
+      --docker) docker="rw" ;;
+      --no-docker) docker="ro" ;;
+      *) die "unknown sync flag: $1 (try --pull, --build, --bump-base, --docker, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
     esac
     shift
   done
+
+  # Preserve the project's Docker socket write mode across syncs (the compose
+  # file is regenerated wholesale) unless --docker / --no-docker overrides it.
+  # Read it from the CURRENT compose before apply_template overwrites the file.
+  if [ -z "$docker" ]; then
+    docker="$(read_compose_docker_mode)"
+    [ -n "$docker" ] || docker="$DEFAULT_DOCKER"
+  fi
 
   # Auto-detect: presence of .devcontainer/Dockerfile means the project was
   # initialized with --build; otherwise it's the pull-mode 2-file layout.
@@ -769,9 +827,12 @@ cmd_sync () {
   fi
   shell="$(validate_shell "$shell")"
 
-  apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer"
+  apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer" "$docker"
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
-  echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell)"
+  echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell, docker: $docker)"
+  if [ "$docker" = "rw" ]; then
+    echo "aic: Docker socket write access ENABLED (POST/BUILD on) — the agent can create/build containers on the host daemon."
+  fi
   echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
   echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, post-create.project.sh, docker-compose.override.yml, vscode-extensions, vscode-settings.json) are untouched"
   if [ -f .devcontainer/docker-compose.override.yml ]; then
@@ -802,6 +863,82 @@ firewall_live_state () {
   devcontainer="$(resolve_devcontainer 2>/dev/null)" || { echo unknown; return; }
   out="$("$devcontainer" exec --workspace-folder . sudo aic-firewall status 2>/dev/null)" || { echo unknown; return; }
   if grep -q 'policy DROP' <<<"$out"; then echo on; else echo off; fi
+}
+
+# Scan project-owned, sync-preserved devcontainer files that can hand the
+# container extra privilege or host access, BEFORE the stack comes up. These
+# ride along inside an untrusted repo and are honored on `aic up`: a
+# docker-compose.override.yml is auto-wired into dockerComposeFile (so its
+# mounts/caps/namespaces apply), and a Dockerfile.project's FROM is what an
+# override `build:` actually builds on. The aic-managed files can't express
+# these (they're regenerated), so this scan reads only the project-owned ones.
+#
+# mode=gate (aic up / rebuild): print findings; on a TTY, prompt and abort on
+# anything but yes. Non-interactive callers can't be blocked (automation), so
+# they get the loud warning and proceed. mode=warn (check-drift / VS Code
+# initializeCommand): print only, never prompt. Silence with AIC_NO_OVERRIDE_SCAN=1.
+scan_project_overrides () {
+  local mode="${1:-gate}"
+  [ -n "${AIC_NO_OVERRIDE_SCAN:-}" ] && return 0
+  local ov=".devcontainer/docker-compose.override.yml"
+  local df=".devcontainer/Dockerfile.project"
+  local findings=()
+
+  if [ -f "$ov" ]; then
+    if grep -qE '^[[:space:]]*privileged:[[:space:]]*(true|yes)([[:space:]]|$)' "$ov"; then
+      findings+=("override: privileged: true — full host device access")
+    fi
+    if grep -qE '^[[:space:]]*cap_add:' "$ov"; then
+      findings+=("override: cap_add — adds Linux capabilities (e.g. SYS_ADMIN)")
+    fi
+    if grep -qE '^[[:space:]]*(network_mode|pid|ipc|userns_mode):[[:space:]]*["'"'"']?host' "$ov"; then
+      findings+=("override: shares a host namespace (network/pid/ipc/userns: host)")
+    fi
+    if grep -qE '^[[:space:]]*security_opt:' "$ov"; then
+      findings+=("override: security_opt — may disable seccomp/apparmor")
+    fi
+    if grep -qE '/(var/)?run/docker\.sock' "$ov"; then
+      findings+=("override: mounts the Docker socket — full host daemon control")
+    fi
+    if grep -qE '^[[:space:]]*-[[:space:]]*"?/(:|etc|root|home|var|usr|boot|sys|proc)([/:]|$)' "$ov" \
+       || grep -qE '^[[:space:]]*source:[[:space:]]*"?/(etc|root|home|var|usr|boot|sys|proc)?([/:]|$)' "$ov"; then
+      findings+=("override: binds a sensitive host path into the container")
+    fi
+    if grep -qE '^[[:space:]]*(POST|BUILD):[[:space:]]*1[[:space:]]*$' "$ov"; then
+      findings+=("override: re-enables socket-proxy POST/BUILD — host container control (prefer 'aic sync --docker')")
+    fi
+    if grep -qE '^[[:space:]]*devices:' "$ov"; then
+      findings+=("override: devices — maps host devices into the container")
+    fi
+  fi
+
+  if [ -f "$df" ]; then
+    if grep -qE '^[[:space:]]*FROM[[:space:]]' "$df" \
+       && ! grep -qE '^[[:space:]]*FROM[[:space:]]+(ghcr\.io/stefanoginella/aicontainer|aicontainer-base)([:@[:space:]]|$)' "$df"; then
+      findings+=("Dockerfile.project: FROM is not the aicontainer base — sandbox hardening may be absent")
+    fi
+  fi
+
+  [ "${#findings[@]}" -eq 0 ] && return 0
+
+  local y r rst
+  if [ -t 2 ]; then y=$'\033[33m'; r=$'\033[31m'; rst=$'\033[0m'; else y=""; r=""; rst=""; fi
+  printf '%saic: project-owned devcontainer files request extra host access:%s\n' "$r" "$rst" >&2
+  local f
+  for f in "${findings[@]}"; do printf '  %s!%s %s\n' "$y" "$rst" "$f" >&2; done
+  printf '%saic: these take effect when the container comes up. Review them if this repo is not fully trusted.%s\n' "$y" "$rst" >&2
+  printf 'aic: (silence this scan with AIC_NO_OVERRIDE_SCAN=1)\n' >&2
+
+  if [ "$mode" = "gate" ] && [ -t 0 ]; then
+    local reply
+    printf '%saic: bring the container up anyway? [y/N]%s ' "$y" "$rst" >&2
+    IFS= read -r reply || reply=""
+    case "$reply" in
+      y|Y|yes|YES) return 0 ;;
+      *) die "aborted — review the files above, or set AIC_NO_OVERRIDE_SCAN=1 to bypass." ;;
+    esac
+  fi
+  return 0
 }
 
 # Print the trust boundary for the current project: what the agent can read,
@@ -860,18 +997,32 @@ print_boundary_summary () {
     printf "    transcripts -> volume %s_aic-sessions  (created on first 'aic up'; survives rebuild)\n" "$project"
   fi
 
+  printf "\n  %sDocker daemon%s\n" "$b" "$rst"
+  case "$(read_compose_docker_mode)" in
+    rw)
+      printf "    %s! read-WRITE socket-proxy%s: the agent can create/build containers on the HOST\n" "$r" "$rst"
+      printf "      daemon (a container-escape vector, and sibling containers dodge the firewall).\n"
+      printf "    %sre-pin read-only with: aic sync --no-docker && aic rebuild%s\n" "$dim" "$rst"
+      ;;
+    *)
+      printf "    read-only socket-proxy: inspect/list only; cannot create or build containers\n"
+      printf "    %senable writes only if you need them: aic sync --docker && aic rebuild%s\n" "$dim" "$rst"
+      ;;
+  esac
+
   printf "\n  %sNetwork%s\n" "$b" "$rst"
+  printf "    %scloud metadata / link-local (169.254.0.0/16) blocked by default on every create%s\n" "$dim" "$rst"
   case "$net" in
     on)
       printf "    %s* firewall ENABLED%s  (default DROP + curated allowlist active)\n" "$b" "$rst"
       ;;
     unknown)
-      printf "    %s! full outbound by default%s: internet, your LAN, cloud metadata (169.254.169.254)\n" "$y" "$rst"
+      printf "    %s! full outbound by default%s: internet and your LAN (metadata excepted, see above)\n" "$y" "$rst"
       printf "    %s(container not running: live firewall state unknown)%s\n" "$dim" "$rst"
       printf "    lock down:  aic shell  ->  sudo aic-firewall enable\n"
       ;;
     *)
-      printf "    %s! FULL OUTBOUND%s: reaches the internet, your LAN, and cloud metadata (169.254.169.254)\n" "$r" "$rst"
+      printf "    %s! FULL OUTBOUND%s: reaches the internet and your LAN (metadata excepted, see above)\n" "$r" "$rst"
       printf "    lock down per-project:  aic shell  ->  sudo aic-firewall enable\n"
       ;;
   esac
@@ -1110,6 +1261,10 @@ cmd_signing () {
 
 cmd_up () {
   require_in_project
+  # Scan project-owned override / Dockerfile.project for host-access grants
+  # BEFORE bringing the stack up — they're honored on `up` and ride along in
+  # an untrusted repo. On a TTY this prompts and can abort.
+  scan_project_overrides gate
   local devcontainer; devcontainer="$(resolve_devcontainer)"
   "$devcontainer" up --workspace-folder . "$@"
   print_boundary_summary up
@@ -1132,10 +1287,16 @@ cmd_preflight () {
 # Output lands in VS Code's Dev Containers output channel, not the terminal.
 cmd_check_drift () {
   warn_compose_drift
+  # Same host-side entry point surfaces the override scan (print-only) so a
+  # VS Code "Reopen/Rebuild in Container" gets it in the Dev Containers output
+  # channel. Never prompts, always exits 0 (initializeCommand must not abort).
+  scan_project_overrides warn
 }
 
 cmd_rebuild () {
   require_in_project
+  # Same pre-up scan as `aic up` (rebuild also brings the stack up fresh).
+  scan_project_overrides gate
   # Warn *before* the pull below: `aic rebuild` re-pulls the *currently pinned*
   # tag (it never re-pins), so on post-`npm update` drift this would otherwise
   # silently re-fetch the stale image. Surfacing it here lets the user abort and
@@ -1261,7 +1422,7 @@ cmd_help () {
 aic — sandboxed devcontainer for running Claude Code + Codex + OpenCode in bypass mode
 
 Usage:
-  aic init [--build] [--force] [--with TOOLS] [--shell SHELL]
+  aic init [--build] [--force] [--docker] [--with TOOLS] [--shell SHELL]
                        Copy the aicontainer template into ./.devcontainer/.
                        Default: pull ghcr.io/stefanoginella/aicontainer:vX.Y.Z
                        where X.Y.Z is this aic's own version (pinned, not
@@ -1269,6 +1430,13 @@ Usage:
                        is the upgrade path).
                        --build: full local build from template/Dockerfile (slow
                                 first run, but you own the image).
+                       --docker: enable Docker socket WRITE access (socket-proxy
+                                POST/BUILD). Off by default — with it on, an
+                                in-container agent can create/build containers on
+                                the host daemon (a container-escape vector) and
+                                spawn siblings that dodge the firewall. Turn it on
+                                only for testcontainers / in-container
+                                `docker compose`. `aic sync --no-docker` reverts.
                        --with:  comma-separated tools to enable for this project
                                 (claude-code, codex, opencode — any subset).
                                 Defaults to an interactive checkbox prompt; all
@@ -1280,12 +1448,14 @@ Usage:
                                 interactive radio prompt. Stored as
                                 containerEnv.AIC_SHELL; 'aic shell' and the
                                 VS Code default terminal profile honor it.
-  aic sync [--pull|--build] [--bump-base] [--with TOOLS] [--shell SHELL]
+  aic sync [--pull|--build] [--bump-base] [--docker|--no-docker] [--with TOOLS] [--shell SHELL]
                        Re-copy the aicontainer template files into an existing
                        ./.devcontainer/, overwriting them. Auto-detects the
                        mode from whether .devcontainer/Dockerfile exists; pass
                        --pull or --build to force one. Existing AIC_TOOLS /
-                       AIC_SHELL selections are preserved unless overridden.
+                       AIC_SHELL selections and the Docker socket write mode are
+                       preserved unless overridden (--with / --shell /
+                       --docker|--no-docker).
                        Project-owned files (Dockerfile.project, firewall-
                        allowlist, chown-paths, post-create.project.sh,
                        docker-compose.override.yml, vscode-extensions,
@@ -1348,6 +1518,10 @@ Env:
                        'up'/'shell'/'rebuild' (and VS Code container-start)
                        drift warning (pinned image vs installed aic) and the
                        'version'/'upgrade' "newer aicontainer available" nudge.
+  AIC_NO_OVERRIDE_SCAN Set to silence the pre-'up'/'rebuild' scan of
+                       project-owned docker-compose.override.yml /
+                       Dockerfile.project for host-access grants (privileged,
+                       cap_add, host mounts, a non-aicontainer base, ...).
 EOF
 }
 
@@ -1388,14 +1562,14 @@ _aic_complete () {
         --with)  COMPREPLY=( $(compgen -W "$tools"  -- "$cur") ); return ;;
         --shell) COMPREPLY=( $(compgen -W "$shells" -- "$cur") ); return ;;
       esac
-      COMPREPLY=( $(compgen -W "--build --force --with --shell" -- "$cur") )
+      COMPREPLY=( $(compgen -W "--build --force --docker --no-docker --with --shell" -- "$cur") )
       ;;
     sync)
       case "$prev" in
         --with)  COMPREPLY=( $(compgen -W "$tools"  -- "$cur") ); return ;;
         --shell) COMPREPLY=( $(compgen -W "$shells" -- "$cur") ); return ;;
       esac
-      COMPREPLY=( $(compgen -W "--pull --build --bump-base --with --shell" -- "$cur") )
+      COMPREPLY=( $(compgen -W "--pull --build --bump-base --docker --no-docker --with --shell" -- "$cur") )
       ;;
     signing)
       COMPREPLY=( $(compgen -W "auto byok disable status --register" -- "$cur") )
@@ -1454,6 +1628,8 @@ _aic () {
           _arguments \
             '--build[full local build from template/Dockerfile]' \
             '--force[overwrite existing .devcontainer/]' \
+            '--docker[enable Docker socket write access (POST/BUILD)]' \
+            '--no-docker[keep Docker socket read-only (default)]' \
             '--with[comma-separated tools]:tools:('"${tools[*]}"')' \
             '--shell[interactive shell]:shell:('"${shells[*]}"')'
           ;;
@@ -1462,6 +1638,8 @@ _aic () {
             '--pull[force pull-mode template]' \
             '--build[force build-mode template]' \
             '--bump-base[bump Dockerfile.project FROM tag to this aic version]' \
+            '--docker[enable Docker socket write access (POST/BUILD)]' \
+            '--no-docker[keep Docker socket read-only]' \
             '--with[comma-separated tools]:tools:('"${tools[*]}"')' \
             '--shell[interactive shell]:shell:('"${shells[*]}"')'
           ;;
@@ -1511,12 +1689,16 @@ for cmd in aic aicontainer
 
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l build -d 'full local build from template/Dockerfile'
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l force -d 'overwrite existing .devcontainer/'
+  complete -c $cmd -n "__fish_seen_subcommand_from init" -l docker -d 'enable Docker socket write access (POST/BUILD)'
+  complete -c $cmd -n "__fish_seen_subcommand_from init" -l no-docker -d 'keep Docker socket read-only (default)'
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l with  -d 'comma-separated tools' -xa 'claude-code codex opencode claude-code,codex,opencode'
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l shell -d 'interactive shell' -xa 'zsh bash fish'
 
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l pull  -d 'force pull-mode template'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l build -d 'force build-mode template'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l bump-base -d 'bump Dockerfile.project FROM tag to this aic version'
+  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l docker -d 'enable Docker socket write access (POST/BUILD)'
+  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l no-docker -d 'keep Docker socket read-only'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l with  -d 'comma-separated tools' -xa 'claude-code codex opencode claude-code,codex,opencode'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l shell -d 'interactive shell' -xa 'zsh bash fish'
 

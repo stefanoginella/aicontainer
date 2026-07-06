@@ -724,6 +724,26 @@ def setup_gitconfig() -> None:
     log(f"wrote {local}")
 
 
+def block_metadata() -> None:
+    """Drop egress to cloud metadata / link-local (169.254.0.0/16) on every
+    container create, via the scoped /usr/local/bin/aic-firewall block-metadata
+    wrapper. This is independent of the opt-in outbound allowlist: it closes the
+    highest-severity network path (cloud credential theft via 169.254.169.254 on
+    a cloud host) as an always-on baseline, even when the full firewall is never
+    enabled. Strengthen-only (adds a DROP, never opens anything) and fail-soft —
+    a runtime without NET_ADMIN just logs a warning and continues, matching the
+    rest of post-create's defensive degradation. When the full firewall is later
+    enabled its default-DROP policy covers the same range, so the two compose."""
+    try:
+        subprocess.run(
+            ["sudo", "/usr/local/bin/aic-firewall", "block-metadata"],
+            check=True, capture_output=True, text=True,
+        )
+        log("blocked cloud metadata / link-local egress (169.254.0.0/16)")
+    except (subprocess.CalledProcessError, OSError) as e:
+        log(f"warning: metadata egress block skipped ({e}); continuing")
+
+
 def lock_config() -> None:
     """Hand the self-protection files to root via aic-lock-gitconfig (root:root
     0444): ~/.gitconfig.local (so a compromised tool session can't inject
@@ -877,6 +897,7 @@ def refresh_ai_tools() -> None:
 def main() -> None:
     log(f"starting (tools: {','.join(sorted(ENABLED_TOOLS)) or 'none'})")
     fix_volume_ownership()
+    block_metadata()
     refresh_ai_tools()
     if "claude-code" in ENABLED_TOOLS:
         setup_claude()

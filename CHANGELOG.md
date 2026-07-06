@@ -13,6 +13,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Docker socket write access is now off by default.** The bundled
+  socket-proxy ships read-only (`POST`/`BUILD` blocked), so an in-container
+  agent can no longer `docker run --privileged -v /:/host` to escape or spawn
+  firewall-dodging sibling containers. Opt in per project with `aic init
+  --docker` (or `aic sync --docker`); `--no-docker` reverts.
+
+### Added
+
+- **Cloud metadata / link-local egress is blocked on every container create.**
+  `post-create` drops `169.254.0.0/16` (including the `169.254.169.254` cloud
+  metadata endpoint) via `aic-firewall block-metadata`, independent of the
+  opt-in allowlist — closing the cloud-credential-theft path by default.
+- **`aic up` / `aic rebuild` scan project-owned override files before starting.**
+  Flags host-access grants (`privileged`, `cap_add`, host mounts, the Docker
+  socket, a non-aicontainer `Dockerfile.project` base) that ride along in an
+  untrusted repo; prompts on a TTY. Silence with `AIC_NO_OVERRIDE_SCAN=1`.
+- **The devcontainer runs with `pids_limit: 4096`.** A fork-bomb / runaway-agent
+  backstop so it can't exhaust host PIDs; raise it (or add `mem_limit` / `cpus`)
+  in `docker-compose.override.yml`.
+- **`aic preflight` reports the Docker socket state.** The trust-boundary
+  summary now shows whether the socket-proxy is read-only or read-write and
+  notes the always-on metadata block.
+
 ## [0.4.3] - 2026-06-30
 
 ### Changed

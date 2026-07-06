@@ -16,6 +16,11 @@ services:
     image: ghcr.io/stefanoginella/aicontainer:latest
     pull_policy: missing
     command: sleep infinity
+    # Bound a runaway agent (fork bomb / accidental infinite spawn) so it can't
+    # exhaust host PIDs. Generous enough for normal dev (parallel builds, browser
+    # automation); raise it in docker-compose.override.yml if a workload needs
+    # more. Add mem_limit / cpus there too if you want to cap memory or CPU.
+    pids_limit: 4096
     # NET_ADMIN + NET_RAW let the opt-in `sudo aic-firewall` script set up
     # an iptables allowlist for outbound traffic. Capabilities are confined
     # to this container's network namespace; they do not grant any access
@@ -132,10 +137,15 @@ services:
       VERSION: 1
       PING: 1
 
-      # Writes — needed to start containers, build images, manage networks/
-      # volumes from within the devcontainer.
-      POST: 1
-      BUILD: 1
+      # Writes — creating/starting containers and building images on the HOST
+      # daemon. OFF by default: with POST enabled an in-container agent can
+      # `docker run --privileged -v /:/host` and escape to the host, and can
+      # spawn sibling containers that bypass the opt-in aic-firewall (they get
+      # their own netns). Opt in per-project with `aic init --docker` (or
+      # `aic sync --docker`) only when you need testcontainers / in-container
+      # `docker compose` — that flips these two toggles to 1.
+      POST: 0
+      BUILD: 0
 
       # Hard NO — blocks the cheap escapes.
       EXEC: 0

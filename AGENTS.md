@@ -1,509 +1,485 @@
 # AGENTS.md
 
 Guidance for AI coding agents (and humans) working **on** aicontainer itself.
-For users running aicontainer in their projects, the entry point is `README.md`.
+Users running aicontainer in their projects start at `README.md`.
 
-`CLAUDE.md` is a thin pointer to this file — keep that arrangement. New
-agent-facing notes go here, not in `CLAUDE.md`.
+`CLAUDE.md` is a thin pointer to this file — keep that arrangement; new
+agent-facing notes go here.
+
+Convention: "guarded by the '…' test" below names a CLI/smoke test present in
+both workflows. When you change the behavior, extend the test — never weaken
+it.
 
 ## Repository layout
 
-- `aic` — the host-side bash CLI. Single file. Sourced from npm bin (`aic`,
-  `aicontainer`) and from `~/.aicontainer/aic` for git installs. Resolves its
-  template via `$AIC_HOME` (defaults to the script's directory after
+- `aic` — the host-side bash CLI, single file. Exposed as npm bin (`aic`,
+  `aicontainer`) and `~/.aicontainer/aic` for git installs. Finds its template
+  via `$AIC_HOME` (defaults to the script's directory after
   symlink-following).
-- `template/` — files copied into a project's `.devcontainer/` by `aic init`
-  and `aic sync`. The canonical source of truth for what ends up in a user's
-  repo.
+- `template/` — copied into a project's `.devcontainer/` by `aic init`/`aic
+  sync`; the source of truth for what lands in user repos.
   - `Dockerfile`, `post-create.py`, `hooks/`, `aic-firewall`,
     `aic-chown-volumes`, `aic-lock-gitconfig`, `.zshrc`
-  - `hooks/` holds the shared guardrail `pre-tool-use.sh` (Claude + Codex) plus
-    `opencode-guardrail.js`, the thin OpenCode plugin that shells out to it — all
-    copied root-owned to `/etc/aic/hooks/` (Dockerfile chmods `*.sh`/`*.json`/`*.js`).
-  - `docker-compose.pull.yml` — default (pull) mode
-  - `docker-compose.build.yml` — `--build` mode
+  - `hooks/`: the shared guardrail `pre-tool-use.sh` (Claude + Codex) plus
+    `opencode-guardrail.js`, the thin OpenCode plugin that shells out to it —
+    all copied root-owned to `/etc/aic/hooks/`.
+  - `docker-compose.pull.yml` (default mode), `docker-compose.build.yml`
+    (`--build` mode)
   - `README.md` — copied into every project's `.devcontainer/` in **both**
-    modes (unconditional `cp` in `apply_template()`, before the mode `case`).
-    A managed/overwritten guide to the do-not-edit vs project-owned split, aimed
-    at stopping humans and AI agents from hand-editing `devcontainer.json`. Keep
-    its two lists in sync with `apply_template()` and the project-owned files.
+    modes; a managed guide to the do-not-edit vs project-owned split. Keep its
+    two lists in sync with `apply_template()` and the project-owned files.
 - `.github/workflows/`
-  - `rebuild.yml` — **security-refresh track.** Runs on template-touching
-    pushes to `main`, the weekly cron, and `workflow_dispatch`. Publishes
-    `ghcr.io/stefanoginella/aicontainer:latest` and `:weekly-YYYY-VV`.
-    Does not publish to npm.
-  - `release.yml` — **release track.** Runs only on `v*` tag push (or
-    `workflow_dispatch` against a tag ref). Publishes immutable
-    `:vX.Y.Z` + `:latest` to GHCR and `aicontainer@X.Y.Z` to npm with
-    provenance attestation.
-- `package.json` — npm metadata. Its `version` field is the source of truth
-  for the GHCR image tag pinned by `aic init`. Do not edit it by hand for a
-  release; use `npm version`, whose `preversion`/`version` scripts promote the
-  changelog (see "Releasing").
+  - `rebuild.yml` — **security-refresh track**: template-touching pushes to
+    `main`, weekly cron, `workflow_dispatch`. Publishes GHCR `:latest` +
+    `:weekly-YYYY-VV`; never npm.
+  - `release.yml` — **release track**: `v*` tag push (or `workflow_dispatch`
+    on a tag ref) only. Publishes immutable `:vX.Y.Z` + `:latest` to GHCR and
+    `aicontainer@X.Y.Z` to npm with provenance attestation.
+- `package.json` — its `version` is the source of truth for the GHCR tag `aic
+  init` pins. Never bump it by hand; use `npm version` (see "Releasing").
 - `CHANGELOG.md` — hand-maintained ([Keep a Changelog](https://keepachangelog.com/)
-  format). Source of the GitHub Release notes, and a release precondition (see
-  "Releasing").
-- `scripts/promote-changelog.mjs` — zero-dep release helper run by `npm
-  version`: promotes the hand-written `## [Unreleased]` section to the new
-  version (date + compare links). It does **not** generate content.
+  format); source of the GitHub Release notes and a release precondition.
+- `scripts/promote-changelog.mjs` — zero-dep helper run by `npm version`:
+  promotes `## [Unreleased]` to the new version (date + compare links). Never
+  generates content.
 - `.githooks/pre-push` — local mirror of the CI changelog gate; opt-in via
   `git config core.hooksPath .githooks`.
 
-## How image tag pinning works (read before editing the CLI)
+## Image tag pinning (read before editing the CLI)
 
-`aic init` (pull mode) and `aic sync` (pull mode) write
-`ghcr.io/stefanoginella/aicontainer:vX.Y.Z` into the generated
-`.devcontainer/docker-compose.yml`, where `X.Y.Z` is the installed aic's
-`package.json` version, read via `read_aic_version()` in the `aic` script.
+In pull mode, `aic init`/`aic sync` write
+`ghcr.io/stefanoginella/aicontainer:vX.Y.Z` into the generated compose file
+(`X.Y.Z` = installed `package.json` version via `read_aic_version()`).
+`template/docker-compose.pull.yml` ships the literal placeholder `:latest`
+(three occurrences: two comments + the `image:` line); `apply_template()`
+sed-rewrites each to `:vX.Y.Z`. **Never pin the template itself** — `:latest`
+is the placeholder that keeps the rewrite idempotent so `aic sync` can re-pin
+cleanly.
 
-The mechanism:
-
-1. `template/docker-compose.pull.yml` ships with the literal placeholder
-   `ghcr.io/stefanoginella/aicontainer:latest` (three occurrences: two
-   comments + the actual `image:` line).
-2. `apply_template()` copies the file, then sed-rewrites every occurrence to
-   `:vX.Y.Z`.
-3. The user's resulting compose file is pinned; the template stays canonical
-   with `:latest`.
-
-**Do not** hand-edit `template/docker-compose.pull.yml` to use a pinned tag —
-keep `:latest` as the placeholder so the rewrite remains idempotent and `aic
-sync` can re-pin to a new version cleanly.
-
-If you change the GHCR repo path (`stefanoginella/aicontainer`), update **all
-of**: the template (`docker-compose.pull.yml`), the sed pattern in
-`apply_template()` inside `aic`, the README's GHCR references, the
+If you change the GHCR repo path, update **all of**: the template, the sed
+pattern in `apply_template()`, the README's GHCR references, the
 `aic-firewall` allowlist's `ghcr.io` entry, and both workflows' image tags.
 
 ## Version drift / update notifications
 
-Two best-effort version checks live next to `read_aic_version()` in `aic`; both
-fail soft (every error path `return 0` — they must **never** abort the command
-the user actually ran) and both silence with `AIC_NO_UPDATE_CHECK=1`.
+Two best-effort checks live next to `read_aic_version()` in `aic`. Both fail
+soft (every error path `return 0` — they must never abort the user's command)
+and both silence with `AIC_NO_UPDATE_CHECK=1`.
 
-- **Tier 1 — `warn_compose_drift()` (offline, hot path).** Runs on `aic
-  up`/`aic shell`/`aic rebuild` (on `rebuild`, **before** the `docker pull` —
-  `rebuild` re-pulls the *currently pinned* tag and never re-pins, so without the
-  early warning it would silently re-fetch the stale image; firing first lets the
-  user abort and `aic sync`). Compares the `:vX.Y.Z` pinned in the project's
-  `docker-compose.yml` (parsed by `read_pinned_compose_version()`, anchored on
-  the repo path so comments/socket-proxy don't match) against the installed
-  CLI's `read_aic_version()`, and warns either direction with a `sync &&
-  rebuild` hint. **Also fires when the container is started from VS Code**
-  ("Reopen/Rebuild in Container"), which drives `devcontainer up` directly and
-  never the `aic` CLI: the template's `initializeCommand` (the only host-side
-  lifecycle hook) ends with a defensive `&& { command -v aic … && aic
-  check-drift >/dev/null; true; }`. `cmd_check_drift` is an internal, lenient
-  entry point (no `require_in_project`, always exits 0) that just calls
-  `warn_compose_drift`. Load-bearing details: (1) the suffix is `&&`-chained
-  **after** the bootstrap so a bootstrap failure still surfaces to VS Code, and
-  the trailing `; true` makes the group exit 0 so a missing/old/erroring `aic`
-  can never abort container startup; (2) `>/dev/null` suppresses stdout so an
-  *old* global `aic` (which lacks the `check-drift` command and would dump
-  `cmd_help`) stays quiet — the real warning is stderr-only; (3) visibility is
-  the **Dev Containers output channel**, not a popup or the terminal (the only
-  way to force a popup is to fail init, which we refuse to do) — so it's strictly
-  additive over the `aic`-CLI path, not equally prominent. The check needs `aic`
-  on PATH in VS Code's `initializeCommand` env (GUI-launched VS Code may have a
-  trimmed PATH); a miss is a silent no-op, never a break. **Known, deliberate
-  blind spots** (offline + zero-cost beats full coverage): it compares
-  CLI-vs-pin, not pin-vs-*running container* — so a synced-but-not-rebuilt
-  project (pin == CLI, stale container still up) is silent (the hint resolves it
-  anyway); and **build-mode projects have no pin, so they're unchecked** (this
-  includes the dogfood repo — so the `check-drift` wiring is mirrored into its
-  `.devcontainer/devcontainer.json` to avoid template drift, but is a no-op
-  there). Don't "fix" these by adding a `docker inspect` to the hot path without
-  re-reading this tradeoff.
-- **Tier 2 — `check_for_update()` (network, off hot path).** Runs only on `aic
-  version`/`aic upgrade`. Asks **npm** for the latest published version — *not*
-  GHCR, whose `:latest` floats on `rebuild.yml`'s weekly cron independent of
-  releases and would mis-report "behind." `fetch_latest_version()` is bounded
-  (`curl --max-time`, npm-view fallback) and its result is gated through
-  `is_semver()` before any `printf` — that validation is also the
-  terminal-escape defense against a hostile registry response; keep it. Cached
-  24h under `$XDG_CACHE_HOME/aicontainer/update-check`, and **skipped when `CI`
-  is set** — which is what keeps the workflow CLI tests offline; don't remove
-  that guard.
+**Tier 1 — `warn_compose_drift()` (offline, hot path).** On `aic
+up`/`shell`/`rebuild`, compares the project's pinned `:vX.Y.Z`
+(`read_pinned_compose_version()`, anchored on the repo path so
+comments/socket-proxy don't match) against the CLI version; warns either
+direction with a `sync && rebuild` hint. On `rebuild` it fires **before** the
+`docker pull` — `rebuild` re-pulls the currently pinned tag and never re-pins,
+so warning first lets the user abort and `aic sync`.
+
+It also fires on VS Code "Reopen/Rebuild in Container" (which drives
+`devcontainer up` directly, never `aic`): the template's `initializeCommand`
+(the only host-side lifecycle hook) ends with `&& { command -v aic … && aic
+check-drift >/dev/null; true; }`. `cmd_check_drift` is a lenient internal
+entry point (no `require_in_project`, always exits 0) that just calls
+`warn_compose_drift`. Load-bearing details:
+
+- The suffix is `&&`-chained **after** the bootstrap (a bootstrap failure
+  still surfaces to VS Code), and the trailing `; true` means a
+  missing/old/erroring `aic` can never abort container startup.
+- `>/dev/null` keeps an *old* global `aic` (no `check-drift` command → would
+  dump `cmd_help`) quiet; the real warning is stderr-only.
+- Visibility is the Dev Containers output channel, not a popup or terminal
+  (the only way to force a popup is to fail init, which we refuse to do) —
+  strictly additive over the `aic`-CLI path. Needs `aic` on
+  `initializeCommand`'s PATH (GUI-launched VS Code may trim it); a miss is a
+  silent no-op, never a break.
+
+Deliberate blind spots (offline + zero-cost beats full coverage): it compares
+CLI-vs-pin, not pin-vs-*running container*, so a synced-but-not-rebuilt
+project is silent (the hint resolves it anyway); and build-mode projects have
+no pin, so they're unchecked — including the dogfood repo, where the
+`check-drift` wiring is mirrored into `.devcontainer/devcontainer.json` only
+to avoid template drift. Don't "fix" these with a `docker inspect` on the hot
+path without re-reading this tradeoff.
+
+**Tier 2 — `check_for_update()` (network, off hot path).** Only on `aic
+version`/`upgrade`. Asks **npm** for the latest published version — not GHCR,
+whose `:latest` floats on the weekly cron and would mis-report "behind."
+`fetch_latest_version()` is bounded (`curl --max-time`, npm-view fallback)
+and gated through `is_semver()` before any `printf` — that validation is the
+terminal-escape defense against a hostile registry; keep it. Cached 24h under
+`$XDG_CACHE_HOME/aicontainer/update-check`, and skipped when `CI` is set —
+that guard is what keeps the workflow CLI tests offline; don't remove it.
 
 ## Project-owned override files (don't break the auto-wire)
 
 `apply_template()` overwrites `devcontainer.json` and `docker-compose.yml`
-wholesale on every `init`/`sync`; only `AIC_TOOLS` / `AIC_SHELL` survive (they
-are re-derived from the old file and re-injected by `patch_devcontainer_json`).
-So users must **not** hand-edit those two files — per-project tweaks go in
-project-owned files that `apply_template()` never touches: `Dockerfile.project`,
+wholesale on every `init`/`sync`; only `AIC_TOOLS`/`AIC_SHELL` survive
+(re-derived from the old file and re-injected by `patch_devcontainer_json`).
+Users must not hand-edit those two files — per-project tweaks go in the
+project-owned files `apply_template()` never touches: `Dockerfile.project`,
 `firewall-allowlist`, `chown-paths`, `post-create.project.sh`,
-`docker-compose.override.yml`, `vscode-extensions`, and `vscode-settings.json`.
+`docker-compose.override.yml`, `vscode-extensions`, `vscode-settings.json`.
+All share one contract: **opt-in by file presence, survive sync, read-only
+inside the container.**
 
-The override is the sync-safe home for anything that would otherwise live in
-`containerEnv` or the compose service (env, `extra_hosts`, mounts, a
-`build:` block for `Dockerfile.project`). The mechanism:
+**`docker-compose.override.yml`** — sync-safe home for anything that would
+otherwise live in `containerEnv` or the compose service (env, `extra_hosts`,
+mounts, a `build:` block for `Dockerfile.project`). The template's
+`devcontainer.json` ships `"dockerComposeFile": ["docker-compose.yml"]`
+(single entry); `patch_devcontainer_json()` appends the override **only when
+the file exists**, guarded against double-wiring so it stays idempotent. Keep
+the template array single-entry — pre-listing the override makes
+`devcontainer up` fail on projects without the file (a missing
+`dockerComposeFile` entry is a hard error).
 
-1. The template's `devcontainer.json` ships `"dockerComposeFile":
-   ["docker-compose.yml"]` (single entry — the canonical placeholder).
-2. `patch_devcontainer_json()` appends `"docker-compose.override.yml"` to that
-   array **only when `.devcontainer/docker-compose.override.yml` exists**. The
-   append is guarded against double-wiring, so it stays idempotent across syncs.
+Because the override (and `Dockerfile.project`'s `FROM`) is honored on `aic
+up` and rides along inside an untrusted repo, `scan_project_overrides()` reads
+both files **before** `devcontainer up` (from `cmd_up`/`cmd_rebuild` in gate
+mode — prompts on a TTY; and `cmd_check_drift` in warn mode — the VS Code
+`initializeCommand` path) and flags host-access grants (`privileged`,
+`cap_add`, host namespaces, host bind mounts, the Docker socket, socket-proxy
+`POST/BUILD: 1`, a non-aicontainer `FROM`). Print-only + opt-out
+(`AIC_NO_OVERRIDE_SCAN=1`) so it never blocks automation. Guarded by the
+"project override scan flags host-access grants before up" test — extend the
+pattern list and the test together.
 
-Keep the template's array single-entry — do not pre-list the override there, or
-`devcontainer up` fails on projects that don't have the file (a missing
-`dockerComposeFile` entry is a hard error). The wiring is opt-in by file
-presence, mirroring how `firewall-allowlist` is read only if present.
-
-`chown-paths` is the companion to override-declared **named volumes**. Docker
-inits a fresh named volume `root:root` and `updateRemoteUserUID` doesn't touch
-the daemon's init UID, so a `myproject-venv:/workspace/.venv` mount lands
-unwritable by `vscode`. A project lists such mountpoints (one per line) in
-`.devcontainer/chown-paths`; `post-create.py`'s `fix_volume_ownership()` then
-re-owns them via `aic-chown-volumes` on container creation. Same opt-in-by-
-presence, read-only-inside-container, survives-sync contract as
-`firewall-allowlist`. **The prefix allowlist (`/workspace/`,
+**`chown-paths`** — companion to override-declared named volumes. Docker
+inits a fresh named volume `root:root` and `updateRemoteUserUID` doesn't
+change that, so e.g. a `myproject-venv:/workspace/.venv` mount lands
+unwritable by `vscode`. The project lists such mountpoints one per line;
+`post-create.py`'s `fix_volume_ownership()` re-owns them via
+`aic-chown-volumes` on create. **The prefix allowlist (`/workspace/`,
 `/home/vscode/.cache/`) is the security boundary — see "Security stance"
 before widening it.**
 
-`post-create.project.sh` is the project-owned extension point for
-`post-create.py` itself. `run_project_hook()` runs
-`.devcontainer/post-create.project.sh` (via `bash <file>`, cwd `/workspace`,
-as `vscode`) **last** in `main()`, after every aic-managed step, so a
-project's `lefthook install` / `npm ci` sees a fully wired environment. Same
-opt-in-by-presence / survives-sync / read-only-inside-container contract as
-the files above. It's the only way to extend post-create in **pull mode**,
-where `post-create.py` is baked into the image and absent from the repo —
-`apply_template()` only copies it in `--build` mode. Security-wise it's lower
-stakes than it looks: it runs unprivileged (no grant the in-container agent
-lacks) and the PreToolUse hook blocks in-container writes to `.devcontainer/`,
-so it stays host-only-editable. Non-zero exit is logged, not fatal — keep that
-defensive degradation; a flaky project step shouldn't block the devcontainer
-from coming up.
+**`post-create.project.sh`** — project extension point for `post-create.py`.
+`run_project_hook()` runs it **last** in `main()` (via `bash <file>`, cwd
+`/workspace`, as `vscode`), so a project's `lefthook install`/`npm ci` sees a
+fully wired environment. It's the only way to extend post-create in pull
+mode, where `post-create.py` is baked into the image (`apply_template()`
+copies it only in `--build` mode). Lower-stakes than it looks: it runs
+unprivileged, and the PreToolUse hook keeps `.devcontainer/`
+host-only-editable. Non-zero exit is logged, not fatal — keep that; a flaky
+project step shouldn't block the devcontainer from coming up.
 
-`vscode-extensions` / `vscode-settings.json` are the sync-safe home for
-per-project **editor** customization, since `apply_template()` rewrites
-`devcontainer.json` (and its `customizations.vscode` block) wholesale every
-sync. Same opt-in-by-presence / survives-sync / read-only-inside-container
-contract as the files above. `patch_devcontainer_json()` merges them at two
-JSONC **marker comments** baked into `template/devcontainer.json`
-(`// aic:vscode-extensions` inside the extensions array,
-`// aic:vscode-settings` inside the settings object) — `build_vscode_ext_block`
-/ `build_vscode_settings_block` emit **leading-comma** blocks so the result is
-valid JSON no matter how the template array/object ends, and a JSONC trailing
-comma is tolerated before the closing brace. Load-bearing details, don't undo
-them: (1) **keep the markers** — they're the injection anchors; removing them
-silently drops the merge. (2) The merge re-reads the source files from the
-pristine template on every run, so it's **idempotent** across syncs — don't
-"optimize" it into editing in place. (3) Extension lines are validated against
-the `publisher.name` grammar and **warn+skipped** otherwise (mirrors
-`chown-paths`), and the settings file must be a JSON object whose inner content
-is injected **verbatim** — both go into the host-side `devcontainer.json` the
-user reviews via `git diff`, never into the container, so this isn't a sandbox-
-escape surface, but keep the id validation so a stray line can't smuggle JSON.
-(4) On a key collision aic's own settings win *inside* `devcontainer.json`
-(injected first); the documented escape hatch is the user's own
-`.vscode/settings.json`, which beats devcontainer machine-scope settings — don't
-reorder the injection to "make project win" without updating the README. The
-"aic sync merges project-owned vscode-extensions / vscode-settings.json" CLI
-test in both workflows guards this — extend it, don't weaken it.
+**`vscode-extensions` / `vscode-settings.json`** — sync-safe per-project
+editor customization (`apply_template()` rewrites `customizations.vscode`
+wholesale every sync). `patch_devcontainer_json()` merges them at two JSONC
+marker comments in `template/devcontainer.json` (`// aic:vscode-extensions`
+in the extensions array, `// aic:vscode-settings` in the settings object) —
+`build_vscode_ext_block`/`build_vscode_settings_block` emit leading-comma
+blocks so the result is valid JSON however the template array/object ends (a
+JSONC trailing comma is tolerated). Load-bearing, don't undo:
+
+1. **Keep the markers** — they're the injection anchors; removing them
+   silently drops the merge.
+2. The merge re-reads from the pristine template every run, so it's
+   idempotent across syncs — don't "optimize" it into editing in place.
+3. Extension lines are validated against the `publisher.name` grammar and
+   warn+skipped otherwise; the settings file must be a JSON object, injected
+   verbatim. Both land only in the host-side `devcontainer.json` the user
+   reviews via `git diff` (never the container), so it's not a sandbox-escape
+   surface — but keep the id validation so a stray line can't smuggle JSON.
+4. On a key collision, aic's own settings win inside `devcontainer.json`
+   (injected first); the documented escape hatch is the user's
+   `.vscode/settings.json`, which beats devcontainer machine-scope settings.
+   Don't reorder to "make project win" without updating the README.
+
+Guarded by the "aic sync merges project-owned vscode-extensions /
+vscode-settings.json" test.
 
 **AI-tool refresh on every create.** `refresh_ai_tools()` runs early in
-`main()` and floats Claude Code + Codex + OpenCode to their latest release on
-every container (re)create — so a plain `aic rebuild` lands current CLIs without
-a new image. The Dockerfile bakes each as an offline *floor*; this updates them
-in place via `claude update` / `codex update` / `opencode upgrade`. It's
-`AIC_TOOLS`-gated, fail-soft (an offline/failed update keeps the baked version —
-don't make it fatal), and opt-out via `AIC_FREEZE_TOOLS=1` for a reproducible
-sandbox. The updaters MUST run with their bin dir on `PATH` (`~/.local/bin` for
-Claude/Codex, `~/.opencode/bin` for OpenCode — both are prepended to the env
-`refresh_ai_tools()` builds): `codex update` re-runs the official installer,
-which otherwise tries to edit a login-shell rc file (root-locked at runtime by
-`aic-lock-gitconfig`) and fails — with the bin dir already on PATH it skips that
-step. OpenCode is installed with `--no-modify-path` and `opencode upgrade`
-replaces the binary in place, so it doesn't touch the rc files at all. The "tool
-self-update works with rc files root-locked" smoke test (both workflows) guards
-exactly this; don't weaken it.
+`main()` and floats Claude Code + Codex + OpenCode to latest on every
+container (re)create, so a plain `aic rebuild` lands current CLIs without a
+new image. The Dockerfile bakes each as an offline *floor*; updates run via
+`claude update`/`codex update`/`opencode upgrade`. `AIC_TOOLS`-gated,
+fail-soft (an offline/failed update keeps the baked version — don't make it
+fatal), opt-out via `AIC_FREEZE_TOOLS=1` for a reproducible sandbox. The
+updaters MUST run with their bin dir on `PATH` (`~/.local/bin` for
+Claude/Codex, `~/.opencode/bin` for OpenCode — both prepended in
+`refresh_ai_tools()`): `codex update` re-runs the official installer, which
+otherwise tries to edit a login-shell rc file (root-locked by
+`aic-lock-gitconfig`) and fails; with the bin dir already on PATH it skips
+that step. OpenCode installs with `--no-modify-path` and upgrades in place,
+never touching rc files. Guarded by the "tool self-update works with rc files
+root-locked" test.
 
-**Dockerfile.project base-tag drift.** Because `Dockerfile.project` is
-project-owned, `aic sync` re-pins `docker-compose.yml` to the new aic version
-but does **not** touch a `FROM ghcr.io/stefanoginella/aicontainer:vX.Y.Z` inside
-it — so after `npm update -g aicontainer` the two silently diverge, and when an
-override's `build:` points at `Dockerfile.project`, that stale `FROM` is what
-actually runs (the compose `image:` pin is bypassed). This bit a real project
-(container came up on an old base with none of the new template behavior).
-`check_dockerfile_project_base()` (called at the end of `cmd_sync`) detects the
-drift and **warns**; `aic sync --bump-base` rewrites the tag in place. It only
-acts on a literal version pin — `:latest` floats, `ARG`-templated bases, and
-other repos are left alone (deliberate choices). Keep the warn/opt-in split:
-silently editing a project-owned file would break the ownership contract above.
-The "aic sync warns on / bumps a stale Dockerfile.project base" CLI test in both
-workflows guards this — extend it, don't weaken it.
+**Dockerfile.project base-tag drift.** `aic sync` re-pins
+`docker-compose.yml` but never touches a `FROM
+ghcr.io/stefanoginella/aicontainer:vX.Y.Z` inside project-owned
+`Dockerfile.project` — and when an override's `build:` points at it, that
+stale `FROM` is what actually runs (the compose `image:` pin is bypassed).
+`check_dockerfile_project_base()` (end of `cmd_sync`) warns on the drift;
+`aic sync --bump-base` rewrites the tag. It acts only on a literal version
+pin — `:latest`, `ARG`-templated bases, and other repos are deliberately left
+alone. Keep the warn/opt-in split: silently editing a project-owned file
+would break the ownership contract above. Guarded by the "aic sync warns on /
+bumps a stale Dockerfile.project base" test.
+
+**Docker socket write access (opt-in).** The socket-proxy ships **read-only**
+in both compose templates (`POST: 0`, `BUILD: 0`) — this is the change that
+makes the proxy an actual host-isolation boundary, since `POST` lets an agent
+`docker run --privileged -v /:/host` (host escape) and spawn firewall-dodging
+sibling containers. `--docker` (init/sync) opts in; the mode is a third
+sync-preserved choice alongside `AIC_TOOLS`/`AIC_SHELL`, but it lives in the
+**compose file itself**, not `containerEnv`: `read_compose_docker_mode()`
+reads it from the old file before `apply_template()` overwrites, and
+`apply_docker_mode()` flips the two toggle lines in the fresh copy (matched on
+the bare `KEY: <0|1>` form so nothing else moves). `print_boundary_summary`
+reports the live state from the same read. **Keep the template at
+`POST/BUILD: 0`** — that's the secure default the opt-in flips, and the
+"Docker socket write access is opt-in" test asserts it (plus that `--docker`
+persists across a plain `sync` and `--no-docker` reverts). The override scan
+above also flags a hand-written `POST/BUILD: 1` in the override, since that's
+the un-blessed way to re-enable it.
+
+**Always-on metadata block.** `post-create.py`'s `block_metadata()` runs `sudo
+aic-firewall block-metadata` on every create (fail-soft), dropping egress to
+`169.254.0.0/16` — cloud metadata + link-local — independent of the opt-in
+allowlist, to close the cloud-credential-theft path even when the full
+firewall is never enabled. It's a third `aic-firewall` subcommand and needs no
+new sudoers entry (the wrapper is already `NOPASSWD`). Strengthen-only like
+`enable`: it only ever adds a DROP (a dedicated `AIC_METADATA` chain, re-flushed
+each run, jumped from `OUTPUT` once), so it composes with the full firewall
+(whose default-DROP already covers the range). Guarded by the "cloud metadata
+/ link-local egress is blocked" test. Known gap: a sibling container spawned
+via opt-in Docker write access has its own netns and isn't covered — another
+reason the read-only default matters.
+
+**Runaway limit.** Both compose templates set `pids_limit: 4096` on the
+devcontainer (fork-bomb / stuck-loop backstop). Deliberately *not* a
+`mem_limit` — a fixed memory ceiling would OOM-kill legitimate heavy builds;
+memory/CPU caps are documented as an override instead. The "Docker socket
+write access is opt-in" test also asserts `pids_limit` is present.
 
 ## Releasing
 
-See README.md's "Releasing" section for the user-visible flow. **When asked to
-cut/trigger a release, do exactly this:**
+README's "Releasing" section has the user-visible flow. **When asked to cut a
+release, do exactly this:**
 
-1. **Clean, current `main`:** `git checkout main && git pull`; working tree
-   clean. Releases go from `main`.
-2. **Ensure this release's notes are under `## [Unreleased]` in CHANGELOG.md.**
-   They should already be there (added as changes landed). If `[Unreleased]` is
-   empty or stale, write them **by hand** from `git log <last-tag>..HEAD`,
-   grouped under Keep-a-Changelog headings (Added/Changed/Fixed/Removed), and
-   commit. Do **not** rename the heading or add the date — `npm version` does
-   that. Never auto-generate the prose from commits (tried, reverted, disliked).
-3. **Pick the bump** (patch/minor/major) per README's "Picking the bump".
-4. **If `template/` changed since the last release, sync the dogfood
-   devcontainer:** run `aic sync` **from the host** (never inside the container —
-   the PreToolUse hook blocks `.devcontainer/` writes) and commit the resulting
-   `.devcontainer/` changes. The dogfood is build-mode, so `.devcontainer/`
-   holds copies of `template/`; skipping this leaves it drifted.
-5. **Cut it:** `npm version <bump> && git push --follow-tags`.
+1. Clean, current `main`: `git checkout main && git pull`; working tree
+   clean.
+2. Ensure this release's notes are under `## [Unreleased]` in CHANGELOG.md
+   (they should already be there, added as changes landed). If empty/stale,
+   write them **by hand** from `git log <last-tag>..HEAD` under
+   Keep-a-Changelog headings, and commit. Don't rename the heading or add a
+   date — `npm version` does that. Never auto-generate the prose from commits
+   (tried, reverted, disliked).
+3. Pick the bump (patch/minor/major) per README's "Picking the bump".
+4. If `template/` changed since the last release, sync the dogfood
+   devcontainer: run `aic sync` **from the host** (never in-container — the
+   PreToolUse hook blocks `.devcontainer/` writes) and commit the result. The
+   dogfood is build-mode, so `.devcontainer/` holds copies of `template/`;
+   skipping this leaves it drifted.
+5. `npm version <bump> && git push --follow-tags`.
 
-> **Gotcha — `npm version` silently skips changelog promotion when npm has
-> `ignore-scripts=true`.** The aicontainer sandbox image sets `npm config set
-> ignore-scripts true` (hardening: don't run arbitrary package install
-> scripts). That config *also* suppresses the `preversion`/`version` lifecycle
-> hooks below, so `npm version` bumps `package.json` but **never runs
-> `promote-changelog.mjs`** — the bump commit ships with `package.json` only and
-> no `## [X.Y.Z]` section, which then fails the `.githooks/pre-push` gate and the
-> `release.yml` CHANGELOG check. Check with `npm config get ignore-scripts`. If
-> it's `true`, cut the release with scripts enabled for that one command:
-> `npm version <bump> --ignore-scripts=false && git push --follow-tags`. (Don't
-> globally `npm config set ignore-scripts false` — that weakens the image
-> default.) If you've already run a plain `npm version` and the bump commit is
-> still **local** (not pushed), recover without redoing it: run `node
-> scripts/promote-changelog.mjs` by hand, `git commit --amend` to fold the
-> promoted `CHANGELOG.md` into the bump commit, `git tag -f -a vX.Y.Z -m X.Y.Z`
-> to move the (annotated) tag, then push — this is what was done for v0.1.4.
+> **Gotcha — `ignore-scripts=true` silently skips changelog promotion.** The
+> sandbox image sets `npm config set ignore-scripts true` (hardening), which
+> also suppresses `npm version`'s `preversion`/`version` hooks — the bump
+> commit then ships without a `## [X.Y.Z]` section and fails the pre-push and
+> CI gates. Check `npm config get ignore-scripts`; if `true`, use `npm
+> version <bump> --ignore-scripts=false` for that one command (don't flip the
+> global config — it weakens the image default). If a plain `npm version`
+> already ran and the bump commit is still **local**: run `node
+> scripts/promote-changelog.mjs` by hand, `git commit --amend` to fold in the
+> promoted CHANGELOG, `git tag -f -a vX.Y.Z -m X.Y.Z`, then push.
 
-`npm version` runs two lifecycle scripts (see `package.json`) — **unless
-`ignore-scripts=true` suppresses them; see the gotcha above:**
+The two lifecycle scripts (unless suppressed — see gotcha):
 
-- `preversion` → `promote-changelog.mjs --check`: aborts the bump *before*
+- `preversion` → `promote-changelog.mjs --check`: aborts the bump before
   package.json is touched if `[Unreleased]` is empty — you can't release
   nothing, and a failed attempt leaves the tree clean.
-- `version` → `promote-changelog.mjs`: promotes the hand-written `[Unreleased]`
-  section to `## [X.Y.Z] - <date>`, opens a fresh empty `[Unreleased]`, fixes
-  the compare links, and `git add`s CHANGELOG.md so it lands in the bump commit
-  and ships on the tag.
+- `version` → `promote-changelog.mjs`: renames `[Unreleased]` to `## [X.Y.Z]
+  - <date>`, opens a fresh `[Unreleased]`, fixes the compare links, and `git
+  add`s CHANGELOG.md into the bump commit.
 
-`release.yml` then fires on the tag: builds + pushes GHCR `:vX.Y.Z`/`:latest`,
-publishes npm with provenance, and (the `github-release` job) creates the GitHub
-Release from the tag's `## [X.Y.Z]` CHANGELOG section.
+`release.yml` then fires on the tag: GHCR `:vX.Y.Z`/`:latest`, npm with
+provenance, and the `github-release` job creates the GitHub Release from the
+tag's `## [X.Y.Z]` section.
 
 Internal notes:
 
-- The bump commit on `main` touches only `package.json` + `CHANGELOG.md` —
-  neither in `rebuild.yml`'s `paths:` filter — so a release push that contains
-  **only** the bump commit fires `release.yml` alone. **But merge a
-  template-touching feature and release in the *same* push** (e.g.
-  `git merge feat… && npm version && git push --follow-tags` back-to-back) and
-  the push range to `main` includes the feature commit, so `rebuild.yml` *also*
-  fires — two workflows build the same tree and both race to push `:latest`
-  (harmless: identical content, last-writer-wins; but ~7 min wasted). GitHub
-  evaluates `paths:` across *every* commit in a push, not just HEAD, which is
-  why the feature commit drags rebuild along. **Avoid it by separating the
-  pushes:** land the feature via PR first (rebuild runs at merge), *then* run
-  `npm version && git push --follow-tags` as its own push (bump commit only →
-  only `release.yml` fires). v0.0.9 was released the combined way and did
-  double-run; it's wasteful, not wrong.
-- **Concurrency guards** (top of each workflow). `rebuild.yml`:
-  `cancel-in-progress: true` — a newer push to the same ref supersedes an
-  in-flight rebuild (safe; `:latest`/`:weekly` are mutable and the newer run
-  re-pushes them). `release.yml`: `cancel-in-progress: false`, grouped per tag —
-  serialize, **never** cancel a run mid-publish (a kill between the GHCR push and
-  `npm publish` could leave a partial release). Keep release uncancellable; do
-  not "simplify" the two into one shared group, which could cancel a release.
-- `release.yml`'s "Verify tag matches package.json" step fails fast if you
-  mint a tag manually that doesn't match. Use `npm version`.
-- Do not run `npm publish` locally. CI uses `--provenance`; manual publishes
-  skip the supply-chain attestation users can verify.
-- **CHANGELOG.md content is hand-written, never generated.** You author notes
-  under `## [Unreleased]`; `scripts/promote-changelog.mjs` only relabels them at
-  release time. The CI gate (`release.yml` "Verify CHANGELOG.md has an entry")
-  greps for `^## [X.Y.Z]` before any GHCR/npm push and fails the release if it's
-  missing; `.githooks/pre-push` mirrors it locally (opt-in, bypassable — **CI is
-  the real gate; don't weaken that step**). Keep the `## [X.Y.Z]` heading format:
-  the gate, the promotion script, and the release-notes extraction all key on it.
-- **The GitHub Release is automatic.** `release.yml`'s `github-release` job
-  (`needs: [publish]`, so it only runs after GHCR + npm succeed) extracts the
-  tag's `## [X.Y.Z]` section from `CHANGELOG.md` and creates the Release via
-  `gh`. It's idempotent (skips if the Release exists) and falls back to
-  `--generate-notes` if no section is found. This is why the job needs
-  `contents: write` while `publish` stays `contents: read`. Releases v0.0.1–
-  v0.0.7 were created by hand before this existed; v0.0.8+ are automatic.
+- The bump commit touches only `package.json` + `CHANGELOG.md` (neither in
+  `rebuild.yml`'s `paths:` filter), so a bump-only push fires `release.yml`
+  alone. But GitHub evaluates `paths:` across *every* commit in a push —
+  pushing a template-touching feature and the bump together fires
+  `rebuild.yml` too, and both race to push `:latest` (harmless: identical
+  content, last-writer-wins; ~7 min wasted). Separate the pushes: land the
+  feature via PR first, then `npm version && git push --follow-tags` on its
+  own.
+- Concurrency guards: `rebuild.yml` uses `cancel-in-progress: true` (a newer
+  push supersedes; `:latest`/`:weekly` are mutable and get re-pushed).
+  `release.yml` uses `cancel-in-progress: false`, grouped per tag —
+  serialize, **never** cancel mid-publish (a kill between the GHCR push and
+  `npm publish` could leave a partial release). Don't "simplify" the two into
+  one shared group.
+- `release.yml`'s "Verify tag matches package.json" step fails fast on a
+  hand-minted mismatched tag. Use `npm version`.
+- Don't run `npm publish` locally — CI uses `--provenance`; a manual publish
+  skips the supply-chain attestation users can verify.
+- CHANGELOG content is hand-written, never generated;
+  `promote-changelog.mjs` only relabels it. The CI gate (`release.yml`
+  "Verify CHANGELOG.md has an entry") greps for `^## [X.Y.Z]` before any
+  publish; `.githooks/pre-push` mirrors it locally (opt-in, bypassable — CI
+  is the real gate; don't weaken that step). Keep the `## [X.Y.Z]` heading
+  format: the gate, the promotion script, and the release-notes extraction
+  all key on it.
+- The GitHub Release is automatic: the `github-release` job (`needs:
+  [publish]`, so only after GHCR + npm succeed) extracts the tag's section
+  and creates the Release via `gh` — idempotent, falls back to
+  `--generate-notes`. That's why it needs `contents: write` while `publish`
+  stays `contents: read`.
 
 ## CHANGELOG entry style
 
-`[Unreleased]` bullets are written to be skimmed. Apply this to every new entry
-(the conventions `auto-bmad` uses, adopted here):
+`[Unreleased]` bullets are written to be skimmed:
 
-- **One change = one bullet** under one heading. Never bundle — if you're
-  writing "three reinforcing fixes," that's three bullets.
-- **Bold headline first, ≤ ~12 words, stating the user-visible effect**
-  ("`aic sync` no longer clobbers `Dockerfile.project`"), not the internal
-  mechanism.
-- **At most ~2 sentences of detail** after the headline — the one fact a reader
-  needs. No "Previously…/the gap was…/chicken-and-egg" debugging narrative; the
-  *how* lives in this file, the README, and the commit body.
-- **No inline file-touch lists** — git history records touched files. If a
-  pointer genuinely helps, one terse trailing parenthetical (`(aic,
-  post-create.py)`), never woven into sentences.
-- **Past released `## [X.Y.Z]` sections are immutable** — apply this style to
-  new entries only; never rewrite a shipped section (`release.yml`'s
-  `github-release` job renders the GitHub Release from it).
+- One change = one bullet under one heading. Never bundle.
+- Bold headline first, ≤ ~12 words, stating the user-visible effect, not the
+  internal mechanism.
+- At most ~2 sentences of detail after the headline. No debugging narrative —
+  the *how* lives in this file, the README, and the commit body.
+- No inline file-touch lists; at most one terse trailing parenthetical
+  (`(aic, post-create.py)`).
+- Released `## [X.Y.Z]` sections are immutable — never rewrite a shipped
+  section (the GitHub Release renders from it).
 
 ## Workflow split rationale (so future edits don't undo it)
 
-The split exists because the npm CLI (`aic`) is tightly coupled to the
-container's filesystem (hooks, sudoers, helper-script paths). Floating
-`:latest` would let the CLI and image drift out of sync. The two workflows
-serve different audiences:
+The npm CLI is tightly coupled to the container's filesystem (hooks, sudoers,
+helper-script paths); floating `:latest` would let CLI and image drift. The
+two tracks serve different audiences:
 
-- `:vX.Y.Z` (immutable, from `release.yml`): what `aic init` pins by default.
-  Users on a given aic version always pull the exact image that was built at
-  release time. Reproducibility wins.
-- `:latest` (floating, from `rebuild.yml`'s weekly cron + template pushes):
-  opt-in for users who want base-layer security freshness over
-  reproducibility. Not referenced by `aic init` output.
+- `:vX.Y.Z` (immutable, `release.yml`) — what `aic init` pins. Users on a
+  given aic version always pull the exact image built at release time.
+- `:latest` (floating, `rebuild.yml` weekly cron + template pushes) — opt-in
+  base-layer security freshness over reproducibility. Not referenced by `aic
+  init` output.
 
-If you find yourself tempted to "simplify" by collapsing the two workflows or
-re-pointing `aic init` at `:latest`, re-read the design tradeoff first.
-Comparable projects (Supabase CLI, Dagger) use the same pinned model;
-Earthly's floating-with-coupling model is the documented anti-pattern.
+Before "simplifying" the two workflows into one or re-pointing `aic init` at
+`:latest`, re-read this tradeoff. Supabase CLI and Dagger use the same pinned
+model; Earthly's floating-with-coupling is the documented anti-pattern.
 
 ## Don't do
 
-- **Don't weaken smoke tests** in either workflow's `smoke` job. They cover
-  real security guarantees: `EXEC=0` on the socket-proxy, the `.env`
-  PreToolUse hook block, scoped sudo (no arbitrary `chown`), the self-protection
-  root-444 lock (`gitconfig.local` + the baked shell rc files), and the
-  npm-quarantine sanity check
-  (`NPM_CONFIG_MIN_RELEASE_AGE` ≤ 30 days, so npx-based MCPs stay
-  installable). If a test fails legitimately, fix the regression, not the
-  assertion.
-- **Don't add untrusted GitHub event fields directly into `run:` blocks**
-  (issue titles, PR titles, commit messages, branch refs). Use `env:` with
-  proper quoting. See the GitHub Security Lab guide on workflow injection.
-  Both current workflows route any ref/version through `env:` for this
-  reason.
-- **Don't add files to `template/`** that the user shouldn't get a copy of.
-  `apply_template()` is the gatekeeper; anything that lands there gets
-  copied into every project's `.devcontainer/`.
-- **Don't try to edit `.devcontainer/` from inside the container.** The
-  PreToolUse hook (`template/hooks/pre-tool-use.sh`) blocks writes there —
-  it's part of the sandbox boundary, since an AI that can rewrite its own
-  devcontainer config can disable every other protection. Edit
-  `template/devcontainer.json` (and the rest of `template/`) instead; users
-  pick up changes via `aic sync`. The dogfood `.devcontainer/` at the repo
-  root regenerates the same way.
+- **Don't weaken smoke/CLI tests** in either workflow. They cover real
+  security guarantees: `EXEC=0` **plus `POST/BUILD=0`** (read-only socket-proxy
+  by default), the always-on `169.254.0.0/16` metadata block, the pre-`up`
+  override scan, the `.env` PreToolUse block, scoped sudo (no arbitrary
+  `chown`), the self-protection root-444 lock (`gitconfig.local` + the baked
+  shell rc files), and the npm-quarantine sanity check
+  (`NPM_CONFIG_MIN_RELEASE_AGE` ≤ 30 days so npx-based MCPs stay installable).
+  If a test fails legitimately, fix the regression, not the assertion.
+- **Don't put untrusted GitHub event fields in `run:` blocks** (issue/PR
+  titles, commit messages, branch refs) — route through `env:` with proper
+  quoting, as both workflows already do. See the GitHub Security Lab guide on
+  workflow injection.
+- **Don't add files to `template/`** the user shouldn't get a copy of —
+  everything there is copied into every project's `.devcontainer/`.
+- **Don't edit `.devcontainer/` from inside the container.** The PreToolUse
+  hook blocks it — part of the sandbox boundary (an AI that can rewrite its
+  own devcontainer config can disable every other protection). Edit
+  `template/` instead; users pick it up via `aic sync`, and the dogfood
+  `.devcontainer/` regenerates the same way.
 - **Don't bump `package.json` in a feature PR.** Version bumps are their own
-  commit (created by `npm version`) so the tag points at a clean release
-  commit.
-- **Don't land a user-facing change without a `CHANGELOG.md` note.** When you
-  add, change, fix, or remove something a user would notice (an `aic`
-  flag/command, a `template/` behavior, a security fix, a default), add a bullet
-  under `## [Unreleased]` in `CHANGELOG.md` in the *same* commit/PR — under the
-  right Keep-a-Changelog heading (`Added`/`Changed`/`Fixed`/`Removed`). Keep
-  `[Unreleased]` current so release time is just "rename the heading," not
-  "reconstruct history." The changelog is hand-maintained and is a release
-  precondition (CI blocks a version with no section) — see "Releasing" and
-  "CHANGELOG entry style".
-- **Don't force-push to `main` or rewrite tags.** GHCR has already received
-  whatever the tag was bound to; ghost tags confuse users on pinned versions.
-- **Don't use `git rebase -i` or other interactive git commands** from a
+  `npm version` commit so the tag points at a clean release commit.
+- **Don't land a user-facing change without a CHANGELOG note** — a bullet
+  under `## [Unreleased]`, right Keep-a-Changelog heading, in the *same*
+  commit/PR. Keeping `[Unreleased]` current makes release time just "rename
+  the heading," and CI blocks a release with no section.
+- **Don't force-push `main` or rewrite tags.** GHCR already has whatever the
+  tag was bound to; ghost tags confuse users on pinned versions.
+- **Don't use `git rebase -i`** or other interactive git commands from a
   non-interactive environment — they hang silently.
 
 ## Security stance
 
-This container is a sandbox for autonomous AI tools running in
-bypass-permissions / sandbox-off mode. The README's "Threat model" section is
-the source of truth. When choosing between two implementations, prefer the
-more restrictive one. The following files warrant extra care — any change
-should be reviewed for security regressions:
+This container sandboxes autonomous AI tools running in bypass-permissions /
+sandbox-off mode. README's "Threat model" section is the source of truth.
+When choosing between two implementations, prefer the more restrictive one.
+Review any change to these files for security regressions:
 
-- `template/Dockerfile` — particularly the sudoers, USER, and capability
-  bits. Adding a new `NOPASSWD` entry is a load-bearing decision. It also bakes
-  `/etc/codex/requirements.toml` (root-owned), the **managed** Codex hook that
-  wires `pre-tool-use.sh` into Codex — see the `pre-tool-use.sh` note below.
-  Codex installs via OpenAI's **standalone** installer
-  (`chatgpt.com/codex/install.sh`), not npm — deliberate, so `codex update` works
-  and it mirrors Claude's native installer; the trade-off is Codex is no longer
-  under the `NPM_CONFIG_MIN_RELEASE_AGE` quarantine (still covers npx MCPs).
-  OpenCode likewise installs via its standalone installer
-  (`opencode.ai/install`, with `--no-modify-path`) into `~/.opencode/bin`, same
-  quarantine trade-off. All three CLIs are a baked *floor* that
-  `refresh_ai_tools()` floats to latest on each create (see "AI-tool refresh on
-  every create").
-- `template/aic-firewall` — outbound iptables allowlist. Adding hosts here
-  expands what an in-container AI can reach. `cmd_enable` resolves into a
-  staging ipset and `ipset swap`s it in, and **never sets `policy ACCEPT`** —
-  this is what keeps re-enabling strengthen-only (it must never open a window or
-  fail open on a 0-IP resolution). Don't reintroduce a flush-to-ACCEPT.
+- `template/Dockerfile` — sudoers, USER, and capability bits; a new
+  `NOPASSWD` entry is a load-bearing decision. Also bakes
+  `/etc/codex/requirements.toml` (root-owned), the **managed** Codex hook
+  wiring for `pre-tool-use.sh` (see below). Codex and OpenCode install via
+  their standalone installers (`chatgpt.com/codex/install.sh`;
+  `opencode.ai/install` with `--no-modify-path` into `~/.opencode/bin`), not
+  npm — deliberate, so self-update works — at the cost of leaving them
+  outside the `NPM_CONFIG_MIN_RELEASE_AGE` quarantine (which still covers npx
+  MCPs). All three CLIs are a baked floor that `refresh_ai_tools()` floats to
+  latest on each create.
+- `template/aic-firewall` — outbound iptables allowlist; new hosts expand
+  what an in-container AI can reach. `cmd_enable` resolves into a staging
+  ipset and `ipset swap`s it in, and **never sets `policy ACCEPT`** — that's
+  what keeps re-enabling strengthen-only (no open window, no fail-open on a
+  0-IP resolution). Don't reintroduce a flush-to-ACCEPT. The
+  `block-metadata` subcommand (auto-run by post-create) is strengthen-only for
+  the same reason — it only adds a `169.254.0.0/16` DROP, never opens anything;
+  keep both invariants if you touch this script.
 - `template/hooks/pre-tool-use.sh` — blocks reads of `.env` and other
-  sensitive paths. Loosening the deny list (the `is_blocked_env` /
-  `bash_touches_env` / `is_curl_pipe_sh` / `is_protected_path` matchers, or the
+  sensitive paths. Loosening the matchers (`is_blocked_env`,
+  `bash_touches_env`, `is_curl_pipe_sh`, `is_protected_path`, or the
   `Bash|Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob` matcher in
-  `claude-settings.json`) weakens the model. The script is shared by all three
-  tools: Claude registers it via `~/.claude/settings.json` (post-create), Codex
-  via the **managed** `/etc/codex/requirements.toml` baked in the Dockerfile.
-  Codex command hooks defined in `~/.codex/config.toml` are non-managed →
-  untrusted → silently skipped in autonomous mode, so **don't** move it back
-  there (a prior version did, and the hook never ran for Codex).
+  `claude-settings.json`) weakens the model. Shared by all three tools:
+  Claude registers it via `~/.claude/settings.json` (post-create), Codex via
+  the managed `/etc/codex/requirements.toml`. Hooks in `~/.codex/config.toml`
+  are non-managed → untrusted → silently skipped in autonomous mode; **don't
+  move it back there** (a prior version did, and the hook never ran for
+  Codex).
 - `template/hooks/opencode-guardrail.js` — OpenCode's slice of that same
-  guardrail. A dependency-free OpenCode plugin whose `tool.execute.before`
-  translates OpenCode's `{tool, args}` into the JSON `pre-tool-use.sh` reads on
-  stdin, `spawnSync`s the script, and `throw`s on exit 2. `setup_opencode()`
-  wires it via `"plugin": ["/etc/aic/hooks/opencode-guardrail.js"]` (absolute
-  path to the root-owned shim) in the generated `~/.config/opencode/opencode.json`
-  — no trust prompt (unlike Codex), and it fires even with
-  `permission."*"=allow`. Keep the logic in `pre-tool-use.sh` (single source of
-  truth); the shim only maps + dispatches. Don't add a second native
-  `permission` deny that could diverge. The "opencode guardrail blocks a .env
-  read" smoke test guards this — extend it, don't weaken it.
+  guardrail: a dependency-free plugin whose `tool.execute.before` maps
+  OpenCode's `{tool, args}` to the JSON `pre-tool-use.sh` reads on stdin,
+  `spawnSync`s it, and `throw`s on exit 2. `setup_opencode()` wires it by
+  absolute path (`"plugin": ["/etc/aic/hooks/opencode-guardrail.js"]`) in the
+  generated `~/.config/opencode/opencode.json` — no trust prompt, and it
+  fires even with `permission."*"=allow`. Keep the logic in `pre-tool-use.sh`
+  (single source of truth); the shim only maps + dispatches. Don't add a
+  second native `permission` deny that could diverge. Guarded by the
+  "opencode guardrail blocks a .env read" test.
 - `template/aic-chown-volumes`, `template/aic-lock-gitconfig` — the only
-  scripts allowed via `NOPASSWD` sudo. Touching them changes the privileged
-  surface. `aic-lock-gitconfig` locks a hardcoded list to `root:root 0444`:
-  `~/.gitconfig.local` **and** the baked login-shell rc files (`~/.zshrc`,
-  `~/.bashrc`, fish config), so a tool session can't plant persistence that runs
-  on the next `aic shell`. Keep the target list hardcoded (never argv). `aic-chown-volumes` reads project-supplied targets from
-  `.devcontainer/chown-paths`, **never from argv** — that's what stops the
-  `NOPASSWD` grant from becoming an arbitrary `sudo aic-chown-volumes
-  /etc/sudoers.d`. The hardcoded prefix allowlist (`/workspace/`,
+  scripts allowed via `NOPASSWD` sudo; touching them changes the privileged
+  surface. `aic-lock-gitconfig` locks a hardcoded list to `root:root 0444` —
+  `~/.gitconfig.local` plus the baked login-shell rc files (`~/.zshrc`,
+  `~/.bashrc`, fish config) — so a tool session can't plant persistence for
+  the next `aic shell`; keep the list hardcoded, never argv.
+  `aic-chown-volumes` reads targets from `.devcontainer/chown-paths`, **never
+  argv** — that's what stops the grant from becoming `sudo aic-chown-volumes
+  /etc/sudoers.d`. The prefix allowlist (`/workspace/`,
   `/home/vscode/.cache/`) plus `-h`/non-traversing `-R` is the boundary;
-  widening it to broader `$HOME` would expose `~/.gitconfig.local` (the
-  root-locked gitconfig) and is a load-bearing decision. The "scoped sudo
-  cannot chown arbitrary paths" smoke test guards this — extend it, don't
-  weaken it.
+  widening to broader `$HOME` would expose the root-locked
+  `~/.gitconfig.local` and is a load-bearing decision. Guarded by the "scoped
+  sudo cannot chown arbitrary paths" test.
 - `.github/workflows/*.yml` — CI secrets (`NPM_TOKEN`, GHCR via
-  `GITHUB_TOKEN`). The `publish` jobs only run on push/schedule/dispatch,
-  never on `pull_request`, to keep fork PRs from triggering publishes.
+  `GITHUB_TOKEN`). `publish` jobs run only on push/schedule/dispatch, never
+  `pull_request`, so fork PRs can't trigger publishes.
 
 ## Commit signing (`aic signing`)
 
-The host signing key is never forwarded (the no-`~/.ssh`/no-agent guarantee
-above), so `aic signing` provisions a *sandbox-only* ed25519 signing key in the
+The host signing key is never forwarded (the no-`~/.ssh`/no-agent guarantee),
+so `aic signing` provisions a *sandbox-only* ed25519 key in the
 `aic-auth-global` volume under `~/.config/aic-auth/signing/` (key + a `mode`
-marker: `auto`/`byok`/`disabled`). Load-bearing design choices, don't undo them:
+marker: `auto`/`byok`/`disabled`). Load-bearing choices, don't undo them:
 
-- **The signing config lives inside the root-locked `~/.gitconfig.local`,
+- The signing config lives inside the root-locked `~/.gitconfig.local`,
   appended by `setup_commit_signing()` *after* the host `[include]` so it
-  overrides host signing — container-only; the host gitconfig stays RO.** Keep
-  it in that one file: the existing "self-protection files are root-owned 0444"
-  smoke test then still covers it, and an in-session tool can't inject
-  `credential.helper` via a separate unlocked include.
-- **Applied on (re)create only, never live.** `~/.gitconfig.local` is rewritten
-  fresh each creation and re-locked; a `mode` change takes effect on the next
-  `aic rebuild`. This is deliberate — a live edit would need a privileged
-  *unlock* of the locked file, which a compromised session could abuse before
-  the next re-lock. Don't add an unlock primitive to "make it instant".
-- **`aic signing`'s mutating actions are unprivileged** — they `devcontainer
-  exec` as `vscode` (so the key gets correct owner + 0600), needing the
-  container up; no sudoers/NOPASSWD entry is involved. `status` reads the volume
-  host-side and works anytime. Generating the key in-container (not host-side)
-  is what keeps perms/ownership correct across the Linux UID-remap.
-- **`--register` writes to the user's GitHub account** (`gh api POST
-  /user/ssh_signing_keys`) and is opt-in only — never auto-register.
-- The "aic signing wires a sandbox signing key" smoke test (both workflows)
-  stages a key, recreates, and asserts signing is wired *and* `~/.gitconfig.local`
-  is still `root 444`. Extend it, don't weaken the root-lock assertion.
+  overrides host signing — container-only; the host gitconfig stays RO. Keep
+  it in that one file: the root-444 smoke test then still covers it, and an
+  in-session tool can't inject `credential.helper` via a separate unlocked
+  include.
+- Applied on (re)create only, never live: `~/.gitconfig.local` is rewritten
+  and re-locked each creation; a `mode` change lands on the next `aic
+  rebuild`. A live edit would need a privileged *unlock* a compromised
+  session could abuse before the re-lock — don't add one to "make it
+  instant".
+- The mutating actions are unprivileged: `devcontainer exec` as `vscode`
+  (container must be up; no sudoers entry). Generating the key in-container
+  is what keeps owner + 0600 correct across the Linux UID-remap. `status`
+  reads the volume host-side and works anytime.
+- `--register` writes to the user's GitHub account (`gh api POST
+  /user/ssh_signing_keys`) — opt-in only, never auto-register.
+- Guarded by the "aic signing wires a sandbox signing key" test, which stages
+  a key, recreates, and asserts signing is wired *and* `~/.gitconfig.local`
+  is still `root 444` — don't weaken the root-lock assertion.
 
 ## Verifying changes locally
 
@@ -521,8 +497,7 @@ devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/_ping
 devcontainer exec --workspace-folder . bash -lc 'echo "$NPM_CONFIG_MIN_RELEASE_AGE"'
 ```
 
-For CLI-only changes, exercising `aic init` against a temp directory and
-inspecting the generated `.devcontainer/` is usually enough:
+For CLI-only changes, `aic init` against a temp directory is usually enough:
 
 ```bash
 TMP=$(mktemp -d) && cd "$TMP" && git init -q

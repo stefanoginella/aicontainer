@@ -15,6 +15,14 @@
 # scoped-sudo entry covering this script cannot be abused by AI to weaken
 # the firewall — calling it can only re-apply or strengthen it.
 #
+# A third, always-on subcommand `block-metadata` (run by post-create.py on
+# every container create) drops egress to cloud metadata / link-local
+# (169.254.0.0/16) independent of the full allowlist. It's strengthen-only like
+# the rest: it only ever adds a DROP, closing the highest-severity network path
+# (cloud credential theft via 169.254.169.254) even when the full firewall is
+# never enabled. When the full firewall IS enabled, its default-DROP policy
+# covers the same range, so the two compose cleanly.
+#
 # Per-project extra domains: list one domain per line in
 #   /workspace/.devcontainer/firewall-allowlist
 # (comment lines starting with `#` are ignored).
@@ -147,9 +155,32 @@ cmd_enable() {
   echo "    To widen: 'aic rebuild' from the host."
 }
 
+# Always-on baseline: drop egress to cloud metadata + link-local (169.254.0.0/16),
+# independent of the opt-in allowlist. Idempotent (dedicated AIC_METADATA chain,
+# re-flushed each run; the OUTPUT jump is inserted once). Strengthen-only: it
+# adds a DROP and never opens anything. Best-effort IPv6 (AWS IMDSv6 fd00:ec2::254
+# + link-local) when ip6tables is present — absence is not an error.
+cmd_block_metadata() {
+  iptables -N AIC_METADATA 2>/dev/null || iptables -F AIC_METADATA
+  iptables -A AIC_METADATA -d 169.254.0.0/16 -j DROP
+  iptables -C OUTPUT -j AIC_METADATA 2>/dev/null || iptables -I OUTPUT 1 -j AIC_METADATA
+
+  if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -N AIC_METADATA 2>/dev/null || ip6tables -F AIC_METADATA 2>/dev/null || true
+    ip6tables -A AIC_METADATA -d fd00:ec2::254 -j DROP 2>/dev/null || true
+    ip6tables -A AIC_METADATA -d fe80::/10 -j DROP 2>/dev/null || true
+    ip6tables -C OUTPUT -j AIC_METADATA 2>/dev/null || ip6tables -I OUTPUT 1 -j AIC_METADATA 2>/dev/null || true
+  fi
+
+  echo "==> aic-firewall: metadata/link-local egress blocked (169.254.0.0/16)"
+}
+
 cmd_status() {
   echo "## iptables OUTPUT chain"
   iptables -L OUTPUT -n --line-numbers
+  echo
+  echo "## iptables AIC_METADATA chain (always-on metadata/link-local block)"
+  iptables -L AIC_METADATA -n --line-numbers 2>/dev/null || echo "(not created yet — run: sudo aic-firewall block-metadata)"
   echo
   echo "## ipset aic-allowed"
   ipset list aic-allowed 2>/dev/null || echo "(not created yet — run: sudo aic-firewall enable)"
@@ -157,6 +188,7 @@ cmd_status() {
 
 case "${1:-}" in
   enable) cmd_enable ;;
+  block-metadata) cmd_block_metadata ;;
   status) cmd_status ;;
-  *) echo "Usage: sudo aic-firewall {enable|status}" >&2; exit 1 ;;
+  *) echo "Usage: sudo aic-firewall {enable|block-metadata|status}" >&2; exit 1 ;;
 esac

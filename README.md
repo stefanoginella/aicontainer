@@ -11,9 +11,9 @@ A sandboxed devcontainer for running [Claude Code](https://claude.ai/code), [Cod
 
 **Why?** Auto-approve is the only way these CLIs actually fly — but pointed at your real `$HOME` it also lets a prompt-injected dependency read `.env`, exfiltrate shell history, or push through your `gh` token. `aicontainer` puts the AI behind a devcontainer boundary so you can keep auto-approve on without rebuilding your machine each time.
 
-**What you get:** filesystem isolation, a filtered Docker socket via [Tecnativa's docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy), a minimal PreToolUse hook, and an **opt-in** iptables outbound allowlist. No AI-generated config, no per-project re-login. Defaults are listed in [What's in the box](#whats-in-the-box) so you know exactly what you're adopting.
+**What you get:** filesystem isolation, a **read-only** Docker socket via [Tecnativa's docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) (write access is opt-in per project), a minimal PreToolUse hook, an always-on block of cloud-metadata/link-local egress, and an **opt-in** iptables outbound allowlist. No AI-generated config, no per-project re-login. Defaults are listed in [What's in the box](#whats-in-the-box) so you know exactly what you're adopting.
 
-> Adjacent work: same shape as the [Trail of Bits devcontainer](https://github.com/trailofbits/claude-code-devcontainer), with Codex and OpenCode added, Docker access turned on by default, and host shell look-and-feel preserved.
+> Adjacent work: same shape as the [Trail of Bits devcontainer](https://github.com/trailofbits/claude-code-devcontainer), with Codex and OpenCode added, opt-in Docker access, and host shell look-and-feel preserved.
 
 ## What crosses the boundary
 
@@ -32,7 +32,8 @@ shown automatically at the end of every `aic up`).
 | Clipboard / browser | **No** — nothing bridged. |
 | `.env*` files | Blocked from the agent by the [PreToolUse hook](#whats-in-the-box). Your project's own `.env` is physically in `/workspace`, but the hook stops the agent from reading it — defense-in-depth at the tool layer, not a missing file. |
 | Session transcripts | Persist in a **per-project named volume**, never written back to your host home. See [Multi-project model](#multi-project-model). |
-| **Outbound network** | **Yes — fully open by default.** Reaches the internet, your LAN, and cloud metadata (`169.254.169.254`). Opt in to the [iptables allowlist](#opt-in-network-allowlist) to restrict it. |
+| Host Docker daemon | **Read-only by default** (via the socket-proxy: inspect/list, no create/build). Opt in to write access per project with `aic init --docker` when you need testcontainers / in-container `docker compose` — see [Threat model](#threat-model). |
+| **Outbound network** | **Mostly open by default.** Reaches the internet and your LAN; **cloud metadata / link-local (`169.254.0.0/16`) is blocked on every create**. Opt in to the [iptables allowlist](#opt-in-network-allowlist) to restrict the rest. |
 
 The full reasoning is in [Threat model](#threat-model); the network row is the
 one most worth your attention.
@@ -600,15 +601,25 @@ The key lives only in the `aic-auth-global` volume (never on your host), is shar
 **Sandboxed:**
 - **Filesystem**: host is inaccessible except for the project directory (RW) and a handful of read-only mounts: shell look-and-feel (`~/.gitconfig`, `~/.p10k.zsh`, `~/.zshrc.local`) and the AI-config seeds (`~/.claude/settings.json`, `~/.claude/statusline/`, `~/.codex/config.toml`, `~/.config/opencode/opencode.json`) covered in [Config seeding from the host](#config-seeding-from-the-host).
 - **Process namespace**: container processes don't see host processes.
-- **Docker daemon**: API surface reduced via socket-proxy. `EXEC`, `AUTH`, `SECRETS`, `SWARM`, `SYSTEM` (and friends) are blocked. `POST` to `/containers` and `/build` is **enabled** so testcontainers, `docker compose up`, and sibling-container tooling work from inside the devcontainer — but this also means anyone with shell access here can `docker run --privileged -v /:/host` against the host daemon. Treat the proxy as a footgun reducer, not a host-isolation boundary; don't run untrusted code inside.
+- **Runaway limit**: the devcontainer runs with `pids_limit: 4096` so a fork bomb or a stuck agent loop can't exhaust host PIDs. Raise it (or add `mem_limit` / `cpus`) in `docker-compose.override.yml` if a workload needs more.
+- **Docker daemon**: API surface reduced via socket-proxy, and **read-only by default** — `EXEC`, `AUTH`, `SECRETS`, `SWARM`, `SYSTEM`, and now `POST` / `BUILD` are all blocked, so the container can inspect/list but cannot create or build containers on the host daemon. This is the change that makes the proxy an actual host-isolation boundary: with `POST` enabled an in-container agent can `docker run --privileged -v /:/host` and escape, and can spawn sibling containers that bypass the opt-in firewall (they get their own network namespace). Enable write access **per project** with `aic init --docker` (or `aic sync --docker`) only when you need testcontainers / in-container `docker compose` — and treat that project as no more isolated than the host daemon it can now drive.
 - **AI guardrails**: `.devcontainer/`, `.git/config`, `.git/hooks` are mounted **read-only** so the AI cannot rewrite its own configuration. The PreToolUse hook lives at `/etc/aic/hooks/` and is root-owned, not writable by the dev user. The scoped sudoers entry only exposes hardcoded-target wrappers (`aic-chown-volumes`, `aic-lock-gitconfig`, `aic-firewall`) — no bare `chown`, so AI cannot take ownership of `/etc/sudoers.d/` or `/etc/aic/` to escalate.
+- **Cloud metadata / link-local**: egress to `169.254.0.0/16` (which covers the `169.254.169.254` cloud metadata endpoint on AWS/GCP/Azure and ECS task metadata) is dropped on every container create via `sudo aic-firewall block-metadata`, independent of the opt-in allowlist. This closes the highest-severity network path — cloud-credential theft — even on a host where you never enable the full firewall. (Note: a sibling container spawned via opt-in Docker write access is not covered, since it has its own network namespace — another reason to leave Docker read-only.)
+- **Untrusted-repo guard**: before `aic up` / `aic rebuild` bring the stack up, aic scans the project-owned `docker-compose.override.yml` and `Dockerfile.project` — which ride along inside a cloned repo and *are* honored (the override is auto-wired into `dockerComposeFile`) — for host-access grants (`privileged`, `cap_add`, host bind mounts, the Docker socket, a non-aicontainer `FROM`). On a terminal it prints the findings and asks before continuing; the VS Code "Reopen in Container" path surfaces the same warning in the Dev Containers output channel. Silence it with `AIC_NO_OVERRIDE_SCAN=1`. **When reviewing untrusted code, always `aic init --force` (or inspect these two files) rather than trusting whatever `.devcontainer/` the repo shipped.**
 
 **Not sandboxed (unless you opt in):**
-- **Network**: full outbound access by default. Anything inside the container can reach `api.openai.com`, `api.anthropic.com`, your LAN, and cloud metadata services (`169.254.169.254`). To restrict this, opt in to the [iptables allowlist](#opt-in-network-allowlist) below.
+- **Network**: outbound is otherwise open by default — anything inside the container can reach `api.openai.com`, `api.anthropic.com`, and your LAN (cloud metadata excepted, see above). To restrict the rest, opt in to the [iptables allowlist](#opt-in-network-allowlist) below.
 - **Git identity**: your `~/.gitconfig` is read-only mounted, so the AI can commit and push as you (via `gh auth` or stored credentials). Your signing key is **not** forwarded; if you need signed commits in here, set up a sandbox-only key with [`aic signing`](#commit-signing) — note that this makes agent-authored commits show as Verified.
-- **Host credentials**: nothing is auto-forwarded. The AI only has access to what you explicitly `claude /login`, `codex auth login`, `opencode auth login`, `gh auth login` for inside the container.
+- **Host credentials**: nothing is auto-forwarded. The AI only has access to what you explicitly `claude /login`, `codex auth login`, `opencode auth login`, `gh auth login` for inside the container. Note these tokens live in the shared `aic-auth-global` volume, so a compromised session in **any** project can use every token you've logged in with — prefer a fine-grained `gh` PAT.
 
-Don't run this on a network where reaching internal services or cloud metadata is a concern — or enable the allowlist below.
+Don't run this on a network where reaching internal services is a concern — or enable the allowlist below.
+
+### Hardening the host daemon
+
+The container's isolation is only as strong as the Docker daemon underneath it. Two host-level settings raise the floor, especially if you enable Docker write access for a project:
+
+- **Rootless Docker** ([docs](https://docs.docker.com/engine/security/rootless/)) or **`userns-remap`** ([docs](https://docs.docker.com/engine/security/userns-remap/)) make container-`root` map to an unprivileged host user, so even a `--privileged`/host-mount escape (the thing opt-in Docker write access would expose) doesn't land as real host root. OrbStack and Colima already run the daemon in a VM, which gives you a similar boundary on macOS.
+- Keep Docker write access **off** (the default) for any project running untrusted code or a prompt-injectable agent; turn it on only where you actually need testcontainers.
 
 ## Opt-in network allowlist
 

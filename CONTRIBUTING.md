@@ -4,7 +4,7 @@ Thanks for considering a contribution. This project is deliberately small — th
 
 ## Ground rules
 
-- **Read the [threat model](README.md#threat-model) first.** Any change to the `template/` files needs to be evaluated against it. If a change weakens isolation (granting capabilities, opening a sudoers entry, mounting host paths, widening the socket-proxy allowlist), call it out explicitly in the PR description.
+- **Read the [threat model](README.md#threat-model) first.** Any change to the `template/` files needs to be evaluated against it. If a change weakens isolation (granting capabilities, opening a sudoers entry, mounting host paths, widening the socket-proxy allowlist, or turning socket-proxy `POST`/`BUILD` on by default), call it out explicitly in the PR description.
 - **Keep the surface small.** If you can solve a problem in 20 lines or in a new helper script, pick the 20 lines. The `docker-utils` predecessor was retired specifically because it grew too many scripts.
 - **No new AI tools in the base image.** Claude Code + Codex is the chosen surface. If you use OpenCode / Copilot CLI / something else, ship it in your project's `Dockerfile.project`.
 - **Pin versions.** New external downloads in `template/Dockerfile` need a pinned version with a `# renovate:` annotation so Renovate can keep them current.
@@ -38,7 +38,7 @@ If you'd rather not symlink `aic` onto your PATH, invoke it directly: `AIC_HOME=
 
 1. Open an issue first if the change is more than a couple of lines — easier to align before code is written.
 2. Branch off `main`. Keep PRs focused — one logical change per PR.
-3. CI must be green. The `smoke` job verifies `claude`, `codex`, `gh`, `uv` resolve, the socket-proxy is reachable, `EXEC` returns 403, the PreToolUse hook blocks `.env`, the scoped sudoers entry can't be turned into an arbitrary `chown`, and the self-protection files (`~/.gitconfig.local` + the baked shell rc files) are root-owned `0444`.
+3. CI must be green. The `smoke` job verifies `claude`, `codex`, `gh`, `uv` resolve, the socket-proxy is reachable but read-only by default (`EXEC`/`POST`/`BUILD` all return 403), cloud-metadata/link-local egress (`169.254.0.0/16`) is blocked, the pre-`up` scan flags host-access grants in project-owned override files, the PreToolUse hook blocks `.env`, the scoped sudoers entry can't be turned into an arbitrary `chown`, and the self-protection files (`~/.gitconfig.local` + the baked shell rc files) are root-owned `0444`.
 4. Update the README if you change observable behavior (commands, defaults, mounted paths, capabilities, allowlist).
 
 ## What we will not merge
@@ -46,6 +46,7 @@ If you'd rather not symlink `aic` onto your PATH, invoke it directly: `AIC_HOME=
 - Changes that auto-import host credentials (SSH agent, `ANTHROPIC_API_KEY`, host `gh` token). These are deliberately not forwarded.
 - Granting blanket `NOPASSWD: ALL` sudo to the `vscode` user.
 - Adding `--privileged`, `SYS_ADMIN`, or raw Docker socket mounts.
+- Making Docker socket write access (socket-proxy `POST`/`BUILD`) the default. It's opt-in per project via `aic init --docker` for a reason — see the threat model.
 - Per-project AI-generated `.devcontainer/` configs (the `docker-utils` model). The template is copied verbatim by design.
 
 ## Reporting security issues

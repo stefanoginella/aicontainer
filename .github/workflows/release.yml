@@ -107,7 +107,7 @@ jobs:
             opencode upgrade
             echo "OK: claude + codex + opencode self-update cleanly with rc files locked"
           '
-      - name: Smoke test - socket-proxy reachable, EXEC blocked
+      - name: Smoke test - socket-proxy reachable, EXEC + write blocked by default
         working-directory: /tmp/proj
         run: |
           devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/_ping
@@ -116,6 +116,39 @@ jobs:
             -X POST http://socket-proxy:2375/exec/none/start)
           set -e
           [ "$out" = "403" ] || { echo "expected 403 from socket-proxy /exec, got $out"; exit 1; }
+          # Docker WRITE access is opt-in: the default (this project is a plain
+          # `aic init --build`) ships the socket-proxy with POST/BUILD=0, so
+          # creating a container on the host daemon is refused. This is what stops
+          # `docker run --privileged -v /:/host` host escape by default; a
+          # regression to POST:1 would let it through.
+          set +e
+          out=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://socket-proxy:2375/containers/create)
+          out2=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://socket-proxy:2375/build)
+          set -e
+          [ "$out" = "403" ]  || { echo "expected 403 from socket-proxy /containers/create (POST should be off by default), got $out"; exit 1; }
+          [ "$out2" = "403" ] || { echo "expected 403 from socket-proxy /build (BUILD should be off by default), got $out2"; exit 1; }
+          echo "OK: socket-proxy is read-only by default (EXEC/POST/BUILD all 403)"
+
+      - name: Smoke test - cloud metadata / link-local egress is blocked
+        working-directory: /tmp/proj
+        run: |
+          # post-create runs `sudo aic-firewall block-metadata` on every create,
+          # dropping egress to 169.254.0.0/16 (cloud metadata + link-local)
+          # independent of the opt-in allowlist — closing the cloud-credential-
+          # theft path (169.254.169.254). Re-run it (idempotent) and assert the
+          # DROP rule is present via the scoped `aic-firewall status`. block-metadata
+          # is strengthen-only, so like `enable` it can't be abused to widen policy.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -e
+            sudo -n /usr/local/bin/aic-firewall block-metadata
+            st=$(sudo -n /usr/local/bin/aic-firewall status)
+            echo "$st"
+            echo "$st" | grep -q "AIC_METADATA" || { echo "FAIL: OUTPUT does not jump to AIC_METADATA"; exit 1; }
+            echo "$st" | grep -q "169.254.0.0/16" || { echo "FAIL: metadata/link-local DROP rule missing"; exit 1; }
+            echo "OK: 169.254.0.0/16 egress is dropped"
+          '
       - name: Smoke test - npm quarantine window is sane (npx-based MCPs installable)
         working-directory: /tmp/proj
         run: |
@@ -426,6 +459,57 @@ jobs:
           # The generated devcontainer.json must wire check-drift into initializeCommand.
           grep -q 'aic check-drift' .devcontainer/devcontainer.json || { echo "FAIL: initializeCommand missing check-drift wiring"; exit 1; }
           echo "OK: check-drift warns only on drift, honors opt-out, and is wired into initializeCommand"
+
+      - name: CLI test - Docker socket write access is opt-in (POST/BUILD off by default)
+        run: |
+          # Host-only (no container). The socket-proxy ships READ-ONLY
+          # (POST/BUILD=0) so an in-container agent can't `docker run --privileged
+          # -v /:/host` to escape the sandbox; `--docker` opts in. The choice lives
+          # in the generated compose file and a plain `aic sync` must preserve it.
+          # Also assert pids_limit is set (runaway-agent fork-bomb backstop).
+          set -euo pipefail
+          tmp="$(mktemp -d)"; cd "$tmp"; git init -q
+          dc=.devcontainer/docker-compose.yml
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
+          grep -qE '^[[:space:]]*POST:[[:space:]]*0[[:space:]]*$'  "$dc" || { echo "FAIL: default POST is not 0"; grep -nE 'POST|BUILD' "$dc"; exit 1; }
+          grep -qE '^[[:space:]]*BUILD:[[:space:]]*0[[:space:]]*$' "$dc" || { echo "FAIL: default BUILD is not 0"; exit 1; }
+          grep -qE '^[[:space:]]*pids_limit:[[:space:]]*[0-9]+'    "$dc" || { echo "FAIL: pids_limit missing"; exit 1; }
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --force --docker >/dev/null
+          grep -qE '^[[:space:]]*POST:[[:space:]]*1[[:space:]]*$'  "$dc" || { echo "FAIL: --docker did not enable POST"; exit 1; }
+          grep -qE '^[[:space:]]*BUILD:[[:space:]]*1[[:space:]]*$' "$dc" || { echo "FAIL: --docker did not enable BUILD"; exit 1; }
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync >/dev/null
+          grep -qE '^[[:space:]]*POST:[[:space:]]*1[[:space:]]*$'  "$dc" || { echo "FAIL: plain sync did not preserve --docker"; exit 1; }
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --no-docker >/dev/null
+          grep -qE '^[[:space:]]*POST:[[:space:]]*0[[:space:]]*$'  "$dc" || { echo "FAIL: --no-docker did not disable POST"; exit 1; }
+          echo "OK: Docker write off by default; --docker enables + persists across sync; --no-docker reverts; pids_limit set"
+
+      - name: CLI test - project override scan flags host-access grants before up
+        run: |
+          # Host-only (no container). Project-owned docker-compose.override.yml /
+          # Dockerfile.project ride along in an untrusted repo and ARE honored on
+          # `aic up` (the override is auto-wired into dockerComposeFile). The pre-up
+          # scan — surfaced host-side (print-only) via `aic check-drift`, the same
+          # entry point the VS Code initializeCommand calls — must flag privileged,
+          # cap_add, host mounts, the Docker socket, and a non-aicontainer base,
+          # stay silent on a clean project, and honor the opt-out.
+          set -euo pipefail
+          tmp="$(mktemp -d)"; cd "$tmp"; git init -q
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
+          echo "$out" | grep -q "request extra host access" && { echo "FAIL: clean project flagged"; echo "$out"; exit 1; }
+          printf 'services:\n  devcontainer:\n    privileged: true\n    cap_add:\n      - SYS_ADMIN\n    volumes:\n      - /:/host\n      - /var/run/docker.sock:/var/run/docker.sock\n' \
+            > .devcontainer/docker-compose.override.yml
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"; echo "$out"
+          echo "$out" | grep -q "privileged: true"    || { echo "FAIL: privileged not flagged"; exit 1; }
+          echo "$out" | grep -q "cap_add"             || { echo "FAIL: cap_add not flagged"; exit 1; }
+          echo "$out" | grep -q "Docker socket"       || { echo "FAIL: docker.sock not flagged"; exit 1; }
+          echo "$out" | grep -q "sensitive host path" || { echo "FAIL: host mount not flagged"; exit 1; }
+          printf 'FROM ubuntu:24.04\nRUN true\n' > .devcontainer/Dockerfile.project
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1 \
+            | grep -q "not the aicontainer base" || { echo "FAIL: non-aicontainer base not flagged"; exit 1; }
+          out="$(AIC_NO_OVERRIDE_SCAN=1 AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
+          echo "$out" | grep -q "request extra host access" && { echo "FAIL: AIC_NO_OVERRIDE_SCAN did not silence the scan"; exit 1; }
+          echo "OK: scan flags privileged/caps/socket/host-mount/non-base; clean project silent; opt-out honored"
 
   publish:
     runs-on: ubuntu-latest
