@@ -83,6 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Codex refresh follows its supported unattended path.** Rebuilds rerun the
   official standalone installer instead of relying on installation-method
   detection that can reject a valid standalone release.
+- **Fresh projects initialize isolated customization roots.** Claude and Codex
+  skill, command, rule, prompt, and plugin directories exist before first use
+  and remain confined to the path-unique project volume.
 - **Compose validation works across supported host versions.** Managed Docker
   socket mounts retain raw interpolation inspection on Compose 2.38.x instead
   of failing before the security gate can evaluate project overrides.

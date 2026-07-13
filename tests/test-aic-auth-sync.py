@@ -50,6 +50,34 @@ class ToolRefreshTests(unittest.TestCase):
         self.assertEqual(install.kwargs["env"], env)
 
 
+class ToolHomeInitializationTests(unittest.TestCase):
+    def test_fresh_tool_homes_include_every_isolated_prompt_code_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            claude_home = root / "claude"
+            codex_home = root / "codex"
+            missing_seed = root / "missing-seed.json"
+            original_path = POST_CREATE.sys.path[:]
+            fake_tomli_w = mock.Mock(dumps=lambda _value: "")
+            try:
+                with (
+                    mock.patch.object(POST_CREATE, "CLAUDE_HOME", claude_home),
+                    mock.patch.object(POST_CREATE, "CODEX_HOME", codex_home),
+                    mock.patch.object(POST_CREATE, "HOST_SEED_CLAUDE", missing_seed),
+                    mock.patch.object(POST_CREATE, "HOST_SEED_CODEX", missing_seed),
+                    mock.patch.dict(POST_CREATE.sys.modules, {"tomli_w": fake_tomli_w}),
+                ):
+                    POST_CREATE.setup_claude()
+                    POST_CREATE.setup_codex()
+            finally:
+                POST_CREATE.sys.path[:] = original_path
+
+            for dirname in ("projects", "skills", "agents", "commands", "plugins"):
+                self.assertTrue((claude_home / dirname).is_dir(), dirname)
+            for dirname in ("sessions", "skills", "rules", "prompts", "plugins"):
+                self.assertTrue((codex_home / dirname).is_dir(), dirname)
+
+
 class AuthSyncTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()

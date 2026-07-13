@@ -388,8 +388,11 @@ def setup_claude() -> None:
     ensure_sandbox_memory(claude_dir / "CLAUDE.md", create=True)
 
     # Every session/history/customization path now lives in this whole
-    # per-project home; no globally writable directory controls it.
-    (claude_dir / "projects").mkdir(exist_ok=True)
+    # per-project home; no globally writable directory controls it. Precreate
+    # all known prompt/code roots so a fresh project has the same isolated
+    # surface as one where the CLI has already used a feature.
+    for dirname in ("projects", "skills", "agents", "commands", "plugins"):
+        (claude_dir / dirname).mkdir(exist_ok=True)
 
 
 def load_host_codex_config() -> dict:
@@ -428,7 +431,8 @@ def setup_codex() -> None:
     # managed note on every create.
     ensure_sandbox_memory(codex_dir / "AGENTS.md", create=True)
 
-    (codex_dir / "sessions").mkdir(exist_ok=True)
+    for dirname in ("sessions", "skills", "rules", "prompts", "plugins"):
+        (codex_dir / dirname).mkdir(exist_ok=True)
 
 
 def _scrub_provider_secrets(provider: dict) -> bool:

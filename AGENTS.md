@@ -229,6 +229,12 @@ Canonical tool paths are image-baked symlinks into those whole per-project
 homes. There are no symlinks stored in the global auth volume and no global
 tool parent mounted in main.
 
+`setup_claude()` and `setup_codex()` precreate every known writable prompt/code
+root (skills, agents/commands, rules/prompts, plugins) inside those project
+homes. Keep the lists aligned with the "prompt/code persistence is
+project-isolated" smoke test: an empty new project must expose the same
+inspectable isolated surface as one where a CLI has already used the feature.
+
 Login-once behavior comes from `aic-auth-sync`, not shared tool homes. It is the
 only service that sees both the per-project sessions root and the three global
 tool-auth subpaths. It runs continuously as the exact runtime UID:GID
