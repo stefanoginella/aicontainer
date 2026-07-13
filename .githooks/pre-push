@@ -11,6 +11,8 @@
 set -euo pipefail
 
 status=0
+changelog_file=$(mktemp "${TMPDIR:-/tmp}/aic-pre-push-changelog.XXXXXX")
+trap 'rm -f "$changelog_file"' EXIT HUP INT TERM
 while read -r local_ref local_sha _remote_ref _remote_sha; do
   # Only police version tags.
   case "$local_ref" in
@@ -25,7 +27,11 @@ while read -r local_ref local_sha _remote_ref _remote_sha; do
 
   ver="${local_ref#refs/tags/v}"
   ver_re="${ver//./\\.}"
-  if ! git show "$local_sha:CHANGELOG.md" 2>/dev/null | grep -qE "^## \[$ver_re\]"; then
+  # Do not use `git show | grep -q` under pipefail: once grep sees an early
+  # match in a large changelog it closes the pipe, git receives SIGPIPE, and
+  # the otherwise-valid pipeline is reported as a failure.
+  if ! git show "$local_sha:CHANGELOG.md" > "$changelog_file" 2>/dev/null \
+    || ! grep -qE "^## \[$ver_re\]" "$changelog_file"; then
     echo "pre-push: refusing to push tag v$ver — CHANGELOG.md has no '## [$ver]' section." >&2
     echo "          Add the release notes for v$ver, re-tag, and retry." >&2
     echo "          (Bypass with 'git push --no-verify'; CI will still block the release.)" >&2

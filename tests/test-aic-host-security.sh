@@ -149,6 +149,30 @@ grep -Fq 'CODEX_INSTALLER_URL = "https://chatgpt.com/codex/install.sh"' \
   || fail "runtime Codex refresh does not use the official standalone installer"
 grep -Fq '["codex", "update"]' "$ROOT/template/post-create.py" \
   && fail "runtime Codex refresh regressed to installation-method detection"
+
+# The local release gate runs with pipefail. A direct `git show | grep -q`
+# falsely fails once a large changelog keeps writing after grep finds an early
+# matching heading (git receives SIGPIPE). Exercise the real hook with a fake
+# producer large enough to reproduce that failure, while retaining the absent-
+# section rejection.
+prepush_bin="$TMP/prepush-bin"
+mkdir -p "$prepush_bin"
+cat > "$prepush_bin/git" <<'SH'
+#!/bin/sh
+[ "${1:-}" = show ] || exit 2
+printf '%s\n' '# Changelog' '' '## [0.6.0] - 2026-07-13'
+awk 'BEGIN { for (i = 0; i < 20000; i++) print "- release-note-padding-release-note-padding-release-note-padding" }'
+SH
+chmod +x "$prepush_bin/git"
+printf '%s\n' \
+  'refs/tags/v0.6.0 1111111111111111111111111111111111111111 refs/tags/v0.6.0 0000000000000000000000000000000000000000' \
+  | PATH="$prepush_bin:$PATH" "$ROOT/.githooks/pre-push" \
+  || fail "pre-push changelog gate rejected an early match after producer SIGPIPE"
+if printf '%s\n' \
+  'refs/tags/v0.6.1 1111111111111111111111111111111111111111 refs/tags/v0.6.1 0000000000000000000000000000000000000000' \
+  | PATH="$prepush_bin:$PATH" "$ROOT/.githooks/pre-push" >/dev/null 2>&1; then
+  fail "pre-push changelog gate accepted a missing version section"
+fi
 grep -Fqx 'x-aic-runtime-user: &aic-runtime-user "${AIC_RUNTIME_USER:-1000:1000}"' \
   "$TMP/one/api/.devcontainer/docker-compose.yml" \
   || fail "generated Compose embedded a host-specific runtime identity"

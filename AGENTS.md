@@ -529,9 +529,11 @@ Internal notes:
   `promote-changelog.mjs` only relabels it. The CI gate (`release.yml`
   "Verify CHANGELOG.md has an entry") greps for `^## [X.Y.Z]` before any
   publish; `.githooks/pre-push` mirrors it locally (opt-in, bypassable — CI
-  is the real gate; don't weaken that step). Keep the `## [X.Y.Z]` heading
-  format: the gate, the promotion script, and the release-notes extraction
-  all key on it.
+  is the real gate; don't weaken that step). The hook materializes `git show`
+  before `grep -q`: a producer pipeline under `pipefail` falsely rejects a
+  large valid changelog when the early match gives `git show` SIGPIPE. Keep the
+  `## [X.Y.Z]` heading format: the gate, the promotion script, and the
+  release-notes extraction all key on it.
 - The GitHub Release is automatic after publish, idempotent, and marked latest
   only when npm says the version is latest. It falls back to generated notes.
   Only that job has `contents: write`; only publish has `packages: write` and

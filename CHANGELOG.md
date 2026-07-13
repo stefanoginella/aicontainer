@@ -86,6 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Fresh projects initialize isolated customization roots.** Claude and Codex
   skill, command, rule, prompt, and plugin directories exist before first use
   and remain confined to the path-unique project volume.
+- **Large changelogs no longer block valid release tags.** The local pre-push
+  mirror avoids a `pipefail`/SIGPIPE false negative after finding an early
+  matching version section.
 - **Compose validation works across supported host versions.** Managed Docker
   socket mounts retain raw interpolation inspection on Compose 2.38.x instead
   of failing before the security gate can evaluate project overrides.
