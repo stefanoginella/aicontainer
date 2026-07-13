@@ -135,7 +135,7 @@ jobs:
             aic-smoke-venv:
           YAML
           cd /tmp/proj && git init -q
-          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build --force
       - name: Bring up the devcontainer
         working-directory: /tmp/proj
         run: devcontainer up --workspace-folder .

@@ -131,6 +131,11 @@ for compose in "$ROOT/template/docker-compose.pull.yml" \
   grep -Fq '${AIC_DOCKER_SOCKET:-/var/run/docker.sock}:' "$compose" \
     && fail "managed Docker socket mount regressed to Compose-2.38-incompatible short syntax"
 done
+for workflow in "$ROOT/.github/workflows/rebuild.yml" \
+  "$ROOT/.github/workflows/release.yml"; do
+  grep -Fq '"$GITHUB_WORKSPACE/aic" init --build --force' "$workflow" \
+    || fail "workflow pre-created override is not passed through explicit init --force"
+done
 grep -Fqx 'x-aic-runtime-user: &aic-runtime-user "${AIC_RUNTIME_USER:-1000:1000}"' \
   "$TMP/one/api/.devcontainer/docker-compose.yml" \
   || fail "generated Compose embedded a host-specific runtime identity"
