@@ -41,6 +41,8 @@ CODEX_HOME = TOOL_HOMES / "codex"
 OPENCODE_CONFIG_DIR = TOOL_HOMES / "opencode-config"
 OPENCODE_DATA_DIR = TOOL_HOMES / "opencode-data"
 CODEX_RUNTIME_HOME = HOME / ".local" / "share" / "aic-tools" / "codex"
+CODEX_INSTALLER_URL = "https://chatgpt.com/codex/install.sh"
+CODEX_INSTALLER_MAX_BYTES = 4 * 1024 * 1024
 
 # The unrestricted devcontainer sees only these root-owned JSON outputs from
 # the one-shot Compose sanitizer. Raw host files are mounted exclusively into
@@ -1301,6 +1303,59 @@ def run_project_hook() -> None:
         log(f"warning: project hook exited {e.returncode}; continuing")
 
 
+def _refresh_command(
+    name: str, cmd: list[str], timeout: int, env: dict[str, str]
+) -> None:
+    """Run one fail-soft native tool updater."""
+    try:
+        subprocess.run(cmd, check=True, timeout=timeout, env=env)
+        log(f"{name} refreshed to latest")
+    except (subprocess.SubprocessError, OSError) as error:
+        log(f"{name} refresh skipped ({error}); keeping baked version")
+
+
+def _refresh_codex(env: dict[str, str]) -> None:
+    """Refresh the standalone Codex install through its supported installer.
+
+    Some standalone releases cannot identify their installation method for
+    `codex update`. OpenAI documents rerunning install.sh with
+    CODEX_NON_INTERACTIVE=1 for scripted updates. Download the whole script
+    successfully before executing it so a failed transfer cannot run a partial
+    installer; keep the same fail-soft baked-floor behavior as the other CLIs.
+    """
+    try:
+        installer = subprocess.run(
+            [
+                "curl",
+                "-fsSL",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--max-time",
+                "60",
+                "--max-filesize",
+                str(CODEX_INSTALLER_MAX_BYTES),
+                CODEX_INSTALLER_URL,
+            ],
+            check=True,
+            timeout=75,
+            stdout=subprocess.PIPE,
+        )
+        if len(installer.stdout) > CODEX_INSTALLER_MAX_BYTES:
+            raise ValueError("Codex installer exceeded the download limit")
+        subprocess.run(
+            ["sh"],
+            input=installer.stdout,
+            check=True,
+            timeout=300,
+            env=env,
+        )
+        log("codex refreshed to latest")
+    except (subprocess.SubprocessError, OSError, ValueError) as error:
+        log(f"codex refresh skipped ({error}); keeping baked version")
+
+
 def refresh_ai_tools() -> None:
     """Float Claude Code, Codex and OpenCode to their latest release on every
     container (re)create. The image bakes a working copy of each (Dockerfile) as
@@ -1313,7 +1368,8 @@ def refresh_ai_tools() -> None:
     Claude/Codex live in ~/.local/bin and OpenCode in ~/.opencode/bin, both of
     which we force onto PATH for the updaters. Codex's standalone package lives
     in a separate rootfs directory, not the per-project CODEX_HOME; supplying
-    CODEX_HOME/CODEX_INSTALL_DIR only to its updater preserves that split.
+    the documented unattended-installer variables only to its updater preserves
+    that split.
     (`opencode upgrade` replaces the binary in place and was installed with
     --no-modify-path.)"""
     freeze = os.environ.get("AIC_FREEZE_TOOLS", "").strip().lower()
@@ -1321,7 +1377,6 @@ def refresh_ai_tools() -> None:
         log("AIC_FREEZE_TOOLS set — keeping the baked Claude/Codex versions")
         return
     env = {**os.environ, "PATH": f"{HOME / '.local' / 'bin'}:{HOME / '.opencode' / 'bin'}:{os.environ.get('PATH', '')}"}
-    updaters: list[tuple[str, list[str], int, dict[str, str]]] = []
     if "claude-code" in ENABLED_TOOLS:
         # Claude's native updater records its install method in this ordinary
         # per-project state file. Seed only a missing file so a brand-new
@@ -1337,22 +1392,17 @@ def refresh_ai_tools() -> None:
                 )
             except OSError as error:
                 log(f"warning: could not initialize Claude updater state: {error}")
-        updaters.append(("claude", ["claude", "update"], 180, env))
+        _refresh_command("claude", ["claude", "update"], 180, env)
     if "codex" in ENABLED_TOOLS:
         codex_update_env = {
             **env,
+            "CODEX_NON_INTERACTIVE": "1",
             "CODEX_HOME": str(CODEX_RUNTIME_HOME),
             "CODEX_INSTALL_DIR": str(HOME / ".local" / "bin"),
         }
-        updaters.append(("codex", ["codex", "update"], 300, codex_update_env))
+        _refresh_codex(codex_update_env)
     if "opencode" in ENABLED_TOOLS:
-        updaters.append(("opencode", ["opencode", "upgrade"], 300, env))
-    for name, cmd, timeout, updater_env in updaters:
-        try:
-            subprocess.run(cmd, check=True, timeout=timeout, env=updater_env)
-            log(f"{name} refreshed to latest")
-        except (subprocess.SubprocessError, OSError) as e:
-            log(f"{name} refresh skipped ({e}); keeping baked version")
+        _refresh_command("opencode", ["opencode", "upgrade"], 300, env)
 
 
 def main() -> None:

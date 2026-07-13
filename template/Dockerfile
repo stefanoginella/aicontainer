@@ -258,7 +258,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
     && rm -rf /home/vscode/.aic-sessions/tool-homes/claude/backups
 # Keep the standalone package separate from CODEX_HOME: ~/.codex is a
 # per-project config/session home, while this rootfs path is the refreshable
-# executable floor. `refresh_ai_tools()` supplies the same two installer vars.
+# executable floor. `refresh_ai_tools()` supplies the same installer variables.
 RUN curl -fsSL https://chatgpt.com/codex/install.sh \
       | CODEX_NON_INTERACTIVE=1 \
         CODEX_HOME=/home/vscode/.local/share/aic-tools/codex \

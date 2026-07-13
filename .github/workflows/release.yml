@@ -148,9 +148,9 @@ jobs:
           devcontainer exec --workspace-folder . gh --version
           devcontainer exec --workspace-folder . uv --version
           # Codex must be the official standalone install in ~/.local/bin, not an
-          # npm global. Dropping npm is deliberate (so `codex update` works and the
-          # CLI no longer rides the npm release-age quarantine); guard the swap so a
-          # revert to `npm i -g @openai/codex` is caught.
+          # npm global. Dropping npm is deliberate (so supported standalone refresh
+          # works and the CLI no longer rides the npm release-age quarantine); guard
+          # the swap so a revert to `npm i -g @openai/codex` is caught.
           codex_path=$(devcontainer exec --workspace-folder . bash -lc 'command -v codex' | tr -d '\r' | tail -1)
           echo "codex resolves to: $codex_path"
           case "$codex_path" in
@@ -168,21 +168,27 @@ jobs:
       - name: Smoke test - tool self-update works with rc files root-locked
         working-directory: /tmp/proj
         run: |
-          # refresh_ai_tools() runs `claude update` / `codex update` /
-          # `opencode upgrade` on every container create. `codex update` re-runs
-          # the official installer, which must NOT fail trying to edit the
-          # managed shell startup files (root-owned and immutable in the image) —
-          # it skips that because ~/.local/bin is already on PATH. opencode was
-          # installed with --no-modify-path so `opencode upgrade` never touches
-          # them. A regression would silently fall back to the baked version
-          # (refresh is fail-soft), so assert all three updaters exit 0 here.
+          # refresh_ai_tools() runs `claude update`, Codex's documented unattended
+          # installer, and `opencode upgrade` on every container create. The Codex
+          # installer must not try to edit the managed shell startup files
+          # (root-owned and immutable in the image). A regression would silently
+          # fall back to the baked version (refresh is fail-soft), so assert all
+          # three refresh paths exit 0 here and leave the lock intact.
           devcontainer exec --workspace-folder . bash -lc '
-            set -e
+            set -eo pipefail
             [ "$(stat -c %U:%a /etc/aic/shell/zsh/.zshrc)" = "root:444" ] || { echo "precondition: managed .zshrc not root-locked"; exit 1; }
             claude update
-            codex update
+            codex_installer=$(mktemp)
+            trap '\''rm -f "$codex_installer"'\'' EXIT
+            curl -fsSL --proto "=https" --proto-redir "=https" --max-time 60 --max-filesize 4194304 \
+              https://chatgpt.com/codex/install.sh -o "$codex_installer"
+            CODEX_NON_INTERACTIVE=1 \
+              CODEX_HOME=/home/vscode/.local/share/aic-tools/codex \
+              CODEX_INSTALL_DIR=/home/vscode/.local/bin \
+              sh "$codex_installer"
             opencode upgrade
-            echo "OK: claude + codex + opencode self-update cleanly with rc files locked"
+            [ "$(stat -c %U:%a /etc/aic/shell/zsh/.zshrc)" = "root:444" ] || { echo "managed .zshrc lock changed during refresh"; exit 1; }
+            echo "OK: claude + codex + opencode refresh cleanly with rc files locked"
           '
       - name: Smoke test - socket-proxy exposes only ping/version by default
         working-directory: /tmp/proj

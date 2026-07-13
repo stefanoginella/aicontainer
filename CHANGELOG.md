@@ -80,6 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Codex refresh follows its supported unattended path.** Rebuilds rerun the
+  official standalone installer instead of relying on installation-method
+  detection that can reject a valid standalone release.
 - **Compose validation works across supported host versions.** Managed Docker
   socket mounts retain raw interpolation inspection on Compose 2.38.x instead
   of failing before the security gate can evaluate project overrides.

@@ -384,17 +384,16 @@ vscode-settings.json" test.
 `main()` and floats Claude Code + Codex + OpenCode to latest on every
 container (re)create, so a plain `aic rebuild` lands current CLIs without a
 new image. The Dockerfile bakes each as an offline *floor*; updates run via
-`claude update`/`codex update`/`opencode upgrade`. `AIC_TOOLS`-gated,
+`claude update`, Codex's official `install.sh` with
+`CODEX_NON_INTERACTIVE=1`, and `opencode upgrade`. `AIC_TOOLS`-gated,
 fail-soft (an offline/failed update keeps the baked version — don't make it
-fatal), opt-out via `AIC_FREEZE_TOOLS=1` for a reproducible sandbox. The
-updaters MUST run with their bin dir on `PATH` (`~/.local/bin` for
-Claude/Codex, `~/.opencode/bin` for OpenCode — both prepended in
-`refresh_ai_tools()`): `codex update` re-runs the official installer, which
-otherwise tries to edit a login-shell rc file (root-locked by
-`aic-lock-gitconfig`) and fails; with the bin dir already on PATH it skips
-that step. OpenCode installs with `--no-modify-path` and upgrades in place,
-never touching rc files. Guarded by the "tool self-update works with rc files
-root-locked" test.
+fatal), opt-out via `AIC_FREEZE_TOOLS=1` for a reproducible sandbox. Codex's
+installer is downloaded completely before execution, HTTPS-only and bounded;
+keep `CODEX_HOME` on its separate rootfs package cache and
+`CODEX_INSTALL_DIR=~/.local/bin` so project state remains isolated and no shell
+startup file is edited. OpenCode installs with `--no-modify-path` and upgrades
+in place, never touching rc files. Guarded by the "tool self-update works with
+rc files root-locked" test.
 
 **Dockerfile.project base-tag drift.** `aic sync` re-pins
 `docker-compose.yml` but never touches a `FROM

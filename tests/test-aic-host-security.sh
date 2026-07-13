@@ -135,7 +135,20 @@ for workflow in "$ROOT/.github/workflows/rebuild.yml" \
   "$ROOT/.github/workflows/release.yml"; do
   grep -Fq '"$GITHUB_WORKSPACE/aic" init --build --force' "$workflow" \
     || fail "workflow pre-created override is not passed through explicit init --force"
+  grep -Fq 'CODEX_NON_INTERACTIVE=1' "$workflow" \
+    || fail "workflow does not exercise the supported unattended Codex refresh"
+  grep -Fq 'https://chatgpt.com/codex/install.sh' "$workflow" \
+    || fail "workflow does not exercise the official Codex installer"
+  grep -Fq 'codex update' "$workflow" \
+    && fail "workflow regressed to installation-method-dependent codex update"
 done
+grep -Fq '"CODEX_NON_INTERACTIVE": "1"' "$ROOT/template/post-create.py" \
+  || fail "runtime Codex refresh is not noninteractive"
+grep -Fq 'CODEX_INSTALLER_URL = "https://chatgpt.com/codex/install.sh"' \
+  "$ROOT/template/post-create.py" \
+  || fail "runtime Codex refresh does not use the official standalone installer"
+grep -Fq '["codex", "update"]' "$ROOT/template/post-create.py" \
+  && fail "runtime Codex refresh regressed to installation-method detection"
 grep -Fqx 'x-aic-runtime-user: &aic-runtime-user "${AIC_RUNTIME_USER:-1000:1000}"' \
   "$TMP/one/api/.devcontainer/docker-compose.yml" \
   || fail "generated Compose embedded a host-specific runtime identity"

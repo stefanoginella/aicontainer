@@ -5,10 +5,12 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,6 +22,32 @@ POST_CREATE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(POST_CREATE)
 
 SECRET = "AIC_TEST_SECRET_MUST_NEVER_APPEAR_IN_LOGS"
+
+
+class ToolRefreshTests(unittest.TestCase):
+    def test_codex_refresh_downloads_before_unattended_install(self) -> None:
+        script = b"#!/bin/sh\nexit 0\n"
+        completed = subprocess.CompletedProcess(
+            args=["curl"], returncode=0, stdout=script
+        )
+        env = {
+            "PATH": "/home/vscode/.local/bin:/usr/bin",
+            "CODEX_NON_INTERACTIVE": "1",
+            "CODEX_HOME": "/home/vscode/.local/share/aic-tools/codex",
+            "CODEX_INSTALL_DIR": "/home/vscode/.local/bin",
+        }
+
+        with mock.patch.object(
+            POST_CREATE.subprocess, "run", side_effect=[completed, completed]
+        ) as run:
+            POST_CREATE._refresh_codex(env)
+
+        download, install = run.call_args_list
+        self.assertIn(POST_CREATE.CODEX_INSTALLER_URL, download.args[0])
+        self.assertEqual(download.kwargs["stdout"], POST_CREATE.subprocess.PIPE)
+        self.assertEqual(install.args[0], ["sh"])
+        self.assertEqual(install.kwargs["input"], script)
+        self.assertEqual(install.kwargs["env"], env)
 
 
 class AuthSyncTests(unittest.TestCase):

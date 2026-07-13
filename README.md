@@ -625,8 +625,9 @@ command -v typescript-language-server >/dev/null || npm i -g typescript typescri
 
 Claude Code, Codex and OpenCode refresh to their latest release **on every `aic
 rebuild`**, in both pull and build mode: `post-create.py` runs `claude update`,
-`codex update` and `opencode upgrade` each time the container is (re)created. The
-pinned image is just the baseline they're layered on.
+reruns Codex's official unattended installer, and runs `opencode upgrade` each
+time the container is (re)created. The pinned image is just the baseline they're
+layered on.
 
 ```bash
 aic rebuild   # in a project: recreate the container → all enabled CLIs update to latest
@@ -637,9 +638,10 @@ and the container still comes up. For a fully reproducible sandbox, pin the tool
 by setting `AIC_FREEZE_TOOLS=1` in `.devcontainer/docker-compose.override.yml`.
 
 > Codex and OpenCode install via their official standalone installers (not npm),
-> mirroring Claude's native installer — so `codex update` / `opencode upgrade` work
-> and neither CLI is subject to the `NPM_CONFIG_MIN_RELEASE_AGE` npm quarantine
-> (which still governs npx-based MCP servers).
+> mirroring Claude's native installer. Codex refreshes by rerunning its installer
+> noninteractively; OpenCode uses `opencode upgrade`. Neither CLI is subject to
+> the `NPM_CONFIG_MIN_RELEASE_AGE` npm quarantine (which still governs npx-based
+> MCP servers).
 
 To update **aicontainer itself** — the `aic` CLI, the template, and the pinned base
 image (base OS, Node, semgrep, hooks, …):
