@@ -38,26 +38,200 @@ resolve_devcontainer () {
   fi
 }
 
-# Compose project name for this project's stack, matching what `devcontainer up`
-# (and VS Code's "Reopen in Container") actually create: the lowercased workspace
-# folder basename with characters outside [a-z0-9_-] *removed*, plus a
-# `_devcontainer` suffix. Used by down/destroy/preflight to target the right
-# stack and its `<project>_aic-sessions` volume.
-#
-# Two historical bugs this avoids: piping basename's trailing newline through
-# `tr -c 'a-z0-9_-' '_'` turned the newline into a spurious trailing `_`, and the
-# `_devcontainer` suffix was missing entirely — so `docker compose -p` and the
-# volume name never matched the real stack, silently no-opping `aic down`/`destroy`.
-project_name () {
+# Historical project name used before generated Compose files gained an
+# explicit, path-unique top-level name. Keep it available so commands can still
+# target projects that have not been synced yet.
+legacy_project_name () {
   local base
   base="$(basename -- "$PWD")"
-  # toLowerCase().replace(/[^a-z0-9_-]/g, '') — strip, don't substitute.
   base="$(printf '%s' "$base" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -dc 'a-z0-9_-')"
   printf '%s_devcontainer\n' "$base"
 }
 
+# Deterministic Compose project name for newly generated configuration. The
+# readable basename is suffixed with a hash of the canonical absolute project
+# path, so two checkouts with the same basename never share containers or
+# per-project session volumes.
+expected_project_name () {
+  local base root hash
+  root="$(pwd -P)"
+  base="$(basename -- "$root")"
+  # toLowerCase().replace(/[^a-z0-9_-]/g, '') — strip, don't substitute. Keep
+  # the readable portion bounded so Docker object names remain manageable.
+  base="$(printf '%s' "$base" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -dc 'a-z0-9_-')"
+  base="${base:0:32}"
+  [ -n "$base" ] || base="project"
+  hash="$(node -e 'process.stdout.write(require("crypto").createHash("sha256").update(process.argv[1]).digest("hex").slice(0,12))' "$root")" \
+    || die "Node.js 18+ is required to compute the project identity"
+  printf 'aic-%s-%s\n' "$base" "$hash"
+}
+
+# The Dev Containers CLI remaps the vscode user to the host UID/GID on native
+# Linux. Docker Desktop keeps the image's 1000:1000 identity. Sidecars that
+# write the same named volumes must use that identity too, otherwise auth and
+# session files become root-owned (or unwritable) after the first sync.
+runtime_user_id () {
+  local uid=1000 gid=1000
+  if [ "$(uname -s 2>/dev/null || true)" = "Linux" ]; then
+    local host_uid host_gid
+    host_uid="$(id -u 2>/dev/null || true)"
+    host_gid="$(id -g 2>/dev/null || true)"
+    # Dev Containers deliberately does not remap vscode to root. Keep the image
+    # identity when a Linux CI/host command itself runs as uid 0.
+    if [[ "$host_uid" =~ ^[0-9]+$ ]] && [[ "$host_gid" =~ ^[0-9]+$ ]] \
+       && [ "$host_uid" -gt 0 ]; then
+      uid="$host_uid"; gid="$host_gid"
+    fi
+  fi
+  printf '%s:%s\n' "$uid" "$gid"
+}
+
+# Return the active Docker context's local Unix socket. aicontainer needs a
+# bind-mountable socket for its fixed ownership helper and socket proxy, so
+# remote tcp/ssh contexts cannot provide the same boundary. AIC_DOCKER_SOCKET
+# itself is never trusted from the environment or a repository .env file; it
+# is always derived from Docker's selected context here.
+resolve_docker_socket () {
+  local endpoint="" context="" socket
+  if [ -n "${DOCKER_CONTEXT:-}" ] && command -v docker >/dev/null 2>&1; then
+    endpoint="$(docker context inspect "$DOCKER_CONTEXT" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null || true)"
+  elif [ -n "${DOCKER_HOST:-}" ]; then
+    endpoint="$DOCKER_HOST"
+  elif command -v docker >/dev/null 2>&1; then
+    context="$(docker context show 2>/dev/null || true)"
+    [ -n "$context" ] || context="default"
+    endpoint="$(docker context inspect "$context" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null || true)"
+  fi
+  [ -n "$endpoint" ] || endpoint="unix:///var/run/docker.sock"
+
+  case "$endpoint" in
+    unix:///*) socket="${endpoint#unix://}" ;;
+    *) err "Docker context endpoint '$endpoint' is remote; aicontainer requires a local Unix-socket context"; return 1 ;;
+  esac
+  case "$socket" in
+    /*) ;;
+    *) err "Docker context returned a non-absolute Unix socket path: $socket"; return 1 ;;
+  esac
+  # Keep the generated dotenv line unambiguous and non-executable. These cover
+  # standard Docker, Colima, OrbStack, rootless Docker, and Docker Desktop
+  # paths; an exotic path gets an actionable failure rather than interpolation.
+  case "$socket" in
+    *[!A-Za-z0-9_./@%+-]*)
+      err "Docker socket path contains unsupported characters: $socket"
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$socket"
+}
+
+export_runtime_environment () {
+  AIC_DOCKER_SOCKET="$(resolve_docker_socket)"
+  AIC_RUNTIME_USER="$(runtime_user_id)"
+  export AIC_DOCKER_SOCKET AIC_RUNTIME_USER
+}
+
+write_runtime_environment_file () {
+  local file=".devcontainer/.env" tmp
+  export_runtime_environment || die "could not select a bind-mountable Docker socket"
+  [ -d .devcontainer ] || return 0
+  if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then
+    die "$file must be a regular file, not a symlink"
+  fi
+  tmp="$(mktemp ".devcontainer/.aic-env.XXXXXX")"
+  printf 'AIC_DOCKER_SOCKET=%s\nAIC_RUNTIME_USER=%s\n' \
+    "$AIC_DOCKER_SOCKET" "$AIC_RUNTIME_USER" > "$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file"
+}
+
+validate_runtime_environment_file () {
+  local file=".devcontainer/.env" expected actual
+  [ -e "$file" ] || return 0
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  expected="AIC_DOCKER_SOCKET=$AIC_DOCKER_SOCKET
+AIC_RUNTIME_USER=$AIC_RUNTIME_USER"
+  actual="$(cat "$file" 2>/dev/null || true)"
+  [ "$actual" = "$expected" ]
+}
+
+# Resolve the name encoded by the current managed Compose file. Only accept the
+# exact value aic computes for this path; a repository-controlled arbitrary
+# `name:` must never make `aic down` / `destroy` target somebody else's stack.
+# Old files without the managed name retain the legacy resolution until sync.
+project_name () {
+  local expected encoded=""
+  expected="$(expected_project_name)"
+  if [ -f .devcontainer/docker-compose.yml ] && [ ! -L .devcontainer/docker-compose.yml ]; then
+    if ! grep -qE '^name[[:space:]]*:' .devcontainer/docker-compose.yml; then
+      legacy_project_name
+      return 0
+    fi
+    encoded="$(sed -n 's/^name[[:space:]]*:[[:space:]]*\([a-z0-9][a-z0-9_-]*\)[[:space:]]*$/\1/p' \
+      .devcontainer/docker-compose.yml | head -n1)"
+    [ "$encoded" = "$expected" ] || \
+      die "managed Compose name is missing, malformed, or belongs to another path — run 'aic sync'"
+    [ "$(grep -cE '^name[[:space:]]*:' .devcontainer/docker-compose.yml)" = "1" ] || \
+      die "managed Compose file has multiple top-level names — run 'aic sync'"
+    printf '%s\n' "$expected"
+    return 0
+  fi
+  legacy_project_name
+}
+
+# True when the Compose file declares any top-level project name. A missing
+# name identifies a pre-migration project; a present-but-wrong name is handled
+# by project_name() and must never fall back to a basename that could target a
+# different checkout.
+compose_has_project_name () {
+  [ -f .devcontainer/docker-compose.yml ] &&
+    grep -qE '^name[[:space:]]*:' .devcontainer/docker-compose.yml
+}
+
+# Paths under .devcontainer are either aic-managed outputs or project-owned
+# control inputs. Never follow a repository-provided symlink at this boundary:
+# `aic init --force` / `aic sync` run as the host user, so following one could
+# overwrite or read an arbitrary host file outside the repository.
+AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-gitconfig .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json"
+
+validate_devcontainer_paths () {
+  local require_dir="${1:-optional}" path name linked
+  if [ -L .devcontainer ]; then
+    die ".devcontainer must be a real directory, not a symlink"
+  fi
+  if [ -e .devcontainer ] && [ ! -d .devcontainer ]; then
+    die ".devcontainer exists but is not a directory"
+  fi
+  if [ "$require_dir" = "required" ] && [ ! -d .devcontainer ]; then
+    die "no .devcontainer/ here — run 'aic init' first"
+  fi
+  [ -d .devcontainer ] || return 0
+
+  for name in $AIC_CONTROL_FILES; do
+    path=".devcontainer/$name"
+    if [ -L "$path" ]; then
+      die "$path must be a regular file, not a symlink"
+    fi
+    if [ -e "$path" ] && [ ! -f "$path" ]; then
+      die "$path exists but is not a regular file"
+    fi
+  done
+
+  path=".devcontainer/hooks"
+  if [ -L "$path" ]; then
+    die "$path must be a real directory, not a symlink"
+  fi
+  if [ -e "$path" ] && [ ! -d "$path" ]; then
+    die "$path exists but is not a directory"
+  fi
+  if [ -d "$path" ]; then
+    linked="$(find "$path" -type l -print -quit 2>/dev/null)"
+    [ -z "$linked" ] || die "$linked is a symlink inside the managed hooks directory"
+  fi
+}
+
 require_in_project () {
-  [ -f .devcontainer/devcontainer.json ] || die "no .devcontainer/ here — run 'aic init' first"
+  validate_devcontainer_paths required
+  [ -f .devcontainer/devcontainer.json ] || die "no .devcontainer/devcontainer.json here — run 'aic init' first"
 }
 
 # ---------------------------------------------------------------------------
@@ -220,27 +394,37 @@ read_pinned_compose_version () {
 }
 
 # ---------------------------------------------------------------------------
-# Docker socket write access (opt-in). The socket-proxy ships read-only
-# (POST/BUILD = 0) so an in-container agent cannot `docker run --privileged
-# -v /:/host` to escape, nor spawn sibling containers that dodge the opt-in
-# aic-firewall. `--docker` flips POST/BUILD to 1 for projects that genuinely
-# need testcontainers / in-container `docker compose`. The choice lives in the
-# generated compose file itself (the honest source of truth the boundary
-# summary reports); `aic sync` preserves it by reading the old file first.
+# Docker daemon exposure (opt-in). The socket-proxy ships with object reads and
+# writes disabled (only PING/VERSION remain available). `--docker-read` enables
+# list/inspect APIs; `--docker` additionally enables POST/BUILD for projects
+# that genuinely need testcontainers / in-container `docker compose`. The
+# encoded choice survives sync, while matching consent lives outside the repo
+# so a checkout cannot grant itself Docker visibility by editing Compose.
 # ---------------------------------------------------------------------------
-DEFAULT_DOCKER="ro"
+DEFAULT_DOCKER="none"
 
-# Echo the Docker mode encoded in an existing compose file: "rw" if the
-# socket-proxy has POST enabled, else "ro". Empty output if there's no file to
-# read (fresh init). Anchored on the bare `POST: 1` toggle line.
+# Echo none|ro|rw for a coherent managed toggle set, "invalid" for a partial or
+# malformed set, and nothing when there is no existing Compose file.
 read_compose_docker_mode () {
-  local f=".devcontainer/docker-compose.yml"
+  local f=".devcontainer/docker-compose.yml" key value reads=0 post build
   [ -f "$f" ] || return 0
-  if grep -qE '^[[:space:]]*POST:[[:space:]]*1[[:space:]]*$' "$f"; then
-    echo rw
-  else
-    echo ro
-  fi
+  for key in CONTAINERS EVENTS IMAGES INFO NETWORKS VOLUMES; do
+    value="$(sed -n "s/^[[:space:]]*${key}:[[:space:]]*\([01]\)[[:space:]]*\$/\1/p" "$f")"
+    case "$value" in
+      0) ;;
+      1) reads=$((reads + 1)) ;;
+      *) echo invalid; return 0 ;;
+    esac
+  done
+  post="$(sed -n 's/^[[:space:]]*POST:[[:space:]]*\([01]\)[[:space:]]*$/\1/p' "$f")"
+  build="$(sed -n 's/^[[:space:]]*BUILD:[[:space:]]*\([01]\)[[:space:]]*$/\1/p' "$f")"
+  [ "$post" = "$build" ] || { echo invalid; return 0; }
+  case "$reads:$post" in
+    0:0) echo none ;;
+    6:0) echo ro ;;
+    6:1) echo rw ;;
+    *)   echo invalid ;;
+  esac
 }
 
 # Tier 1. Warn (to stderr, yellow on a TTY) when the project's pinned image tag
@@ -470,25 +654,59 @@ build_vscode_ext_block () {
   printf '%s' "$block"
 }
 
-# Build the injection block for project-owned VS Code settings. Reads the given
-# file (if present): requires a JSON object (warns+skips otherwise), takes the
-# content strictly between the first { and the last } and emits it verbatim
-# (preserving nested objects, arrays, and JSONC comments) prefixed with a single
-# leading comma. A trailing comma in the object is tolerated by JSONC before the
-# closing brace. Echoes the (possibly empty) block; warnings go to stderr.
+# Build the injection block for project-owned VS Code settings. The input is
+# strict JSON (not JSONC), must be a non-array object, and is parsed then
+# serialized by Node. Never splice user-controlled text between braces: a
+# malformed object could otherwise escape customizations.vscode.settings and
+# inject host-facing top-level devcontainer properties.
 build_vscode_settings_block () {
-  local file="$1" raw inner
+  local file="$1" output
   [ -f "$file" ] || return 0
-  raw="$(cat "$file")"
-  case "$raw" in
-    *"{"*"}"*) ;;
-    *) printf 'aic: ignoring vscode-settings.json (not a JSON object: must be { ... })\n' >&2; return 0 ;;
-  esac
-  inner="${raw#*\{}"     # drop through the first {
-  inner="${inner%\}*}"   # drop from the last } onward
-  case "$inner" in
-    *[![:space:]]*) printf '        ,%s' "$inner" ;;  # non-empty object only
-  esac
+  if ! output="$(node -e '
+    const fs = require("fs");
+    const file = process.argv[1], templateFile = process.argv[2];
+    let value;
+    try {
+      value = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (_) {
+      process.exit(2);
+    }
+    if (value === null || Array.isArray(value) || typeof value !== "object") {
+      process.exit(3);
+    }
+
+    // Project settings are appended at the managed marker. Duplicate JSON
+    // keys are accepted by VS Code with the last value winning, so filter all
+    // top-level keys owned by aic before serialization. Derive the set from
+    // the installed template to keep this rule aligned as managed settings
+    // evolve.
+    const template = fs.readFileSync(templateFile, "utf8");
+    const marker = template.indexOf("// aic:vscode-settings");
+    const start = template.lastIndexOf("\"settings\": {", marker);
+    if (marker < 0 || start < 0) process.exit(4);
+    const managedBlock = template.slice(start, marker);
+    const managedKeys = new Set();
+    const keyPattern = /^        ("(?:[^"\\]|\\.)+")\s*:/gm;
+    let match;
+    while ((match = keyPattern.exec(managedBlock)) !== null) {
+      managedKeys.add(JSON.parse(match[1]));
+    }
+    for (const key of Object.keys(value)) {
+      if (!managedKeys.has(key)) continue;
+      process.stderr.write(`aic: ignoring vscode-settings.json key managed by aic: ${key}\n`);
+      delete value[key];
+    }
+
+    const entries = Object.entries(value);
+    if (!entries.length) process.exit(0);
+    const lines = JSON.stringify(value, null, 2).split("\n").slice(1, -1);
+    lines[0] = "," + lines[0].trimStart();
+    process.stdout.write(lines.map(line => "        " + line).join("\n"));
+  ' "$file" "$TEMPLATE_DIR/devcontainer.json")"; then
+    printf 'aic: ignoring vscode-settings.json (must be a strict JSON object)\n' >&2
+    return 0
+  fi
+  printf '%s' "$output"
 }
 
 patch_devcontainer_json () {
@@ -602,21 +820,79 @@ patch_devcontainer_json () {
   ' "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
-# Flip the socket-proxy POST/BUILD toggles in the freshly-copied compose file
-# to match the project's Docker mode. The template ships read-only (POST/BUILD
-# 0); "rw" flips both to 1. Matches only the bare `KEY: <0|1>` toggle lines, so
-# nothing else in the file is touched, and it's idempotent across syncs.
+# Apply all socket-proxy read/write toggles in the freshly-copied Compose file.
+# none=ping/version only, ro=list/inspect, rw=list/inspect + POST/BUILD.
 apply_docker_mode () {
-  local file="$1" docker="$2" want tmp
+  local file="$1" docker="$2" read write tmp
   [ -f "$file" ] || return 0
   case "$docker" in
-    rw) want=1 ;;
-    *)  want=0 ;;
+    none) read=0; write=0 ;;
+    ro)   read=1; write=0 ;;
+    rw)   read=1; write=1 ;;
+    *)    die "internal error: unknown Docker exposure mode '$docker'" ;;
   esac
   tmp="$(mktemp "${file}.XXXXXX")"
-  sed -E "s/^([[:space:]]*)POST:[[:space:]]*[01][[:space:]]*\$/\1POST: ${want}/; \
-          s/^([[:space:]]*)BUILD:[[:space:]]*[01][[:space:]]*\$/\1BUILD: ${want}/" \
+  sed -E "s/^([[:space:]]*)(CONTAINERS|EVENTS|IMAGES|INFO|NETWORKS|VOLUMES):[[:space:]]*[01][[:space:]]*\$/\1\2: ${read}/; \
+          s/^([[:space:]]*)POST:[[:space:]]*[01][[:space:]]*\$/\1POST: ${write}/; \
+          s/^([[:space:]]*)BUILD:[[:space:]]*[01][[:space:]]*\$/\1BUILD: ${write}/" \
     "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+# Copy a managed file through a sibling temporary and rename it into place.
+# The final rename replaces a destination symlink itself instead of following
+# it; validate_devcontainer_paths rejects such links first as a clearer error.
+atomic_copy_file () {
+  local src="$1" dst="$2" tmp
+  [ -f "$src" ] && [ ! -L "$src" ] || die "managed template file is missing or unsafe: $src"
+  tmp="$(mktemp "$(dirname "$dst")/.aic-$(basename "$dst").XXXXXX")"
+  if cp -p "$src" "$tmp" && mv -f "$tmp" "$dst"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  die "could not install managed file: $dst"
+}
+
+# Stage the managed hooks tree before replacing it, so a partial recursive copy
+# can never become the live tree. Symlinks are forbidden in both source and
+# destination because hooks execute security-sensitive host/container logic.
+atomic_copy_hooks () {
+  local src="$1" dst="$2" parent tmp linked
+  [ -d "$src" ] && [ ! -L "$src" ] || die "managed hooks template is missing or unsafe: $src"
+  linked="$(find "$src" -type l -print -quit 2>/dev/null)"
+  [ -z "$linked" ] || die "managed hooks template contains a symlink: $linked"
+  parent="$(dirname "$dst")"
+  tmp="$(mktemp -d "$parent/.aic-hooks.XXXXXX")"
+  if ! cp -Rp "$src/." "$tmp/"; then
+    rm -rf "$tmp"
+    die "could not stage managed hooks"
+  fi
+  rm -rf "$dst"
+  if ! mv "$tmp" "$dst"; then
+    rm -rf "$tmp"
+    die "could not install managed hooks"
+  fi
+}
+
+# Replace the literal template placeholder with the deterministic per-path
+# Compose project name. This keeps devcontainer CLI, direct Compose commands,
+# and per-project volume names aligned.
+apply_project_name () {
+  local file="$1" name tmp
+  name="$(expected_project_name)"
+  grep -qE '^name:[[:space:]]*aic-project[[:space:]]*$' "$file" \
+    || die "managed compose template is missing top-level 'name: aic-project'"
+  tmp="$(mktemp "${file}.XXXXXX")"
+  sed -E "s/^name:[[:space:]]*aic-project[[:space:]]*\$/name: ${name}/" "$file" > "$tmp" \
+    && mv "$tmp" "$file"
+}
+
+# Verify the managed Compose identity anchor. Its value is interpolated from
+# the gitignored host runtime file instead of rewriting tracked Compose on each
+# machine; that keeps mixed macOS/Linux teams free of UID-only diffs.
+apply_runtime_user () {
+  local file="$1"
+  grep -Fqx 'x-aic-runtime-user: &aic-runtime-user "${AIC_RUNTIME_USER:-1000:1000}"' "$file" \
+    || die "managed compose template is missing x-aic-runtime-user interpolation"
 }
 
 # Copy template files into .devcontainer/, picking the right compose variant
@@ -625,16 +901,18 @@ apply_docker_mode () {
 apply_template () {
   local mode="$1" src="$2" dst="$3" docker="${4:-$DEFAULT_DOCKER}"
   [ -d "$src" ] || die "template not found at $src (set AIC_HOME or reinstall aic)"
+  validate_devcontainer_paths optional
   mkdir -p "$dst"
 
-  cp "$src/devcontainer.json" "$dst/devcontainer.json"
+  atomic_copy_file "$src/devcontainer.json" "$dst/devcontainer.json"
   # Copied in both modes: an in-repo guide to which .devcontainer/ files are
   # aic-managed (overwritten on sync) vs project-owned (survive). Steers humans
   # and AI agents away from hand-editing devcontainer.json. Itself aic-managed.
-  cp "$src/README.md" "$dst/README.md"
+  atomic_copy_file "$src/README.md" "$dst/README.md"
+  atomic_copy_file "$src/.gitignore" "$dst/.gitignore"
   case "$mode" in
     pull)
-      cp "$src/docker-compose.pull.yml" "$dst/docker-compose.yml"
+      atomic_copy_file "$src/docker-compose.pull.yml" "$dst/docker-compose.yml"
       # Pin the image tag to this aic's version so the CLI and the container
       # FS layout (hooks, sudoers, helper scripts) can't drift apart. Template
       # ships `:latest` as the canonical placeholder; we rewrite at copy time.
@@ -643,26 +921,38 @@ apply_template () {
       tmp="$(mktemp "$dst/docker-compose.yml.XXXXXX")"
       sed "s|ghcr.io/stefanoginella/aicontainer:latest|ghcr.io/stefanoginella/aicontainer:v${ver}|g" \
         "$dst/docker-compose.yml" > "$tmp" && mv "$tmp" "$dst/docker-compose.yml"
+      # Pull mode must remove every managed build-mode artifact. Leaving the
+      # old Dockerfile behind makes the next plain `aic sync` auto-detect build
+      # mode and silently flip the project back.
+      rm -f "$dst/Dockerfile" "$dst/post-create.py" "$dst/aic-firewall" \
+        "$dst/aic-chown-volumes" "$dst/aic-lock-gitconfig" "$dst/.zshrc"
+      rm -rf "$dst/hooks"
       ;;
     build)
-      cp "$src/docker-compose.build.yml" "$dst/docker-compose.yml"
-      cp "$src/Dockerfile"        "$dst/Dockerfile"
-      cp "$src/post-create.py"    "$dst/post-create.py"
-      cp "$src/aic-firewall"      "$dst/aic-firewall"
-      cp "$src/aic-chown-volumes" "$dst/aic-chown-volumes"
-      cp "$src/aic-lock-gitconfig" "$dst/aic-lock-gitconfig"
-      cp "$src/.zshrc"            "$dst/.zshrc"
-      rm -rf "$dst/hooks"
-      cp -R "$src/hooks"          "$dst/hooks"
+      atomic_copy_file "$src/docker-compose.build.yml" "$dst/docker-compose.yml"
+      atomic_copy_file "$src/Dockerfile"         "$dst/Dockerfile"
+      atomic_copy_file "$src/post-create.py"     "$dst/post-create.py"
+      atomic_copy_file "$src/aic-firewall"       "$dst/aic-firewall"
+      atomic_copy_file "$src/aic-chown-volumes"  "$dst/aic-chown-volumes"
+      atomic_copy_file "$src/aic-lock-gitconfig" "$dst/aic-lock-gitconfig"
+      atomic_copy_file "$src/.zshrc"             "$dst/.zshrc"
+      atomic_copy_hooks "$src/hooks"              "$dst/hooks"
       ;;
     *) die "internal error: unknown mode '$mode'" ;;
   esac
-  # Apply the project's Docker socket write mode to the copied compose file.
+  apply_project_name "$dst/docker-compose.yml"
+  apply_runtime_user "$dst/docker-compose.yml"
+  # Apply the project's Docker daemon exposure mode to the copied compose file.
   apply_docker_mode "$dst/docker-compose.yml" "$docker"
+  # Direct VS Code starts do not inherit exports from the host initialize hook,
+  # so leave Compose a tiny gitignored file containing the selected local
+  # Docker context's socket path. `aic initialize` refreshes it on every start.
+  write_runtime_environment_file
 }
 
 cmd_init () {
   local mode="pull" force="" tools="" shell="" docker="$DEFAULT_DOCKER"
+  validate_devcontainer_paths optional
   while [ $# -gt 0 ]; do
     case "$1" in
       --build) mode="build" ;;
@@ -671,9 +961,10 @@ cmd_init () {
       --with=*) tools="${1#--with=}" ;;
       --shell) shift; shell="${1:-}" ;;
       --shell=*) shell="${1#--shell=}" ;;
+      --docker-read) docker="ro" ;;
       --docker) docker="rw" ;;
-      --no-docker) docker="ro" ;;
-      *) die "unknown init flag: $1 (try --build, --force, --docker, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
+      --no-docker) docker="none" ;;
+      *) die "unknown init flag: $1 (try --build, --force, --docker-read, --docker, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
     esac
     shift
   done
@@ -692,12 +983,15 @@ cmd_init () {
   fi
   shell="$(validate_shell "$shell")"
 
+  resolve_docker_socket >/dev/null || die "cannot initialize aicontainer with the selected Docker context"
   apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer" "$docker"
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
+  set_docker_consent "$docker"
   echo "aic: copied $mode-mode template into .devcontainer/ (tools: $tools, shell: $shell, docker: $docker)"
-  if [ "$docker" = "rw" ]; then
-    echo "aic: Docker socket write access ENABLED (POST/BUILD on) — the agent can create/build containers on the host daemon."
-  fi
+  case "$docker" in
+    ro) echo "aic: Docker daemon READ access ENABLED — host Docker APIs may expose container metadata, logs, and files." ;;
+    rw) echo "aic: Docker daemon READ-WRITE access ENABLED — the agent can create/build containers on the host daemon." ;;
+  esac
   [ -f .devcontainer/docker-compose.override.yml ] && \
     echo "aic: wired existing docker-compose.override.yml into dockerComposeFile"
   if [ "$mode" = "pull" ]; then
@@ -776,7 +1070,11 @@ check_dockerfile_project_base () {
 
 cmd_sync () {
   require_in_project
-  local mode="" tools="" shell="" bump_base="" docker=""
+  local mode="" tools="" shell="" bump_base="" docker="" docker_explicit=0 was_legacy=0
+  # A missing top-level name is the only legacy form. A present but tampered
+  # name is simply overwritten from the trusted template; never resolve it as
+  # the old basename-scoped identity.
+  compose_has_project_name || was_legacy=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --pull)  mode="pull" ;;
@@ -786,19 +1084,46 @@ cmd_sync () {
       --shell) shift; shell="${1:-}" ;;
       --shell=*) shell="${1#--shell=}" ;;
       --bump-base) bump_base="1" ;;
-      --docker) docker="rw" ;;
-      --no-docker) docker="ro" ;;
-      *) die "unknown sync flag: $1 (try --pull, --build, --bump-base, --docker, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
+      --docker-read) docker="ro"; docker_explicit=1 ;;
+      --docker) docker="rw"; docker_explicit=1 ;;
+      --no-docker) docker="none"; docker_explicit=1 ;;
+      *) die "unknown sync flag: $1 (try --pull, --build, --bump-base, --docker-read, --docker, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
     esac
     shift
   done
 
-  # Preserve the project's Docker socket write mode across syncs (the compose
-  # file is regenerated wholesale) unless --docker / --no-docker overrides it.
+  # Preserve the project's Docker daemon exposure mode across syncs (the
+  # compose file is regenerated wholesale) unless an explicit mode overrides it.
   # Read it from the CURRENT compose before apply_template overwrites the file.
   if [ -z "$docker" ]; then
     docker="$(read_compose_docker_mode)"
-    [ -n "$docker" ] || docker="$DEFAULT_DOCKER"
+    case "$docker" in
+      none|ro|rw) ;;
+      invalid) err "existing Docker proxy toggles are inconsistent; resetting them to the secure 'none' mode"; docker="$DEFAULT_DOCKER" ;;
+      *) docker="$DEFAULT_DOCKER" ;;
+    esac
+  fi
+
+  # The repository-encoded mode is not authority by itself. Releases before
+  # host-side consent existed also exposed Docker object reads in every project,
+  # even when the user never asked for them. Reset any unconsented inherited
+  # mode to `none` instead of reproducing it and making the next startup stop
+  # for approval; an explicit flag below records fresh consent.
+  if [ "$docker_explicit" = "0" ]; then
+    case "$docker" in
+      ro)
+        if ! docker_consent_matches ro; then
+          err "existing Docker read access has no matching host consent; resetting to 'none' (re-enable with 'aic sync --docker-read')"
+          docker="none"
+        fi
+        ;;
+      rw)
+        if ! docker_consent_matches rw; then
+          err "existing Docker read-write access has no matching host consent; resetting to 'none' (re-enable with 'aic sync --docker')"
+          docker="none"
+        fi
+        ;;
+    esac
   fi
 
   # Auto-detect: presence of .devcontainer/Dockerfile means the project was
@@ -827,12 +1152,31 @@ cmd_sync () {
   fi
   shell="$(validate_shell "$shell")"
 
+  resolve_docker_socket >/dev/null || die "cannot sync aicontainer with the selected Docker context"
   apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer" "$docker"
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
-  echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell, docker: $docker)"
-  if [ "$docker" = "rw" ]; then
-    echo "aic: Docker socket write access ENABLED (POST/BUILD on) — the agent can create/build containers on the host daemon."
+  # None is also a revocation: clear stale outside-repo read/write consent even
+  # when a plain sync repaired malformed toggles back to the secure default.
+  if [ "$docker_explicit" != "0" ] || [ "$docker" = "none" ]; then
+    set_docker_consent "$docker"
   fi
+  # A legacy project-name migration also changes the implicit per-project
+  # sessions volume. Copy it while Docker is available; otherwise first up /
+  # VS Code initialize performs the same zero-data-loss migration.
+  if [ "$was_legacy" = "1" ]; then
+    migrate_legacy_session_volume defer
+  fi
+  echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell, docker: $docker)"
+  case "$docker" in
+    ro)
+      echo "aic: Docker daemon READ access encoded — host Docker APIs may expose container metadata, logs, and files."
+      docker_consent_matches ro || err "Docker read mode needs explicit host consent: re-run 'aic sync --docker-read'"
+      ;;
+    rw)
+      echo "aic: Docker daemon READ-WRITE access encoded — the agent can create/build containers on the host daemon."
+      docker_consent_matches rw || err "Docker write mode needs explicit host consent: re-run 'aic sync --docker'"
+      ;;
+  esac
   echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
   echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, post-create.project.sh, docker-compose.override.yml, vscode-extensions, vscode-settings.json) are untouched"
   if [ -f .devcontainer/docker-compose.override.yml ]; then
@@ -855,9 +1199,10 @@ cmd_sync () {
 # `sudo aic-firewall status` is one of the three scoped-sudo scripts, so this
 # read is allowed; when enabled the OUTPUT chain shows `policy DROP`.
 firewall_live_state () {
-  local project cid devcontainer out
+  local project template cid devcontainer out
   project="$(project_name)"
-  cid="$(docker compose -p "$project" -f .devcontainer/docker-compose.yml ps -q devcontainer 2>/dev/null)" || { echo unknown; return; }
+  template="$(trusted_compose_template)"
+  cid="$(docker compose -p "$project" -f "$template" ps -q devcontainer 2>/dev/null)" || { echo unknown; return; }
   [ -n "$cid" ] || { echo unknown; return; }
   [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] || { echo unknown; return; }
   devcontainer="$(resolve_devcontainer 2>/dev/null)" || { echo unknown; return; }
@@ -941,6 +1286,931 @@ scan_project_overrides () {
   return 0
 }
 
+# Resolve and validate every host-facing configuration layer before Docker is
+# allowed to create containers. The raw grep scan above remains a useful early
+# warning (including for an override that has not been synced/wired yet), but it
+# is not a security boundary: YAML merging, interpolation, relative paths, and
+# service replacement are judged from `docker compose config --format json`.
+
+trust_state_dir () {
+  printf '%s/aicontainer/trust\n' "${XDG_STATE_HOME:-$HOME/.local/state}"
+}
+
+trust_state_file () {
+  printf '%s/%s.sha256\n' "$(trust_state_dir)" "$(expected_project_name)"
+}
+
+docker_consent_file () {
+  printf '%s/aicontainer/docker-write/%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}" "$(expected_project_name)"
+}
+
+set_docker_consent () {
+  local mode="$1" file dir tmp
+  file="$(docker_consent_file)"; dir="$(dirname "$file")"
+  if [ "$mode" = "ro" ] || [ "$mode" = "rw" ]; then
+    mkdir -p "$dir" || die "could not create Docker-consent state directory: $dir"
+    chmod 700 "$dir" 2>/dev/null || true
+    tmp="$(mktemp "$dir/.consent.XXXXXX")"
+    printf '%s\n' "$mode" > "$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$file"
+  else
+    rm -f "$file"
+  fi
+}
+
+docker_consent_matches () {
+  local mode="$1" file value=""
+  [ "$mode" = "ro" ] || [ "$mode" = "rw" ] || return 1
+  file="$(docker_consent_file)"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  IFS= read -r value < "$file" || return 1
+  # Backward-compatible with the previous write-only consent marker.
+  [ "$value" != "enabled" ] || value="rw"
+  [ "$value" = "$mode" ]
+}
+
+hash_validation_inputs () {
+  local final_json="$1"
+  node -e '
+    const crypto = require("crypto"), fs = require("fs"), path = require("path");
+    const h = crypto.createHash("sha256");
+    const resolved = process.argv[1];
+    h.update("<resolved-compose>\0");
+    if (fs.existsSync(resolved)) h.update(fs.readFileSync(resolved));
+    h.update("\0<devcontainer-tree>\0");
+    function walk(root, relative = "") {
+      const full = relative ? path.join(root, relative) : root;
+      const stat = fs.lstatSync(full);
+      const kind = stat.isDirectory() ? "d" : stat.isFile() ? "f" : stat.isSymbolicLink() ? "l" : "o";
+      h.update(`${kind}:${relative}:${stat.mode & 0o7777}\0`);
+      if (kind === "f") h.update(fs.readFileSync(full));
+      else if (kind === "l") h.update(fs.readlinkSync(full));
+      h.update("\0");
+      if (kind === "d") {
+        for (const name of fs.readdirSync(full).sort()) walk(root, path.join(relative, name));
+      }
+    }
+    if (fs.existsSync(".devcontainer")) walk(".devcontainer");
+    process.stdout.write(h.digest("hex"));
+  ' "$final_json"
+}
+
+store_project_trust () {
+  local hash="$1" dir file tmp
+  dir="$(trust_state_dir)"; file="$(trust_state_file)"
+  mkdir -p "$dir" || die "could not create trust state directory: $dir"
+  chmod 700 "$dir" 2>/dev/null || true
+  tmp="$(mktemp "$dir/.trust.XXXXXX")"
+  printf '%s\n' "$hash" > "$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file"
+}
+
+project_trust_matches () {
+  local hash="$1" file saved=""
+  file="$(trust_state_file)"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  IFS= read -r saved < "$file" || return 1
+  [ "$saved" = "$hash" ]
+}
+
+# Append managed build-mode file provenance failures to $1. These artifacts are
+# copied wholesale by aic and execute as root while the image is built; unlike
+# project-owned Dockerfile.project, hand-editing them is unsupported.
+validate_managed_build_files () {
+  local out="$1" name
+  for name in README.md .gitignore; do
+    if [ ! -f "$TEMPLATE_DIR/$name" ] || ! cmp -s "$TEMPLATE_DIR/$name" ".devcontainer/$name"; then
+      printf 'MANAGED\t.devcontainer/%s differs from the managed template; run aic sync\n' "$name" >> "$out"
+    fi
+  done
+  [ -f .devcontainer/Dockerfile ] || return 0
+  for name in Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-gitconfig .zshrc; do
+    if [ ! -f "$TEMPLATE_DIR/$name" ] || ! cmp -s "$TEMPLATE_DIR/$name" ".devcontainer/$name"; then
+      printf 'MANAGED\t.devcontainer/%s differs from the managed build template; run aic sync\n' "$name" >> "$out"
+    fi
+  done
+  if [ ! -d .devcontainer/hooks ] || ! diff -qr "$TEMPLATE_DIR/hooks" .devcontainer/hooks >/dev/null 2>&1; then
+    printf 'MANAGED\t.devcontainer/hooks differs from the managed build template; run aic sync\n' >> "$out"
+  fi
+}
+
+# Emit MANAGED<TAB>... for an untrustable managed-config violation and
+# UNSAFE<TAB>... for an intentional host-boundary expansion that may be
+# explicitly approved. Node is already a package prerequisite (>=18).
+analyze_resolved_config () {
+  local base_json="$1" expected_json="$2" final_json="$3" noenv_json="$4"
+  local raw_base_json="$5" raw_final_json="$6" out="$7"
+  local has_override=0
+  [ -f .devcontainer/docker-compose.override.yml ] && has_override=1
+  node - \
+    .devcontainer/devcontainer.json "$TEMPLATE_DIR/devcontainer.json" \
+    "$base_json" "$expected_json" "$final_json" "$noenv_json" \
+    "$raw_base_json" "$raw_final_json" "$(pwd -P)" \
+    "$(expected_project_name)" "$has_override" "$(runtime_user_id)" >> "$out" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const [devFile, templateDevFile, baseFile, expectedFile, finalFile, noenvFile,
+  rawBaseFile, rawFinalFile, rootArg, expectedName, hasOverrideRaw, runtimeUser] = process.argv.slice(2);
+const root = fs.realpathSync(rootArg);
+const hasOverride = hasOverrideRaw === '1';
+// Findings include repository-controlled service names, paths, and values.
+// Render terminal controls visibly so validation itself cannot spoof prompts,
+// erase prior output, or plant clickable escape sequences on the host.
+const safeDiagnostic = value => String(value).replace(
+  /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g,
+  char => `\\u${char.codePointAt(0).toString(16).padStart(4, '0')}`,
+);
+const managed = msg => process.stdout.write(`MANAGED\t${safeDiagnostic(msg)}\n`);
+const unsafe = msg => process.stdout.write(`UNSAFE\t${safeDiagnostic(msg)}\n`);
+const volatile = msg => process.stdout.write(`VOLATILE\t${safeDiagnostic(msg)}\n`);
+
+function parseJsonc(file) {
+  const source = fs.readFileSync(file, 'utf8');
+  let out = '', string = false, escape = false;
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i], n = source[i + 1];
+    if (string) {
+      out += c;
+      if (escape) escape = false;
+      else if (c === '\\') escape = true;
+      else if (c === '"') string = false;
+      continue;
+    }
+    if (c === '"') { string = true; out += c; continue; }
+    if (c === '/' && n === '/') {
+      out += '  '; i++;
+      while (i + 1 < source.length && source[i + 1] !== '\n') { out += ' '; i++; }
+      continue;
+    }
+    if (c === '/' && n === '*') {
+      out += '  '; i++;
+      let closed = false;
+      while (i + 1 < source.length) {
+        i++;
+        if (source[i] === '*' && source[i + 1] === '/') { out += '  '; i++; closed = true; break; }
+        out += source[i] === '\n' ? '\n' : ' ';
+      }
+      if (!closed) throw new Error('unterminated block comment');
+      continue;
+    }
+    out += c;
+  }
+  // Remove trailing commas outside strings without touching string content.
+  let clean = '', inString = false; escape = false;
+  for (let i = 0; i < out.length; i++) {
+    const c = out[i];
+    if (inString) {
+      clean += c;
+      if (escape) escape = false;
+      else if (c === '\\') escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; clean += c; continue; }
+    if (c === ',') {
+      let j = i + 1;
+      while (j < out.length && /\s/.test(out[j])) j++;
+      if (out[j] === '}' || out[j] === ']') continue;
+    }
+    clean += c;
+  }
+  return { value: JSON.parse(clean), source };
+}
+
+let actualDev, templateDev;
+try {
+  actualDev = parseJsonc(devFile);
+  templateDev = parseJsonc(templateDevFile);
+} catch (error) {
+  managed(`devcontainer.json is not valid JSONC: ${error.message}`);
+  actualDev = { value: {}, source: '' };
+  templateDev = { value: {}, source: '' };
+}
+
+const dc = actualDev.value;
+const td = templateDev.value;
+if (!dc || Array.isArray(dc) || typeof dc !== 'object') managed('devcontainer.json must be an object');
+const wantedCompose = hasOverride
+  ? ['docker-compose.yml', 'docker-compose.override.yml']
+  : ['docker-compose.yml'];
+if (JSON.stringify(dc.dockerComposeFile) !== JSON.stringify(wantedCompose)) {
+  managed(`dockerComposeFile must be exactly ${JSON.stringify(wantedCompose)}; run aic sync`);
+}
+for (const key of ['service', 'workspaceFolder', 'remoteUser', 'updateRemoteUserUID', 'init', 'overrideCommand', 'initializeCommand', 'postCreateCommand']) {
+  if (JSON.stringify(dc[key]) !== JSON.stringify(td[key])) {
+    managed(`devcontainer.json managed anchor ${key} differs from the template; run aic sync`);
+  }
+}
+for (const key of [
+  'mounts', 'runArgs', 'workspaceMount', 'containerUser',
+  'features', 'overrideFeatureInstallOrder', 'privileged', 'capAdd',
+  'securityOpt', 'build', 'image', 'dockerFile', 'context', 'remoteEnv',
+  'onCreateCommand', 'updateContentCommand', 'postStartCommand',
+  'postAttachCommand', 'userEnvProbe', 'appPort',
+]) {
+  if (Object.prototype.hasOwnProperty.call(dc, key)) {
+    managed(`devcontainer.json must not define unmanaged ${key}; run aic sync and use a documented project-owned extension point`);
+  }
+}
+if (!actualDev.source.includes('aic:vscode-extensions') || !actualDev.source.includes('aic:vscode-settings')) {
+  managed('devcontainer.json is missing managed VS Code merge anchors; run aic sync');
+}
+const actualEnv = dc.containerEnv || {}, templateEnv = td.containerEnv || {};
+for (const [key, value] of Object.entries(templateEnv)) {
+  if (actualEnv[key] !== value) managed(`containerEnv.${key} differs from the managed template; run aic sync`);
+}
+if (!/^(claude-code|codex|opencode)(,(claude-code|codex|opencode))*$/.test(actualEnv.AIC_TOOLS || '')) {
+  managed('containerEnv.AIC_TOOLS is missing or invalid; run aic sync');
+}
+if (!['zsh', 'bash', 'fish'].includes(actualEnv.AIC_SHELL)) {
+  managed('containerEnv.AIC_SHELL is missing or invalid; run aic sync');
+}
+const allowedContainerEnv = new Set([...Object.keys(templateEnv), 'AIC_TOOLS', 'AIC_SHELL']);
+for (const key of Object.keys(actualEnv)) {
+  if (!allowedContainerEnv.has(key)) {
+    managed(`devcontainer.json contains unmanaged containerEnv.${key}; move project environment to docker-compose.override.yml and run aic sync`);
+  }
+}
+
+let base, expected, final, noenv, rawBase, rawFinal;
+try {
+  base = JSON.parse(fs.readFileSync(baseFile, 'utf8'));
+  expected = JSON.parse(fs.readFileSync(expectedFile, 'utf8'));
+  final = JSON.parse(fs.readFileSync(finalFile, 'utf8'));
+  noenv = JSON.parse(fs.readFileSync(noenvFile, 'utf8'));
+  rawBase = JSON.parse(fs.readFileSync(rawBaseFile, 'utf8'));
+  rawFinal = JSON.parse(fs.readFileSync(rawFinalFile, 'utf8'));
+} catch (error) {
+  managed(`could not parse resolved Compose configuration: ${error.message}`);
+  process.exit(0);
+}
+if (base.name !== expectedName || final.name !== expectedName) {
+  managed(`resolved Compose name must be ${expectedName}; run aic sync`);
+}
+
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
+  }
+  return value;
+}
+const equal = (a, b) => JSON.stringify(stable(a)) === JSON.stringify(stable(b));
+const clone = value => JSON.parse(JSON.stringify(value));
+
+// Compose interpolation is host input. Without this check an untrusted
+// override could turn `TOKEN: ${HOST_TOKEN}` (or a build arg/path equivalent)
+// into a secret bridge from the host shell to the unrestricted container.
+// `--no-interpolate` preserves the expression without resolving its value;
+// comparing against the managed base keeps the template's fixed HOME/socket/TZ
+// expressions valid. An even-length dollar run (`$${VAR}`) is an escaped
+// literal and deliberately remains frictionless.
+function activeInterpolations(value) {
+  if (typeof value !== 'string') return [];
+  const names = [], pattern = /(\$+)(?:\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|([A-Za-z_][A-Za-z0-9_]*))/g;
+  for (const match of value.matchAll(pattern)) {
+    if (match[1].length % 2 === 1) names.push(match[2] || match[3]);
+  }
+  return names;
+}
+function inspectInterpolation(value, baseline, parts = []) {
+  if (typeof value === 'string') {
+    const names = activeInterpolations(value);
+    if (names.length && value !== baseline) {
+      const location = parts.length ? parts.join('.') : '<root>';
+      unsafe(`override uses host environment interpolation at ${location} (${[...new Set(names)].join(', ')})`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => inspectInterpolation(
+      entry, Array.isArray(baseline) ? baseline[index] : undefined, [...parts, String(index)]));
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) {
+      const prior = baseline && typeof baseline === 'object' ? baseline[key] : undefined;
+      inspectInterpolation(entry, prior, [...parts, key]);
+    }
+  }
+}
+function inspectPassThroughMap(value, baseline, parts) {
+  if (Array.isArray(value)) {
+    const prior = new Set(Array.isArray(baseline) ? baseline : []);
+    for (const entry of value) {
+      if (typeof entry === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(entry) && !prior.has(entry)) {
+        unsafe(`override forwards host environment variable at ${parts.join('.')} (${entry})`);
+      }
+    }
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) {
+      const prior = baseline && typeof baseline === 'object' ? baseline[key] : undefined;
+      if (entry === null && prior !== null) {
+        unsafe(`override forwards host environment variable at ${[...parts, key].join('.')} (${key})`);
+      }
+    }
+  }
+}
+function inspectHostPassThrough(model, baseline) {
+  for (const [serviceName, service] of Object.entries(model.services || {})) {
+    const prior = (baseline.services || {})[serviceName] || {};
+    inspectPassThroughMap(service.environment, prior.environment, ['services', serviceName, 'environment']);
+    if (service.build) {
+      inspectPassThroughMap(service.build.args, (prior.build || {}).args, ['services', serviceName, 'build', 'args']);
+    }
+  }
+}
+if (hasOverride) {
+  inspectInterpolation(rawFinal, rawBase);
+  inspectHostPassThrough(rawFinal, rawBase);
+}
+
+const canonical = value => {
+  try { return fs.realpathSync(value); } catch (_) { return path.resolve(value); }
+};
+const managedProjectSources = new Map([
+  ['/workspace', root],
+  ['/workspace/.devcontainer', path.join(root, '.devcontainer')],
+  ['/workspace/.git/config', path.join(root, '.git', 'config')],
+  ['/workspace/.git/hooks', path.join(root, '.git', 'hooks')],
+]);
+
+function normalizeManaged(model, actual) {
+  const m = clone(model);
+  m.name = '<managed-project>';
+  if (actual && String(m['x-aic-runtime-user'] || '') !== runtimeUser) {
+    managed(`managed runtime user must be ${runtimeUser} on this host; run aic sync`);
+  }
+  if (Object.prototype.hasOwnProperty.call(m, 'x-aic-runtime-user')) {
+    m['x-aic-runtime-user'] = '<managed-runtime-user>';
+  }
+  const aicImages = Object.values(m.services || {})
+    .map(service => service && service.image)
+    .filter(image => typeof image === 'string' && /^ghcr\.io\/stefanoginella\/aicontainer:/.test(image));
+  if (actual && aicImages.length > 0 && new Set(aicImages).size !== 1) {
+    managed('all managed aicontainer services must use the same pinned image tag; run aic sync');
+  }
+  if (m['x-aic-image']) {
+    if (actual && !/^ghcr\.io\/stefanoginella\/aicontainer:v[0-9]+\.[0-9]+\.[0-9]+$/.test(m['x-aic-image'])) {
+      managed('managed aicontainer image extension must be a version pin; run aic sync');
+    }
+    m['x-aic-image'] = '<managed-aicontainer-image>';
+  }
+  for (const [networkKey, network] of Object.entries(m.networks || {})) {
+    if (network && typeof network === 'object' && network.name) {
+      if (actual && network.name !== `${expectedName}_${networkKey}`) {
+        managed(`managed network ${networkKey} must remain project-scoped; run aic sync`);
+      }
+      network.name = '<managed-network>';
+    }
+  }
+  for (const volumeName of ['aic-sessions', 'aic-sanitized-seed']) {
+    if (m.volumes && m.volumes[volumeName]) {
+      if (actual && m.volumes[volumeName].name !== `${expectedName}_${volumeName}`) {
+        managed(`managed volume ${volumeName} must remain project-scoped; run aic sync`);
+      }
+      m.volumes[volumeName].name = `<project-volume:${volumeName}>`;
+    }
+  }
+  for (const [serviceName, service] of Object.entries(m.services || {})) {
+    if (service.image && /^ghcr\.io\/stefanoginella\/aicontainer:/.test(service.image)) {
+      if (actual && !/^ghcr\.io\/stefanoginella\/aicontainer:v[0-9]+\.[0-9]+\.[0-9]+$/.test(service.image)) {
+        managed('managed aicontainer service image must be a version pin; run aic sync');
+      }
+      service.image = '<managed-aicontainer-image>';
+    }
+    if (service.build && service.build.context) {
+      if (actual && canonical(service.build.context) !== canonical(path.join(root, '.devcontainer'))) {
+        managed(`managed service ${serviceName} build context escaped .devcontainer; run aic sync`);
+      }
+      service.build.context = '<managed-build-context>';
+    }
+  }
+  const dev = m.services && m.services.devcontainer;
+  if (dev) {
+    if (dev.image) {
+      // Normalized above together with any managed helper using the same image.
+    }
+    for (const volume of dev.volumes || []) {
+      if (managedProjectSources.has(volume.target)) {
+        if (actual && (volume.type !== 'bind' || canonical(volume.source) !== canonical(managedProjectSources.get(volume.target)))) {
+          managed(`managed mount source for ${volume.target} escaped this project; run aic sync`);
+        }
+        volume.source = `<managed-source:${volume.target}>`;
+      }
+    }
+  }
+  const proxy = m.services && m.services['socket-proxy'];
+  if (proxy && proxy.environment) {
+    const readKeys = ['CONTAINERS', 'EVENTS', 'IMAGES', 'INFO', 'NETWORKS', 'VOLUMES'];
+    const readValues = readKeys.map(key => String(proxy.environment[key]));
+    const post = String(proxy.environment.POST), build = String(proxy.environment.BUILD);
+    const coherentReads = readValues.every(value => value === '0') || readValues.every(value => value === '1');
+    const coherentWrites = ['0', '1'].includes(post) && build === post;
+    const writesWithoutReads = post === '1' && !readValues.every(value => value === '1');
+    if (actual && (!coherentReads || !coherentWrites || writesWithoutReads)) {
+      managed('socket-proxy Docker read/write toggles must encode one managed none/read/read-write mode; run aic sync');
+    }
+    for (const key of readKeys) proxy.environment[key] = '<managed-docker-read-mode>';
+    proxy.environment.POST = '<managed-docker-mode>';
+    proxy.environment.BUILD = '<managed-docker-mode>';
+  }
+  const authSync = m.services && m.services['aic-auth-sync'];
+  if (authSync) {
+    if (actual && String(authSync.user || '') !== runtimeUser) {
+      managed(`managed aic-auth-sync user must be ${runtimeUser} on this host; run aic sync`);
+    }
+    authSync.user = '<managed-runtime-user>';
+  }
+  return m;
+}
+
+if (!equal(normalizeManaged(base, true), normalizeManaged(expected, false))) {
+  managed('docker-compose.yml does not match the managed template invariants; run aic sync');
+}
+const dockerEnvironment = (((base.services || {})['socket-proxy'] || {}).environment || {});
+const dockerReadKeys = ['CONTAINERS', 'EVENTS', 'IMAGES', 'INFO', 'NETWORKS', 'VOLUMES'];
+const dockerReads = dockerReadKeys.every(key => String(dockerEnvironment[key]) === '1');
+const dockerWrites = String(dockerEnvironment.POST) === '1' && String(dockerEnvironment.BUILD) === '1';
+if (dockerWrites) {
+  process.stdout.write('DOCKER\tmanaged Docker daemon read-write mode is enabled (object reads plus POST/BUILD)\n');
+} else if (dockerReads) {
+  process.stdout.write('DOCKER\tmanaged Docker daemon read mode is enabled (host object metadata/log/file read APIs)\n');
+}
+
+const baseServices = base.services || {}, services = final.services || {};
+if (!services.devcontainer || !services['socket-proxy'] || !services['aic-auth-sync']) {
+  managed('resolved Compose config must contain devcontainer, aic-auth-sync, and socket-proxy services');
+  process.exit(0);
+}
+
+for (const reserved of ['socket-proxy', 'aic-seed-sanitizer', 'aic-auth-sync', 'seed-sanitizer']) {
+  if (baseServices[reserved] && !equal(services[reserved], baseServices[reserved])) {
+    unsafe(`override changes the reserved ${reserved} service (image, command, mounts, environment, networks, or hardening)`);
+  }
+}
+for (const networkName of Object.keys((baseServices['socket-proxy'] || {}).networks || {})) {
+  if (!equal((final.networks || {})[networkName], (base.networks || {})[networkName])) {
+    unsafe(`override changes the reserved socket-proxy network ${networkName}`);
+  }
+}
+for (const volumeName of ['aic-auth-global', 'aic-shell-history', 'aic-sessions', 'aic-sanitized-seed']) {
+  if (!equal((final.volumes || {})[volumeName], (base.volumes || {})[volumeName])) {
+    unsafe(`override changes reserved volume definition ${volumeName}`);
+  }
+}
+
+function realpathLoose(input) {
+  let current = path.resolve(input), suffix = [];
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    suffix.unshift(path.basename(current)); current = parent;
+  }
+  try { current = fs.realpathSync(current); } catch (_) { current = path.resolve(current); }
+  return path.resolve(current, ...suffix);
+}
+const withinRoot = input => {
+  const resolved = realpathLoose(input);
+  return resolved === root || resolved.startsWith(root + path.sep);
+};
+const volumeKey = v => JSON.stringify([v.type || 'volume', v.source || '', v.target || '', !!v.read_only]);
+const baselineMounts = new Map();
+for (const [serviceName, service] of Object.entries(baseServices)) {
+  baselineMounts.set(serviceName, new Set((service.volumes || []).map(volumeKey)));
+}
+const protectedVolumes = new Set(['aic-auth-global', 'aic-shell-history', 'aic-sessions', 'aic-sanitized-seed']);
+const protectedPhysicalVolumes = new Set(
+  ['aic-auth-global', 'aic-shell-history', ...Object.values(base.volumes || {}).map(v => v && v.name).filter(Boolean)]
+);
+const targetWithin = (target, prefix) => {
+  const normalized = path.posix.normalize(String(target || ''));
+  return normalized === prefix || normalized.startsWith(prefix + '/');
+};
+const isProtectedManagedTarget = target => {
+  const normalized = path.posix.normalize(String(target || ''));
+  return targetWithin(normalized, '/run') || targetWithin(normalized, '/etc') ||
+    targetWithin(normalized, '/usr') || targetWithin(normalized, '/bin') ||
+    targetWithin(normalized, '/sbin') || targetWithin(normalized, '/lib') ||
+    targetWithin(normalized, '/lib64') || targetWithin(normalized, '/opt') ||
+    targetWithin(normalized, '/workspace/.devcontainer') || targetWithin(normalized, '/workspace/.git');
+};
+const isApprovedDevcontainerDataTarget = target => {
+  const normalized = path.posix.normalize(String(target || ''));
+  if (targetWithin(normalized, '/workspace/.devcontainer') || targetWithin(normalized, '/workspace/.git')) return false;
+  return targetWithin(normalized, '/workspace') || targetWithin(normalized, '/home/vscode/.cache');
+};
+
+// Compose environment outranks devcontainer.json/image ENV. Preserve the
+// root-managed tool homes, shell/Git startup, pre-policy dynamic loader, and
+// Docker proxy endpoint unless the host explicitly reviews the expansion.
+const protectedEnvironment = new Map(Object.entries(actualEnv));
+protectedEnvironment.set('DOCKER_HOST', String((baseServices.devcontainer.environment || {}).DOCKER_HOST || ''));
+protectedEnvironment.set('HOME', '/home/vscode');
+protectedEnvironment.set('ZDOTDIR', '/etc/aic/shell/zsh');
+protectedEnvironment.set('CODEX_HOME', '/home/vscode/.codex');
+protectedEnvironment.set('OPENCODE_CONFIG_DIR', '/home/vscode/.config/opencode');
+protectedEnvironment.set('OPENCODE_DATA_DIR', '/home/vscode/.local/share/opencode');
+const alwaysProtectedEnvironment = new Set([
+  'PATH', 'BASH_ENV', 'ENV',
+  'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH',
+  'OPENCODE_CONFIG',
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME',
+  'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH',
+]);
+const finalDevEnvironment = services.devcontainer.environment || {};
+for (const [key, value] of Object.entries(finalDevEnvironment)) {
+  const expected = protectedEnvironment.get(key);
+  const protectedKey = protectedEnvironment.has(key) || alwaysProtectedEnvironment.has(key) || /^GIT_CONFIG_/.test(key);
+  if (protectedKey && (expected === undefined || String(value) !== String(expected))) {
+    unsafe(`service devcontainer: environment ${key} overrides a managed startup or isolation boundary`);
+  }
+}
+
+for (const [volumeName, spec] of Object.entries(final.volumes || {})) {
+  if (protectedVolumes.has(volumeName) && (base.volumes || {})[volumeName]) continue; // exact definitions checked above
+  const generatedName = `${expectedName}_${volumeName}`;
+  if (spec && (spec.external || (spec.name && spec.name !== generatedName) || (spec.driver && spec.driver !== 'local') || Object.keys(spec.driver_opts || {}).length)) {
+    unsafe(`volume ${volumeName} uses an external/custom name, driver, or driver_opts and may alias a host path or protected volume`);
+  }
+  if (spec && protectedPhysicalVolumes.has(spec.name)) {
+    unsafe(`volume ${volumeName} aliases protected physical volume ${spec.name}`);
+  }
+}
+
+for (const [networkName, spec] of Object.entries(final.networks || {})) {
+  if ((base.networks || {})[networkName] && equal(spec, base.networks[networkName])) continue;
+  const generatedName = `${expectedName}_${networkName}`;
+  if (spec && (spec.external || (spec.name && spec.name !== generatedName) || (spec.driver && spec.driver !== 'bridge') || Object.keys(spec.driver_opts || {}).length)) {
+    unsafe(`network ${networkName} uses an external/custom name, driver, or driver_opts`);
+  }
+}
+
+for (const [serviceName, service] of Object.entries(services)) {
+  if (service.privileged === true) unsafe(`service ${serviceName}: privileged: true — full host device access`);
+  if (baseServices[serviceName] && !equal(service.user, baseServices[serviceName].user)) {
+    unsafe(`service ${serviceName}: changes the managed runtime user to ${service.user || '<image default>'}`);
+  }
+  if (baseServices[serviceName] && !equal(service.group_add || [], baseServices[serviceName].group_add || [])) {
+    unsafe(`service ${serviceName}: group_add may grant access to host devices or the Docker socket`);
+  }
+  const allowedCaps = new Set((baseServices[serviceName] || {}).cap_add || []);
+  for (const cap of service.cap_add || []) {
+    if (!allowedCaps.has(cap)) unsafe(`service ${serviceName}: cap_add includes ${cap}`);
+  }
+  if (baseServices[serviceName] && !equal(service.cap_drop || [], baseServices[serviceName].cap_drop || [])) {
+    unsafe(`service ${serviceName}: cap_drop changes the managed capability boundary`);
+  }
+  for (const key of ['network_mode', 'pid', 'ipc', 'uts', 'userns_mode', 'cgroup']) {
+    const value = String(service[key] || '').toLowerCase();
+    if (value === 'host' || value.startsWith('container:') || value.startsWith('service:')) {
+      unsafe(`service ${serviceName}: ${key}: ${service[key]} shares another container or host namespace`);
+    }
+  }
+  if ((service.security_opt || []).length && !equal(service.security_opt, (baseServices[serviceName] || {}).security_opt || [])) {
+    unsafe(`service ${serviceName}: security_opt changes container isolation`);
+  }
+  if ((service.devices || []).length || (service.device_cgroup_rules || []).length) {
+    unsafe(`service ${serviceName}: maps or grants access to host devices`);
+  }
+  if ((service.volumes_from || []).length) unsafe(`service ${serviceName}: volumes_from can inherit protected host mounts`);
+  if (service.runtime && service.runtime !== (baseServices[serviceName] || {}).runtime) unsafe(`service ${serviceName}: selects host runtime ${service.runtime}`);
+  if (service.provider) unsafe(`service ${serviceName}: provider executes an external Compose provider on the host`);
+  if (service.use_api_socket) unsafe(`service ${serviceName}: use_api_socket exposes the host Docker API`);
+  if (service.gpus || (service.models && Object.keys(service.models).length)) unsafe(`service ${serviceName}: requests GPUs/CDI/model runner host devices`);
+  if (serviceName === 'devcontainer' && baseServices.devcontainer) {
+    for (const key of ['command', 'entrypoint', 'healthcheck']) {
+      if (!equal(service[key], baseServices.devcontainer[key])) {
+        unsafe(`service devcontainer: changes managed ${key}, which can execute or bypass setup before post-create hardening`);
+      }
+    }
+    for (const [dependency, condition] of Object.entries(baseServices.devcontainer.depends_on || {})) {
+      if (!equal((service.depends_on || {})[dependency], condition)) {
+        unsafe(`service devcontainer: changes managed dependency ${dependency}, bypassing setup readiness`);
+      }
+    }
+  }
+  for (const port of service.ports || []) {
+    const hostIp = String(port.host_ip || '');
+    if (!['127.0.0.1', '::1'].includes(hostIp)) {
+      unsafe(`service ${serviceName}: publishes port ${port.published || port.target} beyond host loopback`);
+    }
+  }
+
+  for (const volume of service.volumes || []) {
+    const serviceBaseline = baselineMounts.get(serviceName) || new Set();
+    if (serviceBaseline.has(volumeKey(volume))) continue;
+    if (baseServices[serviceName] && isProtectedManagedTarget(volume.target)) {
+      unsafe(`service ${serviceName}: added mount masks protected managed path ${volume.target}`);
+    } else if (serviceName === 'devcontainer' && !isApprovedDevcontainerDataTarget(volume.target)) {
+      unsafe(`service devcontainer: added mount target is outside approved project data paths: ${volume.target}`);
+    }
+    if (volume.type === 'bind') {
+      const source = realpathLoose(volume.source || '');
+      if (!withinRoot(source)) {
+        if (/\/(var\/)?run\/docker\.sock$/.test(source)) unsafe(`service ${serviceName}: mounts the Docker socket — full host daemon control`);
+        else unsafe(`service ${serviceName}: binds a sensitive host path outside the project: ${source}`);
+      } else if (!volume.read_only && (
+        source === root || source === path.join(root, '.devcontainer') || source.startsWith(path.join(root, '.devcontainer') + path.sep) ||
+        source === path.join(root, '.git') || source.startsWith(path.join(root, '.git') + path.sep)
+      )) {
+        unsafe(`service ${serviceName}: writable bind exposes protected project control paths: ${source}`);
+      }
+    } else if (volume.type !== 'volume') {
+      unsafe(`service ${serviceName}: uses host-facing mount type ${volume.type || 'unknown'}`);
+    }
+    if (protectedVolumes.has(volume.source) && !serviceBaseline.has(volumeKey(volume))) {
+      unsafe(`service ${serviceName}: remounts protected volume ${volume.source}`);
+    }
+  }
+
+  const build = service.build;
+  if (build) {
+    if (build.context && !withinRoot(build.context)) unsafe(`service ${serviceName}: build context is outside the project: ${build.context}`);
+    const dockerfile = build.dockerfile && path.resolve(build.context || root, build.dockerfile);
+    if (dockerfile && !withinRoot(dockerfile)) unsafe(`service ${serviceName}: Dockerfile is outside the project: ${dockerfile}`);
+    for (const [key, context] of Object.entries(build.additional_contexts || {})) {
+      if (typeof context === 'string' && !context.includes('://') && !context.startsWith('docker-image://') && !withinRoot(context)) {
+        unsafe(`service ${serviceName}: additional build context ${key} is outside the project: ${context}`);
+      }
+    }
+    if (build.ssh || build.secrets || build.privileged || (build.entitlements || []).length || build.network === 'host') {
+      unsafe(`service ${serviceName}: build forwards host access (ssh/secrets/privileged/entitlements/host network)`);
+    }
+  }
+
+  const baselineTmpfs = new Set((baseServices[serviceName] || {}).tmpfs || []);
+  for (const entry of service.tmpfs || []) {
+    if (baselineTmpfs.has(entry)) continue;
+    const target = String(entry).split(':', 1)[0];
+    if (baseServices[serviceName] && isProtectedManagedTarget(target)) {
+      unsafe(`service ${serviceName}: tmpfs masks protected managed path ${target}`);
+    } else if (serviceName === 'devcontainer' && !isApprovedDevcontainerDataTarget(target)) {
+      unsafe(`service devcontainer: tmpfs target is outside approved project data paths: ${target}`);
+    }
+  }
+  for (const kind of ['configs', 'secrets']) {
+    const baselineRefs = new Set(((baseServices[serviceName] || {})[kind] || []).map(value => JSON.stringify(stable(value))));
+    for (const ref of service[kind] || []) {
+      if (baselineRefs.has(JSON.stringify(stable(ref)))) continue;
+      const target = typeof ref === 'string' ? '' : ref.target;
+      if (baseServices[serviceName] && isProtectedManagedTarget(target)) {
+        unsafe(`service ${serviceName}: ${kind} mount masks protected managed path ${target}`);
+      } else if (serviceName === 'devcontainer' && !isApprovedDevcontainerDataTarget(target)) {
+        unsafe(`service devcontainer: ${kind} target is outside approved project data paths: ${target || '<default>'}`);
+      }
+    }
+  }
+}
+
+// The managed writable workspace mount is safe only because control-plane
+// paths are over-mounted read-only in the devcontainer service.
+const protectedTargets = ['/workspace/.devcontainer', '/workspace/.git/config', '/workspace/.git/hooks'];
+for (const target of protectedTargets) {
+  const baseline = (baseServices.devcontainer.volumes || []).find(v => v.target === target && v.read_only);
+  const current = (services.devcontainer.volumes || []).find(v => baseline && volumeKey(v) === volumeKey(baseline));
+  if (!current) unsafe(`devcontainer override removes managed read-only protection for ${target}`);
+}
+
+for (const [serviceName, service] of Object.entries(noenv.services || {})) {
+  for (const entry of service.env_file || []) {
+    const file = typeof entry === 'string' ? entry : entry && entry.path;
+    if (file && !withinRoot(file)) unsafe(`service ${serviceName}: env_file reads host secrets outside the project: ${file}`);
+  }
+  for (const entry of service.label_file || []) {
+    const file = typeof entry === 'string' ? entry : entry && entry.path;
+    if (file && !withinRoot(file)) unsafe(`service ${serviceName}: label_file reads a host file outside the project: ${file}`);
+  }
+  if (service.credential_spec && service.credential_spec.file) {
+    unsafe(`service ${serviceName}: credential_spec.file reads host credentials: ${service.credential_spec.file}`);
+  }
+  for (const watch of (((service.develop || {}).watch) || [])) {
+    if (watch.path && !withinRoot(watch.path)) unsafe(`service ${serviceName}: develop.watch path is outside the project: ${watch.path}`);
+  }
+  if (service.extends) unsafe(`service ${serviceName}: extends imports additional Compose configuration`);
+}
+if (noenv.include) unsafe('Compose include imports additional configuration outside the managed file list');
+
+// Compose normalizes include/extends away in some versions; retain a
+// conservative source-level check so those host-read indirections cannot hide.
+for (const file of ['.devcontainer/docker-compose.yml', '.devcontainer/docker-compose.override.yml']) {
+  if (!fs.existsSync(file)) continue;
+  const source = fs.readFileSync(file, 'utf8');
+  if (/^\s*include\s*:/m.test(source)) unsafe(`${file}: include imports additional Compose files`);
+  if (/^\s*extends\s*:/m.test(source)) unsafe(`${file}: extends imports additional Compose files`);
+}
+
+for (const kind of ['configs', 'secrets']) {
+  for (const [name, spec] of Object.entries(final[kind] || {})) {
+    if (spec && spec.file && !withinRoot(spec.file)) unsafe(`${kind}.${name} reads a host file outside the project: ${spec.file}`);
+    if (spec && (spec.external || spec.name || spec.environment)) {
+      unsafe(`${kind}.${name} references external/custom host-managed data`);
+    }
+  }
+}
+
+const baseDev = baseServices.devcontainer || {}, finalDev = services.devcontainer || {};
+if (!finalDev.build && finalDev.image !== baseDev.image) {
+  unsafe(`devcontainer image changed from the managed aicontainer image to ${finalDev.image || '<none>'}`);
+}
+if (finalDev.build && !equal(finalDev.build, baseDev.build)) {
+  unsafe('devcontainer override build executes a project-owned Dockerfile as root and can replace sandbox helpers/policy');
+  const context = finalDev.build.context || root;
+  const managedTree = realpathLoose(path.join(root, '.devcontainer'));
+  const resolvedContext = realpathLoose(context);
+  if (resolvedContext !== managedTree && !resolvedContext.startsWith(managedTree + path.sep)) {
+    volatile('project-owned root build context extends outside .devcontainer, so persistent trust cannot cover every build input; use --allow-unsafe per run');
+  }
+  const dockerfile = finalDev.build.dockerfile && path.resolve(context, finalDev.build.dockerfile);
+  if (!dockerfile || !fs.existsSync(dockerfile)) {
+    unsafe('devcontainer override build does not point to a reviewable Dockerfile inside the project');
+  } else {
+    const fromLines = fs.readFileSync(dockerfile, 'utf8').split(/\r?\n/).filter(line => /^\s*FROM\s+/i.test(line));
+    const last = fromLines[fromLines.length - 1] || '';
+    if (!/^\s*FROM\s+(?:--platform=\S+\s+)?(?:ghcr\.io\/stefanoginella\/aicontainer|aicontainer-base)(?::|@|\s|$)/i.test(last)) {
+      unsafe('Dockerfile.project: final FROM is not the aicontainer base — sandbox hardening may be absent');
+    }
+  }
+}
+NODE
+}
+
+# mode=gate: fail closed unless exact config is trusted or --allow-unsafe was
+# supplied. mode=warn: print findings for VS Code's legacy check-drift wiring,
+# but never abort startup. mode=trust: explicitly store approval for this exact
+# resolved configuration after confirmation. mode=validate: apply the same
+# managed/resolved gate non-interactively; an existing exact trust record is
+# honored, but the command never prompts or writes trust state.
+validate_project_security () {
+  local mode="${1:-gate}" allow_once="${2:-0}"
+  local base_json expected_json final_json noenv_json raw_base_json raw_final_json
+  local findings managed unsafe volatile docker_unsafe docker_mode hash expected_compose
+  base_json="$(mktemp "${TMPDIR:-/tmp}/aic-base.XXXXXX")"
+  expected_json="$(mktemp "${TMPDIR:-/tmp}/aic-expected.XXXXXX")"
+  final_json="$(mktemp "${TMPDIR:-/tmp}/aic-final.XXXXXX")"
+  noenv_json="$(mktemp "${TMPDIR:-/tmp}/aic-noenv.XXXXXX")"
+  raw_base_json="$(mktemp "${TMPDIR:-/tmp}/aic-raw-base.XXXXXX")"
+  raw_final_json="$(mktemp "${TMPDIR:-/tmp}/aic-raw-final.XXXXXX")"
+  findings="$(mktemp "${TMPDIR:-/tmp}/aic-findings.XXXXXX")"
+
+  if ! export_runtime_environment; then
+    printf 'MANAGED\t%s\n' 'could not resolve a bind-mountable local Docker socket from the selected context' >> "$findings"
+    AIC_DOCKER_SOCKET=/var/run/docker.sock
+    export AIC_DOCKER_SOCKET
+  elif ! validate_runtime_environment_file; then
+    printf 'MANAGED\t%s\n' '.devcontainer/.env does not match this host Docker context; run aic sync or aic initialize' >> "$findings"
+  fi
+  validate_managed_build_files "$findings"
+  if [ -f .devcontainer/Dockerfile ]; then
+    expected_compose="$TEMPLATE_DIR/docker-compose.build.yml"
+  else
+    expected_compose="$TEMPLATE_DIR/docker-compose.pull.yml"
+  fi
+
+  if ! docker compose -f .devcontainer/docker-compose.yml config --format json > "$base_json" 2>/dev/null; then
+    printf 'MANAGED\t%s\n' 'docker-compose.yml could not be resolved; run docker compose config for details' >> "$findings"
+  fi
+  if ! docker compose -f "$expected_compose" config --format json > "$expected_json" 2>/dev/null; then
+    printf 'MANAGED\tinstalled aic Compose template could not be resolved; reinstall aic\n' >> "$findings"
+  fi
+  if [ -f .devcontainer/docker-compose.override.yml ]; then
+    if ! docker compose -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.override.yml config --format json > "$final_json" 2>/dev/null; then
+      printf 'MANAGED\tmanaged + override Compose configuration could not be resolved\n' >> "$findings"
+    fi
+    if ! docker compose -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.override.yml \
+        config --format json --no-env-resolution > "$noenv_json" 2>/dev/null; then
+      printf 'MANAGED\tCompose configuration could not be inspected without env-file resolution\n' >> "$findings"
+    fi
+    # Resolve a second pair without interpolation only when an override exists.
+    # Normal generated projects pay no extra Compose-process cost.
+    if ! docker compose -f .devcontainer/docker-compose.yml \
+        config --format json --no-env-resolution --no-interpolate > "$raw_base_json" 2>/dev/null; then
+      printf 'MANAGED\tmanaged Compose interpolation model could not be inspected\n' >> "$findings"
+    fi
+    if ! docker compose -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.override.yml \
+        config --format json --no-env-resolution --no-interpolate > "$raw_final_json" 2>/dev/null; then
+      printf 'MANAGED\tmerged Compose interpolation model could not be inspected\n' >> "$findings"
+    fi
+  else
+    cp "$base_json" "$final_json"
+    if ! docker compose -f .devcontainer/docker-compose.yml config --format json --no-env-resolution > "$noenv_json" 2>/dev/null; then
+      printf 'MANAGED\tCompose configuration could not be inspected without env-file resolution\n' >> "$findings"
+    fi
+    printf '{}\n' > "$raw_base_json"
+    printf '{}\n' > "$raw_final_json"
+  fi
+
+  if [ -s "$base_json" ] && [ -s "$expected_json" ] && [ -s "$final_json" ] \
+     && [ -s "$noenv_json" ] && [ -s "$raw_base_json" ] && [ -s "$raw_final_json" ]; then
+    analyze_resolved_config "$base_json" "$expected_json" "$final_json" "$noenv_json" \
+      "$raw_base_json" "$raw_final_json" "$findings"
+  fi
+
+  managed="$(grep '^MANAGED' "$findings" 2>/dev/null || true)"
+  unsafe="$(grep '^UNSAFE' "$findings" 2>/dev/null || true)"
+  volatile="$(grep '^VOLATILE' "$findings" 2>/dev/null || true)"
+  docker_unsafe="$(grep '^DOCKER' "$findings" 2>/dev/null || true)"
+  docker_mode="$(read_compose_docker_mode)"
+  if [ -n "$docker_unsafe" ] && ! docker_consent_matches "$docker_mode"; then
+    unsafe="${unsafe}${unsafe:+
+}${docker_unsafe}"
+  fi
+  hash="$(hash_validation_inputs "$final_json")"
+  rm -f "$base_json" "$expected_json" "$final_json" "$noenv_json" \
+    "$raw_base_json" "$raw_final_json"
+
+  if [ -n "$managed" ]; then
+    printf 'aic: managed devcontainer validation failed:\n' >&2
+    printf '%s\n' "$managed" | sed 's/^MANAGED[[:space:]]*/  ! /' >&2
+    rm -f "$findings"
+    [ "$mode" = "warn" ] && return 1
+    [ "$mode" = "validate" ] && die "configuration is invalid (run 'aic sync', then review the diff)"
+    die "refusing to start unverified managed configuration (run 'aic sync', then review the diff)"
+  fi
+
+  if [ -z "$unsafe" ] && [ -z "$volatile" ]; then
+    rm -f "$findings"
+    if [ "$mode" = "trust" ]; then
+      echo "aic: no unsafe host-boundary expansions found; no trust exception is needed."
+    fi
+    return 0
+  fi
+
+  printf 'aic: resolved project configuration requests extra host access:\n' >&2
+  printf '%s\n%s\n' "$unsafe" "$volatile" | sed -e '/^$/d' -e 's/^UNSAFE[[:space:]]*/  ! /' \
+    -e 's/^DOCKER[[:space:]]*/  ! /' -e 's/^VOLATILE[[:space:]]*/  ! /' >&2
+  rm -f "$findings"
+
+  if [ "$mode" = "warn" ]; then
+    return 1
+  fi
+  if [ -z "$volatile" ] && { [ "$mode" = "gate" ] || [ "$mode" = "validate" ]; } && project_trust_matches "$hash"; then
+    return 0
+  fi
+  if [ "$mode" = "validate" ]; then
+    [ -z "$volatile" ] || die "configuration includes an unbounded build context; use --allow-unsafe on each up/rebuild after reviewing it"
+    die "unsafe configuration is not trusted; review it, then run 'aic trust' interactively"
+  fi
+  # Internal hand-off for `aic up/rebuild --allow-unsafe`: initializeCommand is
+  # a child process and revalidates the exact same config before Compose starts.
+  # A hash (not a boolean) prevents the repository changing configuration in
+  # between the two checks and inheriting the one-run exception.
+  if [ "$mode" = "gate" ] && [ "${AIC_UNSAFE_ONCE_HASH:-}" = "$hash" ]; then
+    return 0
+  fi
+  if [ "$allow_once" = "1" ]; then
+    export AIC_UNSAFE_ONCE_HASH="$hash"
+    echo "aic: proceeding once because --allow-unsafe was explicitly supplied." >&2
+    return 0
+  fi
+
+  if [ "$mode" = "trust" ] && [ -n "$volatile" ]; then
+    die "persistent trust is unavailable for build contexts outside .devcontainer; use --allow-unsafe per run"
+  fi
+  if [ "$mode" = "trust" ] || [ -t 0 ]; then
+    local reply
+    printf "aic: trust this exact configuration%s? [y/N] " "$([ "$mode" = "trust" ] && printf '' || printf ' and continue')" >&2
+    IFS= read -r reply || reply=""
+    case "$reply" in
+      y|Y|yes|YES)
+        if [ -n "$volatile" ]; then
+          echo "aic: proceeding once; persistent trust is unavailable for this build context."
+        else
+          store_project_trust "$hash"
+          echo "aic: trusted this exact configuration; any relevant change invalidates the approval."
+        fi
+        return 0
+        ;;
+      *) die "aborted — configuration was not trusted" ;;
+    esac
+  fi
+  die "unsafe configuration is not trusted; run 'aic trust' interactively or pass --allow-unsafe for one run"
+}
+
+cmd_trust () {
+  require_in_project
+  local revoke=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --revoke) revoke=1 ;;
+      *) die "unknown trust flag: $1 (try --revoke)" ;;
+    esac
+    shift
+  done
+  if [ "$revoke" = "1" ]; then
+    rm -f "$(trust_state_file)"
+    echo "aic: revoked this project's host-access trust."
+    return 0
+  fi
+  [ -t 0 ] || die "'aic trust' requires an interactive confirmation"
+  validate_project_security trust 0
+}
+
 # Print the trust boundary for the current project: what the agent can read,
 # write, and reach. Folded into `aic up` (mode=up always reports network OPEN,
 # since a freshly (re)created container never has the opt-in firewall applied)
@@ -963,15 +2233,15 @@ print_boundary_summary () {
 
   printf "  %sFilesystem%s\n" "$b" "$rst"
   printf "    rw   /workspace                               your project (the only writable host path)\n"
-  printf "    ro   ~/.gitconfig ~/.p10k.zsh ~/.zshrc.local    shell look-and-feel\n"
-  printf "    ro   ~/.claude/settings.json ~/.codex/config.toml ~/.config/opencode/opencode.json   AI-config seeds (allowlisted)\n"
+  printf "    ro   /host-seed/*.json                        root-sanitized, allowlisted preferences\n"
   printf "    ro   .devcontainer/ .git/config .git/hooks     AI cannot rewrite its own sandbox\n"
-  printf "    %s--   host home, ~/.ssh, host credentials: NOT mounted%s\n" "$dim" "$rst"
+  printf "    %s--   raw host config, host home, ~/.ssh, host credentials: NOT mounted%s\n" "$dim" "$rst"
 
   printf "\n  %sSecrets%s\n" "$b" "$rst"
   printf "    .env* reads/writes blocked by the PreToolUse hook (fires even in bypass mode)\n"
   printf "    %syour project's own .env still lives in /workspace: the hook gates the agent, not the file%s\n" "$dim" "$rst"
-  printf "    git credentials: none forwarded (you auth fresh inside); ~/.gitconfig.local is root-locked\n"
+  printf "    tool login: only four validated JSON credential files cross projects via a networkless sidecar\n"
+  printf "    git credentials: none forwarded (you auth fresh inside); global Git config is root-owned under /etc\n"
 
   # Commit signing: the host signing key is never forwarded, so signing only
   # works here via a sandbox key set up with `aic signing`. Surface the state
@@ -992,21 +2262,30 @@ print_boundary_summary () {
 
   printf "\n  %sSessions%s\n" "$b" "$rst"
   if docker volume inspect "${project}_aic-sessions" >/dev/null 2>&1; then
-    printf "    transcripts -> volume %s_aic-sessions  (survives rebuild; cleared only by 'aic destroy')\n" "$project"
+    printf "    full tool homes -> volume %s_aic-sessions  (project-only; survives rebuild)\n" "$project"
   else
-    printf "    transcripts -> volume %s_aic-sessions  (created on first 'aic up'; survives rebuild)\n" "$project"
+    printf "    full tool homes -> volume %s_aic-sessions  (created on first 'aic up')\n" "$project"
   fi
+  printf "    shared globally: tool login JSON, gh/npm auth, signing key, shell history\n"
 
   printf "\n  %sDocker daemon%s\n" "$b" "$rst"
   case "$(read_compose_docker_mode)" in
     rw)
-      printf "    %s! read-WRITE socket-proxy%s: the agent can create/build containers on the HOST\n" "$r" "$rst"
+      printf "    %s! READ-WRITE socket-proxy%s: the agent can create/build containers on the HOST\n" "$r" "$rst"
       printf "      daemon (a container-escape vector, and sibling containers dodge the firewall).\n"
-      printf "    %sre-pin read-only with: aic sync --no-docker && aic rebuild%s\n" "$dim" "$rst"
+      printf "    %sreduce to reads: aic sync --docker-read; disable: aic sync --no-docker%s\n" "$dim" "$rst"
+      ;;
+    ro)
+      printf "    %s! READ socket-proxy%s: host Docker APIs can expose containers' metadata, logs, and files\n" "$y" "$rst"
+      printf "      to the agent; it cannot create or build containers.\n"
+      printf "    %sdisable with: aic sync --no-docker && aic rebuild%s\n" "$dim" "$rst"
+      ;;
+    none)
+      printf "    object APIs disabled: ping/version only; host containers/images/volumes are hidden\n"
+      printf "    %senable only if needed: --docker-read (inspect) or --docker (read-write)%s\n" "$dim" "$rst"
       ;;
     *)
-      printf "    read-only socket-proxy: inspect/list only; cannot create or build containers\n"
-      printf "    %senable writes only if you need them: aic sync --docker && aic rebuild%s\n" "$dim" "$rst"
+      printf "    %s! invalid managed proxy toggle set — run 'aic sync --no-docker'%s\n" "$r" "$rst"
       ;;
   esac
 
@@ -1060,9 +2339,9 @@ print_boundary_summary () {
 # `status` reports the current state. Mutating actions run as `vscode` inside
 # the running container (so the key lands with correct owner + 0600 perms), so
 # they need the container up; `status` reads the volume directly and works
-# anytime. Because the wiring lives in the root-locked ~/.gitconfig.local (only
-# regenerated at create time), a mode change takes effect on the next rebuild —
-# no live edit, hence no privileged unlock primitive to abuse.
+# anytime. Because the wiring is compiled into the root-owned global config
+# only at create time, a mode change takes effect on the next rebuild — no live
+# edit, hence no privileged unlock primitive to abuse.
 # ---------------------------------------------------------------------------
 
 # Read the persisted signing state from the aic-auth-global volume without
@@ -1070,7 +2349,14 @@ print_boundary_summary () {
 # "mode=<m> key=<0|1>"; always succeeds.
 signing_state () {
   docker volume inspect aic-auth-global >/dev/null 2>&1 || { printf "mode= key=0"; return; }
-  docker run --rm -v aic-auth-global:/v busybox sh -c \
+  if ! docker_volume_metadata_is_safe aic-auth-global; then
+    err "refusing to inspect aic-auth-global: managed volumes must use Docker's local driver with no driver options"
+    printf "mode= key=0"
+    return
+  fi
+  docker run --rm --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true -v aic-auth-global:/v:ro \
+    busybox@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d sh -c \
     'printf "mode=%s key=%s" "$(cat /v/signing/mode 2>/dev/null)" "$(test -f /v/signing/id_ed25519 && echo 1 || echo 0)"' \
     2>/dev/null || printf "mode= key=0"
 }
@@ -1078,9 +2364,10 @@ signing_state () {
 # True when this project's devcontainer is up (mutating signing actions exec
 # into it). Mirrors firewall_live_state's running-container probe.
 signing_container_running () {
-  local project cid
+  local project template cid
   project="$(project_name)"
-  cid="$(docker compose -p "$project" -f .devcontainer/docker-compose.yml ps -q devcontainer 2>/dev/null)" || return 1
+  template="$(trusted_compose_template)"
+  cid="$(docker compose -p "$project" -f "$template" ps -q devcontainer 2>/dev/null)" || return 1
   [ -n "$cid" ] || return 1
   [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ]
 }
@@ -1248,6 +2535,10 @@ cmd_signing () {
   fi
 
   # Mutating actions run inside the container (as vscode) — needs it up.
+  # devcontainer exec consumes the repository configuration, so gate it before
+  # the running-container probe or any key operation.
+  write_runtime_environment_file
+  validate_project_security gate 0
   if ! signing_container_running; then
     die "container not running — run 'aic up' first, then 'aic signing $action'"
   fi
@@ -1259,20 +2550,400 @@ cmd_signing () {
   esac
 }
 
+# Copy the legacy basename-scoped transcript volume into the new path-hashed
+# volume exactly once. The source stays intact because another same-basename
+# checkout may have shared it under the historical naming scheme. The helper
+# image is digest-pinned and runs without network, with only the narrow file
+# ownership capabilities required by the copy; it is the same bootstrap image
+# used by the managed initializeCommand.
+
+# A Compose declaration cannot make a pre-created physical Docker volume safe:
+# the same name may already point at a local-driver bind mount (or a volume
+# plugin). Inspect the daemon object itself before any fixed helper mounts or
+# chowns it. Only ordinary local volumes with no driver options are accepted.
+docker_volume_metadata_is_safe () {
+  local name="$1" metadata
+  metadata="$(docker volume inspect --format '{{json .}}' "$name" 2>/dev/null)" || return 1
+  node -e '
+    let volume;
+    try { volume = JSON.parse(process.argv[1]); } catch (_) { process.exit(2); }
+    const options = volume && volume.Options;
+    const emptyOptions = options == null ||
+      (typeof options === "object" && !Array.isArray(options) && Object.keys(options).length === 0);
+    if (!volume || volume.Driver !== "local" || !emptyOptions) process.exit(1);
+  ' "$metadata" >/dev/null 2>&1
+}
+
+assert_safe_docker_volume () {
+  local name="$1"
+  docker volume inspect "$name" >/dev/null 2>&1 || \
+    die "managed Docker volume is missing or cannot be inspected: $name"
+  docker_volume_metadata_is_safe "$name" || \
+    die "refusing unsafe managed volume '$name' (requires Driver=local with no driver options)"
+}
+
+assert_safe_docker_volume_if_present () {
+  local name="$1"
+  docker volume inspect "$name" >/dev/null 2>&1 || return 0
+  assert_safe_docker_volume "$name"
+}
+
+ensure_safe_docker_volume () {
+  local name="$1"
+  docker volume create "$name" >/dev/null || die "could not create managed Docker volume: $name"
+  assert_safe_docker_volume "$name"
+}
+
+# Basename-scoped projects could collide historically, so the old volume name
+# alone is never ownership evidence. Require a container whose inspected labels
+# identify this exact canonical workspace and legacy Compose project, and whose
+# actual mount table attaches this exact volume at one of the two session-root
+# paths used by aicontainer. Docker filters narrow the candidates; the explicit
+# inspect comparison is the security check.
+legacy_session_volume_owned_by_workspace () {
+  local old_vol="$1" legacy="$2" workspace candidates users cid inspected proved=0
+  workspace="$(pwd -P)"
+  candidates="$(docker ps -aq \
+    --filter "label=devcontainer.local_folder=$workspace" \
+    --filter "label=com.docker.compose.project=$legacy" 2>/dev/null)" || return 1
+  [ -n "$candidates" ] || return 1
+
+  while IFS= read -r cid; do
+    [ -n "$cid" ] || continue
+    inspected="$(docker inspect --format '{{json .}}' "$cid" 2>/dev/null)" || continue
+    if node -e '
+      let container;
+      try { container = JSON.parse(process.argv[1]); } catch (_) { process.exit(2); }
+      const labels = container && container.Config && container.Config.Labels;
+      const mounts = container && container.Mounts;
+      const destinations = new Set([
+        "/home/vscode/.claude-sessions",
+        "/home/vscode/.aic-sessions",
+      ]);
+      const owned = labels &&
+        labels["devcontainer.local_folder"] === process.argv[2] &&
+        labels["com.docker.compose.project"] === process.argv[3] &&
+        Array.isArray(mounts) && mounts.some((mount) =>
+          mount && mount.Type === "volume" &&
+          mount.Name === process.argv[4] && destinations.has(mount.Destination));
+      if (!owned) process.exit(1);
+    ' "$inspected" "$workspace" "$legacy" "$old_vol" >/dev/null 2>&1; then
+      proved=1
+      break
+    fi
+  done <<< "$candidates"
+  [ "$proved" = "1" ] || return 1
+
+  # If a second checkout still has this basename-colliding volume attached,
+  # even the exact container above cannot prove the data is workspace-private.
+  # Treat every other label owner as ambiguity; sidecars from the same exact
+  # workspace/project are harmless and may legitimately share the volume.
+  users="$(docker ps -aq --filter "volume=$old_vol" 2>/dev/null)" || return 1
+  [ -n "$users" ] || return 1
+  while IFS= read -r cid; do
+    [ -n "$cid" ] || continue
+    inspected="$(docker inspect --format '{{json .}}' "$cid" 2>/dev/null)" || return 1
+    node -e '
+      let container;
+      try { container = JSON.parse(process.argv[1]); } catch (_) { process.exit(2); }
+      const labels = container && container.Config && container.Config.Labels;
+      const mounts = container && container.Mounts;
+      const usesVolume = Array.isArray(mounts) && mounts.some((mount) =>
+        mount && mount.Type === "volume" && mount.Name === process.argv[4]);
+      if (!usesVolume) process.exit(1);
+      const sameOwner = labels &&
+        labels["devcontainer.local_folder"] === process.argv[2] &&
+        labels["com.docker.compose.project"] === process.argv[3];
+      if (!sameOwner) process.exit(1);
+    ' "$inspected" "$workspace" "$legacy" "$old_vol" >/dev/null 2>&1 || return 1
+  done <<< "$users"
+  return 0
+}
+
+migrate_legacy_session_volume () {
+  local mode="${1:-strict}" legacy expected old_vol new_vol image reply
+  legacy="$(legacy_project_name)"; expected="$(expected_project_name)"
+  [ "$legacy" != "$expected" ] || return 0
+  old_vol="${legacy}_aic-sessions"
+  new_vol="${expected}_aic-sessions"
+  image="busybox@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d"
+
+  if ! docker info >/dev/null 2>&1; then
+    [ "$mode" = "defer" ] && return 0
+    die "Docker is unavailable; cannot check/migrate the legacy sessions volume"
+  fi
+  docker volume inspect "$old_vol" >/dev/null 2>&1 || return 0
+  if docker volume inspect "$new_vol" >/dev/null 2>&1; then
+    assert_safe_docker_volume "$new_vol"
+    return 0
+  fi
+
+  if ! legacy_session_volume_owned_by_workspace "$old_vol" "$legacy"; then
+    err "legacy session volume '$old_vol' cannot be uniquely tied to this workspace."
+    if [ "$mode" = "defer" ]; then
+      err "leaving it untouched; run 'aic up' in an interactive terminal to choose whether to import it."
+      return 0
+    fi
+    if [ ! -t 0 ]; then
+      die "the legacy volume was preserved; run 'aic up' in an interactive terminal to choose import or a fresh isolated session volume"
+    fi
+    printf "aic: import this ambiguous legacy volume into this workspace? [y/N] " >&2
+    IFS= read -r reply || reply=""
+    case "$reply" in
+      y|Y|yes|YES) ;;
+      *)
+        ensure_safe_docker_volume "$new_vol"
+        echo "aic: legacy volume preserved and not imported; this workspace will use a fresh isolated session volume."
+        return 0
+        ;;
+    esac
+  fi
+
+  assert_safe_docker_volume "$old_vol"
+  echo "aic: migrating legacy session transcripts: $old_vol → $new_vol"
+  ensure_safe_docker_volume "$new_vol"
+  if ! docker run --rm --network none --read-only --cap-drop ALL \
+      --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
+      --security-opt no-new-privileges:true \
+      -v "$old_vol:/from:ro" -v "$new_vol:/to" \
+      "$image" sh -c 'cp -a /from/. /to/'; then
+    docker volume rm "$new_vol" >/dev/null 2>&1 || true
+    [ "$mode" = "defer" ] && { err "session migration deferred after the copy failed"; return 0; }
+    die "could not copy the legacy sessions volume; the original remains untouched"
+  fi
+  echo "aic: session migration complete (the legacy source volume was preserved)."
+}
+
+# Host-side volume/bootstrap work shared by `aic up` and direct VS Code starts.
+# Fixed paths only: repository input never becomes a helper command argument.
+prepare_host_seed_paths () {
+  local dir file
+  [ -n "${HOME:-}" ] || die "HOME is not set; cannot prepare host configuration seeds"
+  for dir in "$HOME/.claude" "$HOME/.codex" "$HOME/.config" "$HOME/.config/opencode"; do
+    if [ -e "$dir" ] || [ -L "$dir" ]; then
+      [ -d "$dir" ] || die "host seed parent exists but is not a directory: $dir"
+    else
+      mkdir -p "$dir" || die "could not create host seed parent: $dir"
+    fi
+  done
+  for file in "$HOME/.gitconfig" "$HOME/.claude/settings.json" \
+    "$HOME/.codex/config.toml" "$HOME/.config/opencode/opencode.json"; do
+    if [ -e "$file" ] || [ -L "$file" ]; then
+      [ -f "$file" ] || die "host seed path exists but is not a regular file: $file"
+    else
+      touch "$file" || die "could not create host seed file: $file"
+    fi
+  done
+}
+
+initialize_managed_volumes () {
+  local project sessions seed image identity uid gid
+  project="$(project_name)"
+  sessions="${project}_aic-sessions"
+  seed="${project}_aic-sanitized-seed"
+  image="busybox@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d"
+  identity="$(runtime_user_id)"; uid="${identity%%:*}"; gid="${identity##*:}"
+
+  ensure_safe_docker_volume aic-auth-global
+  ensure_safe_docker_volume aic-shell-history
+  ensure_safe_docker_volume "$sessions"
+  # Compose creates this per-project output volume when absent. If it was
+  # pre-created, validate its physical backing before the root sanitizer gets
+  # a chance to write through it.
+  assert_safe_docker_volume_if_present "$seed"
+
+  # Only exact credential directories remain global. Whole Claude/Codex/
+  # OpenCode homes now live in the per-project sessions volume; a networkless
+  # sidecar reconciles four validated credential files between the two. Create
+  # the volume.subpath roots before Compose resolves them, and align ownership
+  # with Dev Containers' host-UID mapping.
+  if ! docker run --rm --network none --read-only --cap-drop ALL \
+    --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges:true \
+    -e AIC_UID="$uid" -e AIC_GID="$gid" \
+    -v aic-auth-global:/v -v aic-shell-history:/history "$image" sh -c '
+      set -eu
+      ensure_dir() {
+        p=$1
+        if [ -L "$p" ] || { [ -e "$p" ] && [ ! -d "$p" ]; }; then rm -rf "$p"; fi
+        mkdir -p "$p"
+        chmod 0700 "$p"
+      }
+      for p in /v/claude /v/codex /v/opencode /v/gh /v/npm /v/signing /v/semgrep /history
+      do
+        ensure_dir "$p"
+      done
+      chown -h -R "$AIC_UID:$AIC_GID" \
+        /v/claude /v/codex /v/opencode /v/gh /v/npm /v/signing /v/semgrep /history
+    '; then
+    die "could not prepare managed auth-volume subpaths"
+  fi
+
+  # Transparently migrate the old ~/.claude-sessions layout inside the same
+  # physical per-project volume. A clean destination is renamed atomically;
+  # after a partial prior migration, copy only missing entries and preserve the
+  # legacy source so recovery never destroys the sole copy.
+  if ! docker run --rm --network none --read-only --cap-drop ALL \
+    --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges:true \
+    -e AIC_UID="$uid" -e AIC_GID="$gid" -v "$sessions:/v" "$image" sh -c '
+      set -eu
+      ensure_dir() {
+        p=$1
+        if [ -L "$p" ] || { [ -e "$p" ] && [ ! -d "$p" ]; }; then rm -rf "$p"; fi
+        mkdir -p "$p"
+        chmod 0700 "$p"
+      }
+      migrate() {
+        src=$1; dst=$2
+        [ -e "$src" ] || [ -L "$src" ] || return 0
+        # Never follow an agent-planted link while this fixed root helper owns
+        # the volume. A link is not valid session data in either layout.
+        if [ -L "$src" ]; then rm -f "$src"; return 0; fi
+        mkdir -p "$(dirname "$dst")"
+        if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
+          mv "$src" "$dst"
+        elif [ -d "$src" ] && [ -d "$dst" ] && [ ! -L "$dst" ]; then
+          cp -a -n "$src"/. "$dst"/ 2>/dev/null || true
+        fi
+      }
+
+      migrate /v/claude-projects       /v/tool-homes/claude/projects
+      migrate /v/claude-history.jsonl  /v/tool-homes/claude/history.jsonl
+      migrate /v/claude-settings.json  /v/tool-homes/claude/settings.json
+      migrate /v/claude-memory.md       /v/tool-homes/claude/CLAUDE.md
+      migrate /v/claude-skills          /v/tool-homes/claude/skills
+      migrate /v/claude-agents          /v/tool-homes/claude/agents
+      migrate /v/claude-commands        /v/tool-homes/claude/commands
+      migrate /v/claude-plugins         /v/tool-homes/claude/plugins
+
+      migrate /v/codex-sessions         /v/tool-homes/codex/sessions
+      migrate /v/codex-history.jsonl    /v/tool-homes/codex/history.jsonl
+      migrate /v/codex-config.toml       /v/tool-homes/codex/config.toml
+      migrate /v/codex-memory.md        /v/tool-homes/codex/AGENTS.md
+      migrate /v/codex-skills           /v/tool-homes/codex/skills
+      migrate /v/codex-rules            /v/tool-homes/codex/rules
+      migrate /v/codex-prompts          /v/tool-homes/codex/prompts
+      migrate /v/codex-plugins          /v/tool-homes/codex/plugins
+
+      migrate /v/opencode               /v/tool-homes/opencode-data
+      migrate /v/opencode-storage       /v/tool-homes/opencode-data/storage
+      migrate /v/opencode-snapshot      /v/tool-homes/opencode-data/snapshot
+
+      for p in \
+        /v/tool-homes /v/tool-homes/claude /v/tool-homes/codex \
+        /v/tool-homes/opencode-config /v/tool-homes/opencode-data
+      do
+        ensure_dir "$p"
+      done
+      chown -h -R "$AIC_UID:$AIC_GID" /v
+    '; then
+    die "could not migrate/prepare the per-project tool homes"
+  fi
+
+  # The sanitizer is a one-shot service. Remove its exited container so every
+  # create re-runs it and refreshes allowlisted host preferences.
+  docker compose -p "$project" -f "$(trusted_compose_template)" rm -sf aic-seed-sanitizer >/dev/null 2>&1 || true
+}
+
+# After sync, an old devcontainer stack may still be running under the legacy
+# name. `compose down` acts on the whole project, so one owned devcontainer is
+# insufficient evidence: inspect every legacy-project container. At least one
+# must carry this exact canonical workspace label; only fixed aic sidecars may
+# omit it (Dev Containers labels the primary service, not necessarily Compose
+# dependencies). A different owner, unknown unlabeled service, or unreadable
+# container preserves the stack rather than risking collateral damage to
+# another same-basename checkout. Never use --remove-orphans here: those are
+# precisely the services the trusted managed template cannot attribute.
+stop_owned_legacy_stack () {
+  local legacy expected workspace containers cid inspected template proved=0
+  legacy="$(legacy_project_name)"; expected="$(expected_project_name)"
+  [ "$legacy" != "$expected" ] || return 0
+  workspace="$(pwd -P)"
+  if ! containers="$(docker ps -aq \
+      --filter "label=com.docker.compose.project=$legacy" 2>/dev/null)"; then
+    err "could not verify ownership of legacy Compose stack '$legacy'; preserving it."
+    return 0
+  fi
+  [ -n "$containers" ] || return 0
+
+  while IFS= read -r cid; do
+    [ -n "$cid" ] || continue
+    if ! inspected="$(docker inspect --format '{{json .}}' "$cid" 2>/dev/null)"; then
+      err "legacy Compose stack '$legacy' has an unreadable container owner; preserving the whole stack."
+      return 0
+    fi
+    if node -e '
+      let container;
+      try { container = JSON.parse(process.argv[1]); } catch (_) { process.exit(2); }
+      const labels = container && container.Config && container.Config.Labels;
+      const owned = labels &&
+        labels["devcontainer.local_folder"] === process.argv[2] &&
+        labels["com.docker.compose.project"] === process.argv[3];
+      if (!owned) process.exit(1);
+    ' "$inspected" "$workspace" "$legacy" >/dev/null 2>&1; then
+      proved=1
+      continue
+    fi
+    if node -e '
+      let container;
+      try { container = JSON.parse(process.argv[1]); } catch (_) { process.exit(2); }
+      const labels = container && container.Config && container.Config.Labels;
+      const allowed = new Set(["socket-proxy", "aic-auth-sync", "aic-seed-sanitizer"]);
+      const auxiliary = labels &&
+        labels["com.docker.compose.project"] === process.argv[2] &&
+        !labels["devcontainer.local_folder"] &&
+        allowed.has(labels["com.docker.compose.service"]);
+      if (!auxiliary) process.exit(1);
+    ' "$inspected" "$legacy" >/dev/null 2>&1; then
+      continue
+    fi
+    err "legacy Compose stack '$legacy' includes a container not provably owned by this exact workspace; preserving the whole stack."
+    return 0
+  done <<< "$containers"
+  if [ "$proved" != "1" ]; then
+    err "legacy Compose stack '$legacy' has no container proving ownership by this workspace; preserving the whole stack."
+    return 0
+  fi
+
+  echo "aic: stopping this workspace's legacy Compose stack '$legacy' (current managed name: '$expected')"
+  template="$(trusted_compose_template)"
+  docker compose -p "$legacy" -f "$template" down \
+    || err "could not stop legacy stack '$legacy'; continuing with the isolated project name"
+}
+
 cmd_up () {
   require_in_project
-  # Scan project-owned override / Dockerfile.project for host-access grants
-  # BEFORE bringing the stack up — they're honored on `up` and ride along in
-  # an untrusted repo. On a TTY this prompts and can abort.
-  scan_project_overrides gate
+  write_runtime_environment_file
+  local allow_unsafe=0 arg
+  local -a args=()
+  for arg in "$@"; do
+    case "$arg" in
+      --allow-unsafe) allow_unsafe=1 ;;
+      *) args+=("$arg") ;;
+    esac
+  done
+  # Keep the readable raw warning, then enforce structural + resolved-Compose
+  # validation. Ordinary generated projects produce no prompt or extra output.
+  scan_project_overrides warn
+  validate_project_security gate "$allow_unsafe"
+  migrate_legacy_session_volume strict
+  stop_owned_legacy_stack
   local devcontainer; devcontainer="$(resolve_devcontainer)"
-  "$devcontainer" up --workspace-folder . "$@"
+  if [ "${#args[@]}" -gt 0 ]; then
+    "$devcontainer" up --workspace-folder . "${args[@]}"
+  else
+    "$devcontainer" up --workspace-folder .
+  fi
   print_boundary_summary up
   warn_compose_drift
 }
 
 cmd_preflight () {
   require_in_project
+  # Review-only: surface all findings without prompting, persisting trust, or
+  # failing before the boundary summary. `aic validate` is the strict CI gate.
+  validate_project_security warn 0 || true
   print_boundary_summary preflight
 }
 
@@ -1286,17 +2957,55 @@ cmd_preflight () {
 # warn_compose_drift already covers both (empty pin / broken read → return 0).
 # Output lands in VS Code's Dev Containers output channel, not the terminal.
 cmd_check_drift () {
+  # Run path validation in a subshell so the internal entry point can preserve
+  # its always-zero contract while refusing to read any symlinked control file.
+  (validate_devcontainer_paths optional) || return 0
   warn_compose_drift
   # Same host-side entry point surfaces the override scan (print-only) so a
   # VS Code "Reopen/Rebuild in Container" gets it in the Dev Containers output
   # channel. Never prompts, always exits 0 (initializeCommand must not abort).
   scan_project_overrides warn
+  # Reusable full validation, warn-only until every generated template has the
+  # trusted `aic initialize` hook. Never let the legacy check-drift entry point
+  # abort VS Code startup.
+  if [ -z "${AIC_NO_OVERRIDE_SCAN:-}" ]; then
+    validate_project_security warn 0 || true
+  fi
+}
+
+# Internal managed initialize entry point for VS Code / devcontainer CLI. Once
+# the generated initializer is invoked, it applies the same fail-closed gate
+# and migration as `aic up` before Compose starts. Dev Containers necessarily
+# reads the repository command first, so unknown repo-supplied configuration
+# still has to be regenerated/reviewed before a direct editor bootstrap.
+cmd_initialize () {
+  require_in_project
+  # Refresh the host-specific, gitignored socket path before either our own
+  # resolved-Compose validation or the parent Dev Containers process uses it.
+  write_runtime_environment_file
+  validate_project_security gate 0
+  prepare_host_seed_paths
+  migrate_legacy_session_volume strict
+  stop_owned_legacy_stack
+  initialize_managed_volumes
+  warn_compose_drift
 }
 
 cmd_rebuild () {
   require_in_project
-  # Same pre-up scan as `aic up` (rebuild also brings the stack up fresh).
-  scan_project_overrides gate
+  write_runtime_environment_file
+  local allow_unsafe=0 arg
+  local -a args=()
+  for arg in "$@"; do
+    case "$arg" in
+      --allow-unsafe) allow_unsafe=1 ;;
+      *) args+=("$arg") ;;
+    esac
+  done
+  scan_project_overrides warn
+  validate_project_security gate "$allow_unsafe"
+  migrate_legacy_session_volume strict
+  stop_owned_legacy_stack
   # Warn *before* the pull below: `aic rebuild` re-pulls the *currently pinned*
   # tag (it never re-pins), so on post-`npm update` drift this would otherwise
   # silently re-fetch the stale image. Surfacing it here lets the user abort and
@@ -1319,11 +3028,21 @@ cmd_rebuild () {
     fi
   fi
   local devcontainer; devcontainer="$(resolve_devcontainer)"
-  "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache "$@"
+  # Bash 3.2 (still the system Bash on macOS) treats expansion of an empty
+  # array as an unbound variable under `set -u`, even when it was declared.
+  if [ "${#args[@]}" -gt 0 ]; then
+    "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache "${args[@]}"
+  else
+    "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache
+  fi
 }
 
 cmd_shell () {
   require_in_project
+  write_runtime_environment_file
+  # devcontainer exec parses repository control files even for an already-
+  # running container. Revalidate them before handing them to the CLI.
+  validate_project_security gate 0
   warn_compose_drift
   local devcontainer shell
   devcontainer="$(resolve_devcontainer)"
@@ -1332,19 +3051,58 @@ cmd_shell () {
   # baked in pre-flag.
   shell="$(read_aic_shell)"
   [ -n "$shell" ] || shell="$DEFAULT_SHELL"
-  "$devcontainer" exec --workspace-folder . "$shell" -l "$@"
+  shell="$(validate_shell "$shell")"
+  case "$shell" in
+    zsh)
+      "$devcontainer" exec --workspace-folder . zsh -l "$@"
+      ;;
+    bash)
+      # A login bash reads writable ~/.bash_profile before ~/.bashrc. Start
+      # from the root-owned managed rc directly so a prior unrestricted session
+      # cannot plant persistence for the next shell.
+      "$devcontainer" exec --workspace-folder . bash --noprofile --rcfile /etc/aic/shell/bashrc -i "$@"
+      ;;
+    fish)
+      "$devcontainer" exec --workspace-folder . fish --no-config \
+        -C 'source /etc/fish/conf.d/aic.fish' "$@"
+      ;;
+  esac
 }
 
 cmd_run () {
   require_in_project
+  write_runtime_environment_file
+  validate_project_security gate 0
   local devcontainer; devcontainer="$(resolve_devcontainer)"
   "$devcontainer" exec --workspace-folder . "$@"
 }
 
+trusted_compose_template () {
+  if [ -f .devcontainer/Dockerfile ]; then
+    printf '%s/docker-compose.build.yml\n' "$TEMPLATE_DIR"
+  else
+    printf '%s/docker-compose.pull.yml\n' "$TEMPLATE_DIR"
+  fi
+}
+
 cmd_down () {
   require_in_project
-  local project; project="$(project_name)"
-  docker compose -p "$project" -f .devcontainer/docker-compose.yml down
+  local project template
+  if ! compose_has_project_name; then
+    # Pre-migration cleanup is allowed only when Docker labels prove that the
+    # legacy stack belongs to this exact canonical workspace. Never issue a
+    # basename-scoped unconditional `compose down`.
+    stop_owned_legacy_stack
+    err "legacy project identity detected; run 'aic sync' before the next start"
+    return 0
+  fi
+  project="$(project_name)"; template="$(trusted_compose_template)"
+  # Cleanup deliberately parses only aic's installed trusted template. The
+  # repository override may contain Compose providers/includes that execute
+  # host-side code; --remove-orphans still removes every project-labelled
+  # override service without evaluating that untrusted file.
+  stop_owned_legacy_stack
+  docker compose -p "$project" -f "$template" down --remove-orphans
 }
 
 # Best-effort on-disk size of a named volume, e.g. "123.4MB". Echoes "" if the
@@ -1360,7 +3118,7 @@ volume_size () {
 
 cmd_destroy () {
   require_in_project
-  local project assume_yes=0
+  local project template assume_yes=0
   while [ $# -gt 0 ]; do
     case "$1" in
       -y|--yes) assume_yes=1 ;;
@@ -1368,8 +3126,11 @@ cmd_destroy () {
     esac
     shift
   done
+  compose_has_project_name || \
+    die "refusing to destroy a basename-scoped legacy project; run 'aic sync' first"
   project="$(project_name)"
-  local vol="${project}_aic-sessions" size
+  template="$(trusted_compose_template)"
+  local vol="${project}_aic-sessions" seed_vol="${project}_aic-sanitized-seed" size
   size="$(volume_size "$vol")"
 
   echo "aic: 'aic destroy' will remove the container and these PER-PROJECT volumes for '$project':"
@@ -1378,13 +3139,16 @@ cmd_destroy () {
   else
     echo "       $vol  (Claude/Codex/OpenCode session transcripts)"
   fi
+  echo "       $seed_vol  (sanitized host configuration seed)"
   echo "aic: global volumes aic-auth-global and aic-shell-history are PRESERVED."
   echo "aic: this is irreversible. To stop the container but KEEP history, use 'aic down' instead."
 
-  # Confirm interactively (stdin is a TTY). Non-interactive callers (CI, piped)
-  # proceed unprompted, preserving prior behavior; pass --yes to skip the prompt
-  # explicitly. Default answer is No.
-  if [ "$assume_yes" -ne 1 ] && [ -t 0 ]; then
+  # Destructive non-interactive calls must be explicit. A closed stdin / CI
+  # pipeline is never implicit consent to delete persistent transcripts.
+  if [ "$assume_yes" -ne 1 ] && [ ! -t 0 ]; then
+    die "refusing non-interactive destroy without --yes"
+  fi
+  if [ "$assume_yes" -ne 1 ]; then
     local reply
     printf "aic: destroy '%s' and delete the above? [y/N] " "$project"
     IFS= read -r reply || reply=""
@@ -1394,9 +3158,323 @@ cmd_destroy () {
     esac
   fi
 
-  docker compose -p "$project" -f .devcontainer/docker-compose.yml down --volumes --remove-orphans
+  stop_owned_legacy_stack
+  docker compose -p "$project" -f "$template" down --volumes --remove-orphans
   docker volume rm "$vol" 2>/dev/null || true
+  docker volume rm "$seed_vol" 2>/dev/null || true
   echo "aic: destroyed '$project' (container + per-project volumes removed)."
+}
+
+# Normalize the first dotted numeric version in a command's output. Docker and
+# Compose commonly add a leading "v" or a vendor suffix; diagnostics only need
+# the numeric compatibility floor.
+diagnostic_version () {
+  printf '%s\n' "$1" | grep -Eo '[0-9]+(\.[0-9]+){0,2}' | head -n1 || true
+}
+
+version_at_least () {
+  local actual="$1" minimum="$2" i av mv
+  local -a a m
+  IFS=. read -ra a <<< "$actual"
+  IFS=. read -ra m <<< "$minimum"
+  for i in 0 1 2; do
+    av="${a[i]:-0}"; mv="${m[i]:-0}"
+    case "$av:$mv" in *[!0-9:]*|'':*) return 1 ;; esac
+    av=$((10#$av)); mv=$((10#$mv))
+    [ "$av" -gt "$mv" ] && return 0
+    [ "$av" -lt "$mv" ] && return 1
+  done
+  return 0
+}
+
+doctor_ok ()   { printf 'OK    %s\n' "$*"; }
+doctor_warn () {
+  printf 'WARN  %s\n' "$*"
+  doctor_warnings=$((doctor_warnings + 1))
+}
+doctor_fail () {
+  printf 'FAIL  %s\n' "$*"
+  doctor_failures=$((doctor_failures + 1))
+}
+
+# Read-only host diagnostics. This intentionally does not call `initialize` or
+# create a probe volume: minimum versions plus Compose's stdin-only schema
+# parse establish volume.subpath support without changing Docker state.
+cmd_doctor () {
+  [ "$#" -eq 0 ] || die "usage: aic doctor"
+  local doctor_failures=0 doctor_warnings=0 node_raw node_version
+  local context endpoint endpoint_path server_raw server_version
+  local compose_raw compose_version compose_probe devcontainer_path devcontainer_version
+  local git_root path_error identity_error
+
+  printf 'aic doctor\n'
+
+  if ! command -v node >/dev/null 2>&1; then
+    doctor_fail "Node.js 18+ is required — install a current Node.js LTS release"
+  else
+    node_raw="$(node --version 2>/dev/null)" || node_raw=""
+    node_version="$(diagnostic_version "$node_raw")"
+    if [ -n "$node_version" ] && version_at_least "$node_version" 18.0.0; then
+      doctor_ok "Node.js $node_version (minimum 18)"
+    else
+      doctor_fail "Node.js ${node_version:-unknown} is too old — install Node.js 18+"
+    fi
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    doctor_fail "Docker CLI not found — install Docker Engine/Desktop"
+  else
+    context="$(docker context show 2>/dev/null)" || context="${DOCKER_CONTEXT:-default}"
+    [ -n "$context" ] || context="default"
+    endpoint=""
+    if [ -n "${DOCKER_CONTEXT:-}" ]; then
+      endpoint="$(docker context inspect "$DOCKER_CONTEXT" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null)" || endpoint=""
+    elif [ -n "${DOCKER_HOST:-}" ]; then
+      endpoint="$DOCKER_HOST"
+    else
+      endpoint="$(docker context inspect "$context" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null)" || endpoint=""
+    fi
+
+    if docker info >/dev/null 2>&1; then
+      doctor_ok "Docker daemon reachable (context: $context)"
+      server_raw="$(docker version --format '{{.Server.Version}}' 2>/dev/null)" || server_raw=""
+      server_version="$(diagnostic_version "$server_raw")"
+      if [ -n "$server_version" ] && version_at_least "$server_version" 25.0.0; then
+        doctor_ok "Docker Engine $server_version (volume subpath minimum 25)"
+      else
+        doctor_fail "Docker Engine ${server_version:-unknown} lacks required volume subpath support — upgrade to 25+"
+      fi
+    else
+      doctor_fail "Docker daemon is unreachable in context '$context' — start Docker or select a working context"
+    fi
+
+    case "$endpoint" in
+      unix://*)
+        endpoint_path="${endpoint#unix://}"
+        if [ -S "$endpoint_path" ]; then
+          doctor_ok "Docker context socket is available ($endpoint_path)"
+          doctor_ok "managed helpers will bind the selected local socket"
+        else
+          doctor_fail "Docker context socket is missing ($endpoint_path) — fix the selected context"
+        fi
+        ;;
+      '')
+        doctor_warn "could not inspect the Docker context endpoint"
+        [ -S /var/run/docker.sock ] \
+          && doctor_ok "default managed helper socket /var/run/docker.sock is available" \
+          || doctor_fail "no bind-mountable local Docker socket was found"
+        ;;
+      *)
+        doctor_fail "selected Docker context is remote; aicontainer requires a local Unix-socket daemon for workspace and helper mounts"
+        ;;
+    esac
+
+    compose_raw="$(docker compose version --short 2>/dev/null)" || compose_raw=""
+    compose_version="$(diagnostic_version "$compose_raw")"
+    if [ -n "$compose_version" ] && version_at_least "$compose_version" 2.24.0; then
+      doctor_ok "Docker Compose $compose_version (minimum 2.24)"
+    else
+      doctor_fail "Docker Compose ${compose_version:-missing} is too old — install the Compose plugin 2.24+"
+    fi
+    compose_probe="$(docker compose -f - config --format json 2>/dev/null <<'YAML'
+name: aic-doctor
+services:
+  probe:
+    image: busybox
+    volumes:
+      - type: volume
+        source: probe
+        target: /probe
+        volume:
+          subpath: child
+volumes:
+  probe: {}
+YAML
+)" || compose_probe=""
+    if [ -n "$compose_probe" ] && grep -q '"subpath"' <<< "$compose_probe"; then
+      doctor_ok "Compose accepts volume.subpath (no Docker objects created)"
+    else
+      doctor_fail "Compose cannot resolve volume.subpath — upgrade Docker Compose to 2.24+"
+    fi
+  fi
+
+  if [ -x "$AIC_HOME/node_modules/.bin/devcontainer" ]; then
+    devcontainer_path="$AIC_HOME/node_modules/.bin/devcontainer"
+  elif command -v devcontainer >/dev/null 2>&1; then
+    devcontainer_path="$(command -v devcontainer)"
+  else
+    devcontainer_path=""
+  fi
+  if [ -n "$devcontainer_path" ]; then
+    devcontainer_version="$("$devcontainer_path" --version 2>/dev/null | head -n1)" || devcontainer_version="unknown"
+    doctor_ok "Dev Container CLI ${devcontainer_version:-unknown} ($devcontainer_path)"
+  else
+    doctor_fail "Dev Container CLI not found — install with: npm install -g @devcontainers/cli"
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    doctor_fail "Git not found — install Git before creating an aicontainer project"
+  elif git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    git_root="$(cd "$git_root" && pwd -P)"
+    if [ "$git_root" = "$(pwd -P)" ]; then
+      doctor_ok "Git project root is the current directory"
+    else
+      doctor_warn "current directory is below the Git root; run aic from $git_root"
+    fi
+    if [ -d .devcontainer ] && [ ! -d .git ]; then
+      doctor_fail "this checkout does not expose .git as a directory; managed .git/config and hooks mounts require a conventional checkout"
+    fi
+  else
+    doctor_warn "not in a Git project; cd to a project root before 'aic init'"
+  fi
+
+  if [ ! -f "$AIC_HOME/package.json" ] || [ ! -f "$TEMPLATE_DIR/devcontainer.json" ]; then
+    doctor_fail "aic installation is incomplete at $AIC_HOME — reinstall aicontainer"
+  else
+    doctor_ok "aic installation and managed template are present"
+  fi
+
+  if [ ! -e .devcontainer ] && [ ! -L .devcontainer ]; then
+    doctor_warn "this directory is not initialized; run 'aic init' from a Git project root"
+  else
+    path_error="$( (validate_devcontainer_paths optional) 2>&1)" || true
+    if [ -n "$path_error" ]; then
+      path_error="${path_error#aic: }"
+      doctor_fail "managed path safety check failed: $path_error"
+    elif [ ! -f .devcontainer/devcontainer.json ] || [ ! -f .devcontainer/docker-compose.yml ]; then
+      doctor_fail ".devcontainer is incomplete — run 'aic init --force' after reviewing its contents"
+    else
+      doctor_ok "managed control paths are regular files/directories (no symlinks)"
+      if export_runtime_environment >/dev/null 2>&1; then
+        if [ ! -e .devcontainer/.env ]; then
+          doctor_warn ".devcontainer/.env is absent; aic initialize will generate it before startup"
+        elif validate_runtime_environment_file; then
+          doctor_ok "managed Docker socket environment matches the selected context"
+        else
+          doctor_fail ".devcontainer/.env is stale or modified — run 'aic sync' or 'aic initialize'"
+        fi
+      fi
+      if ! compose_has_project_name; then
+        doctor_fail "legacy project identity blocks verified startup — run 'aic sync', then review the diff"
+      elif command -v node >/dev/null 2>&1; then
+        identity_error="$( (project_name >/dev/null) 2>&1)" || true
+        if [ -n "$identity_error" ]; then
+          identity_error="${identity_error#aic: }"
+          doctor_fail "managed project identity is invalid: $identity_error"
+        else
+          doctor_ok "managed project identity matches this canonical path"
+        fi
+      fi
+    fi
+  fi
+
+  if [ "$doctor_failures" -eq 0 ]; then
+    if [ "$doctor_warnings" -gt 0 ]; then
+      printf 'Result: ready with %s warning(s)\n' "$doctor_warnings"
+    else
+      printf 'Result: ready\n'
+    fi
+    return 0
+  fi
+  printf 'Result: %s blocker(s) found\n' "$doctor_failures"
+  return 1
+}
+
+status_volume_state () {
+  local name="$1"
+  if ! docker volume inspect "$name" >/dev/null 2>&1; then
+    printf 'absent'
+  elif docker_volume_metadata_is_safe "$name"; then
+    printf 'present'
+  else
+    printf 'UNSAFE metadata'
+  fi
+}
+
+cmd_status () {
+  [ "$#" -eq 0 ] || die "usage: aic status"
+  require_in_project
+  local project mode tools shell docker_mode consent="n/a" cli_version pinned image_summary
+  local daemon=0 cid="" auth_cid="" runtime_state="unavailable" running_image=""
+  local auth_state sessions_state bridge_state="unknown (Docker unavailable)" bridge_health=""
+  local host_socket="unavailable" runtime_identity
+  project="$(project_name)"
+  mode="pull"; [ -f .devcontainer/Dockerfile ] && mode="build"
+  tools="$(read_aic_tools)"; [ -n "$tools" ] || tools="claude-code,codex,opencode"
+  shell="$(read_aic_shell)"; [ -n "$shell" ] || shell="$DEFAULT_SHELL"
+  runtime_identity="$(runtime_user_id)"
+  if host_socket="$(resolve_docker_socket 2>/dev/null)"; then :; else host_socket="unavailable"; fi
+  docker_mode="$(read_compose_docker_mode)"
+  case "$docker_mode" in
+    none) docker_mode="none (ping/version only)" ;;
+    ro) docker_consent_matches ro && consent="present" || consent="missing"; docker_mode="read-only (consent: $consent)" ;;
+    rw) docker_consent_matches rw && consent="present" || consent="missing"; docker_mode="read-write (consent: $consent)" ;;
+    *) docker_mode="invalid — run aic sync --no-docker" ;;
+  esac
+
+  cli_version="$(read_aic_version)"
+  pinned="$(read_pinned_compose_version)"
+  if [ "$mode" = "build" ]; then
+    image_summary="local build (CLI v$cli_version)"
+  elif [ -z "$pinned" ]; then
+    image_summary="unrecognized pull image (CLI v$cli_version; run aic sync)"
+  elif [ "$pinned" = "$cli_version" ]; then
+    image_summary="pinned v$pinned (matches CLI)"
+  else
+    image_summary="pinned v$pinned (CLI v$cli_version; run aic sync && aic rebuild)"
+  fi
+
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    daemon=1
+    cid="$(docker ps -aq \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter 'label=com.docker.compose.service=devcontainer' 2>/dev/null | head -n1)" || cid=""
+    if [ -n "$cid" ]; then
+      runtime_state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || runtime_state="unknown"
+      running_image="$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null)" || running_image=""
+    else
+      runtime_state="not created"
+    fi
+    auth_cid="$(docker ps -aq \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter 'label=com.docker.compose.service=aic-auth-sync' 2>/dev/null | head -n1)" || auth_cid=""
+    if [ -z "$auth_cid" ]; then
+      bridge_state="not created"
+    else
+      bridge_state="$(docker inspect --format '{{.State.Status}}' "$auth_cid" 2>/dev/null)" || bridge_state="unknown"
+      bridge_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$auth_cid" 2>/dev/null)" || bridge_health=""
+      case "$bridge_health" in
+        healthy) bridge_state="healthy" ;;
+        starting) bridge_state="starting" ;;
+        unhealthy) bridge_state="UNHEALTHY" ;;
+      esac
+    fi
+    auth_state="$(status_volume_state aic-auth-global)"
+    sessions_state="$(status_volume_state "${project}_aic-sessions")"
+  else
+    auth_state="unknown (Docker unavailable)"
+    sessions_state="unknown (Docker unavailable)"
+  fi
+
+  printf 'aic status\n'
+  printf '  project:  %s\n' "$project"
+  printf '  mode:     %s; tools: %s; shell: %s\n' "$mode" "$tools" "$shell"
+  printf '  Docker:   %s\n' "$docker_mode"
+  printf '  host:     socket %s; runtime uid:gid %s\n' "$host_socket" "$runtime_identity"
+  printf '  image:    %s\n' "$image_summary"
+  printf '  runtime:  %s' "$runtime_state"
+  [ -n "$running_image" ] && printf ' (%s)' "$running_image"
+  printf '\n'
+  printf '  auth:     credential bridge %s\n' "$bridge_state"
+  printf '  volumes:  auth %s; project sessions %s\n' "$auth_state" "$sessions_state"
+  [ "$daemon" = "1" ] || printf '  hint:     start Docker to inspect runtime and volume state\n'
+}
+
+cmd_validate () {
+  [ "$#" -eq 0 ] || die "usage: aic validate"
+  require_in_project
+  validate_project_security validate 0
+  echo "aic: configuration valid — managed files and resolved Compose model are accepted."
 }
 
 cmd_upgrade () {
@@ -1422,7 +3500,7 @@ cmd_help () {
 aic — sandboxed devcontainer for running Claude Code + Codex + OpenCode in bypass mode
 
 Usage:
-  aic init [--build] [--force] [--docker] [--with TOOLS] [--shell SHELL]
+  aic init [--build] [--force] [--docker-read|--docker|--no-docker] [--with TOOLS] [--shell SHELL]
                        Copy the aicontainer template into ./.devcontainer/.
                        Default: pull ghcr.io/stefanoginella/aicontainer:vX.Y.Z
                        where X.Y.Z is this aic's own version (pinned, not
@@ -1430,13 +3508,15 @@ Usage:
                        is the upgrade path).
                        --build: full local build from template/Dockerfile (slow
                                 first run, but you own the image).
-                       --docker: enable Docker socket WRITE access (socket-proxy
-                                POST/BUILD). Off by default — with it on, an
-                                in-container agent can create/build containers on
-                                the host daemon (a container-escape vector) and
-                                spawn siblings that dodge the firewall. Turn it on
-                                only for testcontainers / in-container
-                                `docker compose`. `aic sync --no-docker` reverts.
+                       Docker daemon access defaults to NONE (proxy ping/version
+                       only; host containers/images/volumes stay hidden).
+                       --docker-read: enable host Docker read APIs; this may
+                                expose other containers' metadata, logs, and files.
+                       --docker: enable READ-WRITE access (including POST/BUILD).
+                                The agent can create privileged host containers
+                                and siblings that dodge the firewall; use only
+                                for testcontainers / in-container `docker compose`.
+                       --no-docker: return to the secure NONE mode.
                        --with:  comma-separated tools to enable for this project
                                 (claude-code, codex, opencode — any subset).
                                 Defaults to an interactive checkbox prompt; all
@@ -1448,14 +3528,16 @@ Usage:
                                 interactive radio prompt. Stored as
                                 containerEnv.AIC_SHELL; 'aic shell' and the
                                 VS Code default terminal profile honor it.
-  aic sync [--pull|--build] [--bump-base] [--docker|--no-docker] [--with TOOLS] [--shell SHELL]
+  aic sync [--pull|--build] [--bump-base] [--docker-read|--docker|--no-docker] [--with TOOLS] [--shell SHELL]
                        Re-copy the aicontainer template files into an existing
                        ./.devcontainer/, overwriting them. Auto-detects the
                        mode from whether .devcontainer/Dockerfile exists; pass
                        --pull or --build to force one. Existing AIC_TOOLS /
-                       AIC_SHELL selections and the Docker socket write mode are
+                       AIC_SHELL selections and the Docker daemon exposure mode are
                        preserved unless overridden (--with / --shell /
-                       --docker|--no-docker).
+                       --docker-read|--docker|--no-docker). Read/read-write modes
+                       also require matching consent stored outside the repo, so
+                       repository edits cannot grant Docker access themselves.
                        Project-owned files (Dockerfile.project, firewall-
                        allowlist, chown-paths, post-create.project.sh,
                        docker-compose.override.yml, vscode-extensions,
@@ -1474,8 +3556,22 @@ Usage:
                                 sync warns about the drift and offers to bump;
                                 non-interactive syncs just warn. :latest floats
                                 and ARG-templated bases are left alone.)
-  aic up               Pull/build and start the devcontainer for this project
+  aic doctor           Check host prerequisites and project wiring without
+                       creating containers, volumes, trust, or other state.
+  aic status           Show this project's identity, selected tools/shell,
+                       Docker exposure, image drift, runtime, and volume state.
+  aic validate         Non-interactively validate managed files and the fully
+                       resolved Compose model. Existing exact trust is honored;
+                       this command never prompts or records trust.
+  aic up [--allow-unsafe]
+                       Pull/build and start the devcontainer for this project
                        (prints the trust boundary summary when it comes up)
+                       Managed configuration and the fully resolved Compose
+                       model are validated first. --allow-unsafe is a one-run
+                       escape hatch for a reviewed host-access override.
+  aic trust [--revoke] Review and persist approval for this project's exact
+                       unsafe host-access configuration outside the repository.
+                       Any relevant config change invalidates the approval.
   aic preflight        Print this project's trust boundary: what the agent can
                        read (mounts), what's blocked (.env/secrets), where
                        sessions persist, and whether outbound network is open
@@ -1497,7 +3593,8 @@ Usage:
                        effect on the next 'aic rebuild'.
   aic shell            Open the configured interactive shell (AIC_SHELL) inside the devcontainer
   aic run CMD ...      Run CMD inside the devcontainer
-  aic rebuild          Recreate the container from a fresh image
+  aic rebuild [--allow-unsafe]
+                       Recreate the container from a fresh image
   aic down             Stop the container (volumes preserved)
   aic destroy [--yes]  Stop + remove container + per-project volumes
                        (global auth + shell history are preserved). Shows the
@@ -1518,10 +3615,11 @@ Env:
                        'up'/'shell'/'rebuild' (and VS Code container-start)
                        drift warning (pinned image vs installed aic) and the
                        'version'/'upgrade' "newer aicontainer available" nudge.
-  AIC_NO_OVERRIDE_SCAN Set to silence the pre-'up'/'rebuild' scan of
+  AIC_NO_OVERRIDE_SCAN Set to silence the legacy print-only raw scan of
                        project-owned docker-compose.override.yml /
-                       Dockerfile.project for host-access grants (privileged,
-                       cap_add, host mounts, a non-aicontainer base, ...).
+                       Dockerfile.project. It does not bypass fail-closed
+                       resolved-Compose validation; use aic trust or the
+                       explicit one-run --allow-unsafe flag.
 EOF
 }
 
@@ -1546,7 +3644,7 @@ _aic_complete () {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local commands="init sync up preflight signing shell run rebuild down destroy upgrade completion version help"
+  local commands="init sync doctor status validate up trust preflight signing shell run rebuild down destroy upgrade completion version help"
   local tools="claude-code codex opencode claude-code,codex,opencode"
   local shells="zsh bash fish"
 
@@ -1562,17 +3660,23 @@ _aic_complete () {
         --with)  COMPREPLY=( $(compgen -W "$tools"  -- "$cur") ); return ;;
         --shell) COMPREPLY=( $(compgen -W "$shells" -- "$cur") ); return ;;
       esac
-      COMPREPLY=( $(compgen -W "--build --force --docker --no-docker --with --shell" -- "$cur") )
+      COMPREPLY=( $(compgen -W "--build --force --docker-read --docker --no-docker --with --shell" -- "$cur") )
       ;;
     sync)
       case "$prev" in
         --with)  COMPREPLY=( $(compgen -W "$tools"  -- "$cur") ); return ;;
         --shell) COMPREPLY=( $(compgen -W "$shells" -- "$cur") ); return ;;
       esac
-      COMPREPLY=( $(compgen -W "--pull --build --bump-base --docker --no-docker --with --shell" -- "$cur") )
+      COMPREPLY=( $(compgen -W "--pull --build --bump-base --docker-read --docker --no-docker --with --shell" -- "$cur") )
       ;;
     signing)
       COMPREPLY=( $(compgen -W "auto byok disable status --register" -- "$cur") )
+      ;;
+    up|rebuild)
+      COMPREPLY=( $(compgen -W "--allow-unsafe" -- "$cur") )
+      ;;
+    trust)
+      COMPREPLY=( $(compgen -W "--revoke" -- "$cur") )
       ;;
     destroy)
       COMPREPLY=( $(compgen -W "--yes" -- "$cur") )
@@ -1598,7 +3702,11 @@ _aic () {
   commands=(
     'init:Copy template into ./.devcontainer/'
     'sync:Re-copy template into existing ./.devcontainer/'
+    'doctor:Check host prerequisites and project wiring (read-only)'
+    'status:Show project configuration and runtime state'
+    'validate:Validate the resolved configuration non-interactively'
     'up:Pull/build and start the devcontainer'
+    'trust:Approve this exact host-access configuration outside the repository'
     'preflight:Print this project'\''s trust boundary (mounts, secrets, network, sessions)'
     'signing:Set up sandbox commit signing (auto/byok/disable/status)'
     'shell:Open an interactive shell inside the devcontainer'
@@ -1628,8 +3736,9 @@ _aic () {
           _arguments \
             '--build[full local build from template/Dockerfile]' \
             '--force[overwrite existing .devcontainer/]' \
+            '--docker-read[enable sensitive Docker metadata/log/file reads]' \
             '--docker[enable Docker socket write access (POST/BUILD)]' \
-            '--no-docker[keep Docker socket read-only (default)]' \
+            '--no-docker[disable Docker object APIs (default)]' \
             '--with[comma-separated tools]:tools:('"${tools[*]}"')' \
             '--shell[interactive shell]:shell:('"${shells[*]}"')'
           ;;
@@ -1638,8 +3747,9 @@ _aic () {
             '--pull[force pull-mode template]' \
             '--build[force build-mode template]' \
             '--bump-base[bump Dockerfile.project FROM tag to this aic version]' \
+            '--docker-read[enable sensitive Docker metadata/log/file reads]' \
             '--docker[enable Docker socket write access (POST/BUILD)]' \
-            '--no-docker[keep Docker socket read-only]' \
+            '--no-docker[disable Docker object APIs]' \
             '--with[comma-separated tools]:tools:('"${tools[*]}"')' \
             '--shell[interactive shell]:shell:('"${shells[*]}"')'
           ;;
@@ -1647,6 +3757,12 @@ _aic () {
           _arguments \
             '--register[register the signing key on GitHub via gh]' \
             '1:action:(auto byok disable status)'
+          ;;
+        up|rebuild)
+          _arguments '--allow-unsafe[allow reviewed unsafe host access for this run only]'
+          ;;
+        trust)
+          _arguments '--revoke[remove this project'\''s stored host-access approval]'
           ;;
         destroy)
           _arguments '(--yes -y)'{--yes,-y}'[skip the confirmation prompt]'
@@ -1668,13 +3784,17 @@ _completion_fish () {
   cat <<'FISH_EOF'
 # aic fish completion. Install with:
 #   aic completion fish > ~/.config/fish/completions/aic.fish
-set -l aic_cmds init sync up preflight signing shell run rebuild down destroy upgrade completion version help
+set -l aic_cmds init sync doctor status validate up trust preflight signing shell run rebuild down destroy upgrade completion version help
 
 for cmd in aic aicontainer
   complete -c $cmd -f
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a init     -d 'Copy template into ./.devcontainer/'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a sync     -d 'Re-copy template into existing ./.devcontainer/'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a doctor   -d 'Check host prerequisites and project wiring'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a status   -d 'Show project configuration and runtime state'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a validate -d 'Validate the resolved configuration'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a up       -d 'Start the devcontainer'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a trust    -d 'Approve exact host-access configuration'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a preflight -d 'Print this project\'s trust boundary (mounts, secrets, network)'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a signing  -d 'Set up sandbox commit signing'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a shell    -d 'Open the configured shell inside the devcontainer'
@@ -1689,21 +3809,26 @@ for cmd in aic aicontainer
 
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l build -d 'full local build from template/Dockerfile'
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l force -d 'overwrite existing .devcontainer/'
+  complete -c $cmd -n "__fish_seen_subcommand_from init" -l docker-read -d 'enable sensitive Docker metadata/log/file reads'
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l docker -d 'enable Docker socket write access (POST/BUILD)'
-  complete -c $cmd -n "__fish_seen_subcommand_from init" -l no-docker -d 'keep Docker socket read-only (default)'
+  complete -c $cmd -n "__fish_seen_subcommand_from init" -l no-docker -d 'disable Docker object APIs (default)'
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l with  -d 'comma-separated tools' -xa 'claude-code codex opencode claude-code,codex,opencode'
   complete -c $cmd -n "__fish_seen_subcommand_from init" -l shell -d 'interactive shell' -xa 'zsh bash fish'
 
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l pull  -d 'force pull-mode template'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l build -d 'force build-mode template'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l bump-base -d 'bump Dockerfile.project FROM tag to this aic version'
+  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l docker-read -d 'enable sensitive Docker metadata/log/file reads'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l docker -d 'enable Docker socket write access (POST/BUILD)'
-  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l no-docker -d 'keep Docker socket read-only'
+  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l no-docker -d 'disable Docker object APIs'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l with  -d 'comma-separated tools' -xa 'claude-code codex opencode claude-code,codex,opencode'
   complete -c $cmd -n "__fish_seen_subcommand_from sync" -l shell -d 'interactive shell' -xa 'zsh bash fish'
 
   complete -c $cmd -n "__fish_seen_subcommand_from signing" -a 'auto byok disable status'
   complete -c $cmd -n "__fish_seen_subcommand_from signing" -l register -d 'register the signing key on GitHub via gh'
+
+  complete -c $cmd -n "__fish_seen_subcommand_from up rebuild" -l allow-unsafe -d 'allow reviewed unsafe host access for this run only'
+  complete -c $cmd -n "__fish_seen_subcommand_from trust" -l revoke -d 'remove stored host-access approval'
 
   complete -c $cmd -n "__fish_seen_subcommand_from destroy" -l yes -s y -d 'skip the confirmation prompt'
 
@@ -1715,9 +3840,14 @@ FISH_EOF
 case "${1:-help}" in
   init)    shift; cmd_init "$@" ;;
   sync)    shift; cmd_sync "$@" ;;
+  doctor)  shift; cmd_doctor "$@" ;;
+  status)  shift; cmd_status "$@" ;;
+  validate) shift; cmd_validate "$@" ;;
   up)      shift; cmd_up "$@" ;;
+  trust)   shift; cmd_trust "$@" ;;
   preflight) shift; cmd_preflight "$@" ;;
   check-drift) cmd_check_drift ;;   # internal: VS Code initializeCommand hook
+  initialize) cmd_initialize ;;     # internal: trusted host initialize hook
   signing) shift; cmd_signing "$@" ;;
   shell)   shift; cmd_shell "$@" ;;
   run)     shift; cmd_run "$@" ;;

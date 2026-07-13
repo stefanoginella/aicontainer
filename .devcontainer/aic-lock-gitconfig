@@ -1,38 +1,317 @@
-#!/usr/bin/env bash
-# =============================================================================
-# aic-lock-gitconfig — root-own + read-only a fixed set of self-protection files
-# =============================================================================
-# Called once at the end of post-create.py (via the scoped NOPASSWD sudoers
-# entry). Locks each of a HARDCODED list of files to root:root 0444:
-#
-#   1. ~/.gitconfig.local — the container-local git config pointed at by
-#      GIT_CONFIG_GLOBAL. Without the lock a compromised tool session could
-#      append `[credential] helper = !cat > /tmp/x` or `[core] sshCommand = ...`
-#      to capture tokens during in-container `gh` / `git push` flows.
-#   2. The baked login-shell rc files (~/.zshrc, ~/.bashrc, fish config). These
-#      ship in the image owned by `vscode`, so without this lock a tool session
-#      could append a payload that runs on the next `aic shell` (persistence
-#      beyond the agent turn). Locking them makes the PreToolUse self-protection
-#      check a real filesystem boundary rather than an advisory one. Users layer
-#      their own config via the *.local includes (left writable on purpose).
-#
-# Targets are hardcoded (never argv), so the NOPASSWD grant can only lock these
-# specific paths — it cannot be turned into an arbitrary chown/chmod.
-# =============================================================================
-set -euo pipefail
+#!/usr/bin/python3 -I
+"""Install a generated Git config behind a root-owned directory boundary.
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo "aic-lock-gitconfig: must run via sudo" >&2
-  exit 1
-fi
+This helper is called through a scoped NOPASSWD sudoers entry. Both paths are
+hardcoded (never argv). The unprivileged post-create process writes the staging
+file; this helper validates and opens it without following symlinks, then
+creates the final root-owned file exactly once using descriptor-relative APIs.
+"""
 
-for f in /home/vscode/.gitconfig.local \
-         /home/vscode/.zshrc \
-         /home/vscode/.bashrc \
-         /home/vscode/.config/fish/config.fish; do
-  # Skip absent targets: which shell rc files exist depends on AIC_SHELL, and
-  # locking is best-effort per file (post-create treats a failure as non-fatal).
-  [ -f "$f" ] || continue
-  chown root:root "$f"
-  chmod 0444 "$f"
-done
+from __future__ import annotations
+
+import os
+import pwd
+import stat
+import subprocess
+import sys
+from pathlib import Path
+from typing import NoReturn
+
+
+SOURCE = Path("/home/vscode/.aic-gitconfig.staging")
+DEST_DIR = Path("/etc/aic/user-config")
+DEST_NAME = "gitconfig"
+MAX_CONFIG_BYTES = 1024 * 1024
+
+# Keep this fixed-key contract aligned with post-create.py's GIT_SEED_KEYS and
+# setup_gitconfig(). None of these seed keys execute commands, load paths, alter
+# remotes/credentials, or register hooks. Command/path-bearing aic-owned keys
+# are accepted separately only at their exact compiled-in values below.
+SAFE_VALUE_KEYS = {
+    "user.name",
+    "user.email",
+    "user.useconfigonly",
+    "init.defaultbranch",
+    "core.autocrlf",
+    "core.safecrlf",
+    "core.ignorecase",
+    "core.precomposeunicode",
+    "pull.rebase",
+    "pull.ff",
+    "push.default",
+    "push.autosetupremote",
+    "push.followtags",
+    "fetch.prune",
+    "fetch.prunetags",
+    "rebase.autostash",
+    "rebase.autosquash",
+    "rebase.updaterefs",
+    "branch.autosetupmerge",
+    "branch.autosetuprebase",
+    "diff.algorithm",
+    "diff.colormoved",
+    "merge.conflictstyle",
+    "commit.gpgsign",
+    "tag.gpgsign",
+}
+
+EXACT_VALUES = {
+    "core.excludesfile": "/etc/aic/gitignore",
+    "core.pager": "delta",
+    "interactive.difffilter": "delta --color-only",
+    "delta.navigate": "true",
+    "delta.line-numbers": "true",
+    "gpg.format": "ssh",
+    "user.signingkey": "/home/vscode/.config/aic-auth/signing/id_ed25519",
+    "gpg.ssh.allowedsignersfile": "/home/vscode/.config/aic-auth/signing/allowed_signers",
+}
+
+REQUIRED_LAST_VALUES = {
+    "core.excludesfile": "/etc/aic/gitignore",
+    "core.pager": "delta",
+    "interactive.difffilter": "delta --color-only",
+    "delta.navigate": "true",
+    "delta.line-numbers": "true",
+    "merge.conflictstyle": "diff3",
+    "diff.colormoved": "default",
+}
+
+
+def fail(message: str) -> NoReturn:
+    print(f"aic-lock-gitconfig: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def exact_realpath(path: Path, description: str) -> None:
+    try:
+        resolved = str(path.resolve(strict=True))
+    except (OSError, RuntimeError) as error:
+        fail(f"cannot resolve {description} {path}: {error}")
+    if resolved != str(path):
+        fail(f"refusing symlinked {description}: {path}")
+
+
+def open_validated_source(vscode_uid: int) -> tuple[int, os.stat_result]:
+    exact_realpath(SOURCE.parent, "staging parent")
+    try:
+        before = SOURCE.lstat()
+    except FileNotFoundError:
+        fail(f"staging file is missing: {SOURCE}")
+    if not stat.S_ISREG(before.st_mode):
+        fail(f"refusing symlink or non-regular staging file: {SOURCE}")
+    if before.st_uid != vscode_uid:
+        fail(f"staging file is not owned by vscode: {SOURCE}")
+    if before.st_nlink != 1:
+        fail(f"staging file must not be hard-linked: {SOURCE}")
+    if before.st_size > MAX_CONFIG_BYTES:
+        fail(f"staging file exceeds {MAX_CONFIG_BYTES} bytes: {SOURCE}")
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(SOURCE, flags)
+    except OSError as error:
+        fail(f"cannot safely open staging file {SOURCE}: {error}")
+
+    opened = os.fstat(fd)
+    opened_path = os.path.realpath(f"/proc/self/fd/{fd}")
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != vscode_uid
+        or opened.st_nlink != 1
+        or opened.st_size > MAX_CONFIG_BYTES
+        or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        or opened_path != str(SOURCE)
+    ):
+        os.close(fd)
+        fail(f"staging file changed or escaped its hardcoded path: {SOURCE}")
+    return fd, opened
+
+
+def validate_config_contents(source_fd: int) -> None:
+    """Reject config keys that could execute code or cross trust boundaries."""
+    env = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "HOME": "/nonexistent",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/git",
+                "config",
+                "--no-includes",
+                "--file",
+                f"/dev/fd/{source_fd}",
+                "--null",
+                "--list",
+            ],
+            check=True,
+            capture_output=True,
+            close_fds=True,
+            env=env,
+            pass_fds=(source_fd,),
+            timeout=3,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        fail(f"staging file is not a valid bounded Git config: {error}")
+
+    values: dict[str, list[str]] = {}
+    for raw_record in result.stdout.split(b"\0"):
+        if not raw_record:
+            continue
+        raw_key, separator, raw_value = raw_record.partition(b"\n")
+        if not separator:
+            fail("Git config parser returned a malformed record")
+        key = raw_key.decode("utf-8", "surrogateescape").lower()
+        value = raw_value.decode("utf-8", "surrogateescape")
+        if key not in SAFE_VALUE_KEYS and key not in EXACT_VALUES:
+            fail(f"staging config contains forbidden key: {key}")
+        if key in EXACT_VALUES and value != EXACT_VALUES[key]:
+            fail(f"staging config contains forbidden value for: {key}")
+        values.setdefault(key, []).append(value)
+
+    for key, required in REQUIRED_LAST_VALUES.items():
+        if not values.get(key) or values[key][-1] != required:
+            fail(f"staging config is missing aic's required value for: {key}")
+
+
+def validate_destination_directory() -> int:
+    exact_realpath(DEST_DIR, "destination directory")
+    try:
+        info = DEST_DIR.lstat()
+    except FileNotFoundError:
+        fail(f"destination directory is missing: {DEST_DIR}")
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0:
+        fail(f"destination directory must be root-owned: {DEST_DIR}")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        fail(f"destination directory must not be group/world writable: {DEST_DIR}")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(DEST_DIR, flags)
+    except OSError as error:
+        fail(f"cannot safely open destination directory {DEST_DIR}: {error}")
+    opened = os.fstat(directory_fd)
+    if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+        os.close(directory_fd)
+        fail(f"destination directory changed while opening: {DEST_DIR}")
+    return directory_fd
+
+
+def copy_to_locked_destination(
+    source_fd: int, source_opened: os.stat_result, directory_fd: int
+) -> None:
+    # Never overwrite an installed config. This makes subsequent sudo helper
+    # invocations unable to replace the trusted post-create result with content
+    # written later by an agent in the same container.
+    try:
+        os.stat(DEST_NAME, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        fail(f"destination already exists; refusing to replace: {DEST_DIR / DEST_NAME}")
+
+    temp_name = f".gitconfig.tmp.{os.getpid()}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        temp_fd = os.open(temp_name, flags, 0o400, dir_fd=directory_fd)
+    except OSError as error:
+        fail(f"cannot create destination staging file: {error}")
+
+    linked = False
+    try:
+        os.lseek(source_fd, 0, os.SEEK_SET)
+        copied = 0
+        while True:
+            chunk = os.read(source_fd, 64 * 1024)
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > MAX_CONFIG_BYTES:
+                fail(f"staging file grew beyond {MAX_CONFIG_BYTES} bytes")
+            view = memoryview(chunk)
+            while view:
+                written = os.write(temp_fd, view)
+                view = view[written:]
+
+        source_after_read = os.fstat(source_fd)
+        if (
+            source_after_read.st_dev,
+            source_after_read.st_ino,
+            source_after_read.st_size,
+            source_after_read.st_mtime_ns,
+            source_after_read.st_ctime_ns,
+        ) != (
+            source_opened.st_dev,
+            source_opened.st_ino,
+            source_opened.st_size,
+            source_opened.st_mtime_ns,
+            source_opened.st_ctime_ns,
+        ):
+            fail(f"staging file changed while being copied: {SOURCE}")
+
+        os.fchown(temp_fd, 0, 0)
+        os.fchmod(temp_fd, 0o444)
+        os.fsync(temp_fd)
+        locked = os.fstat(temp_fd)
+        if locked.st_uid != 0 or locked.st_gid != 0 or stat.S_IMODE(locked.st_mode) != 0o444:
+            fail("failed to enforce root:root 0444 on destination")
+
+        # link() is an atomic no-replace promotion. A concurrent helper can
+        # never overwrite a destination that the first invocation installed.
+        os.link(
+            temp_name,
+            DEST_NAME,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        linked = True
+        os.unlink(temp_name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+
+        final = os.stat(DEST_NAME, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(final.st_mode)
+            or final.st_uid != 0
+            or final.st_gid != 0
+            or stat.S_IMODE(final.st_mode) != 0o444
+            or (final.st_dev, final.st_ino) != (locked.st_dev, locked.st_ino)
+            or final.st_nlink != 1
+        ):
+            fail(f"installed destination failed owner/mode/inode checks: {DEST_DIR / DEST_NAME}")
+    except FileExistsError:
+        fail(f"destination already exists; refusing to replace: {DEST_DIR / DEST_NAME}")
+    finally:
+        os.close(temp_fd)
+        if not linked:
+            try:
+                os.unlink(temp_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+
+
+def main() -> None:
+    if os.geteuid() != 0:
+        fail("must run via sudo")
+    try:
+        vscode_uid = pwd.getpwnam("vscode").pw_uid
+    except KeyError:
+        fail("vscode user does not exist")
+
+    source_fd, opened = open_validated_source(vscode_uid)
+    try:
+        validate_config_contents(source_fd)
+        directory_fd = validate_destination_directory()
+        try:
+            copy_to_locked_destination(source_fd, opened, directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        os.close(source_fd)
+
+
+if __name__ == "__main__":
+    main()

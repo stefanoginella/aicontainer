@@ -22,8 +22,5 @@ setopt SHARE_HISTORY
 export PATH="$FNM_DIR:$PATH"
 eval "$(fnm env --use-on-cd)"
 
-# Optional host config (bind-mounted read-only from the host's $HOME).
-# `-s` so an empty stub created by initializeCommand is treated as "absent" and
-# powerlevel10k doesn't nag about being unconfigured.
-[[ -s ~/.p10k.zsh ]] && source ~/.p10k.zsh
-[[ -s ~/.zshrc.local ]] && source ~/.zshrc.local
+# Host shell startup code is deliberately not forwarded into the sandbox. This
+# managed baseline lives under /etc/aic/shell in the built image.

@@ -13,6 +13,149 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Local rootless Docker contexts work without extra flags.** aic discovers
+  the selected Unix socket and regenerates a gitignored host-only environment
+  file, while remote Docker contexts still fail closed.
+- **Host readiness can be checked before startup.** `aic doctor` reports
+  prerequisites and project wiring as concise `OK`/`WARN`/`FAIL` results.
+- **Project state is visible without mutation.** `aic status` summarizes the
+  project identity, modes, image/runtime, credential-bridge health, and
+  managed volumes.
+- **Resolved validation is available for CI.** `aic validate` applies the full
+  gate noninteractively without prompting or recording trust.
+- **aic startup validates resolved project config before handoff.** CLI starts
+  check managed files plus the fully merged Compose model; the generated VS
+  Code initializer repeats the gate before Compose creation.
+- **Reviewed host access can be trusted without repository state.** `aic trust`
+  records approval for the exact relevant config hash outside the checkout;
+  changes automatically invalidate it.
+- **Unsafe access can be approved for one run.** `--allow-unsafe` carries an
+  exact configuration hash through `up`/`rebuild` without persisting approval;
+  unbounded build contexts require this per-run review.
+- **Docker inspection is now a separate opt-in mode.** `--docker-read` enables
+  host object list/inspect APIs without writes, while `--docker` remains the
+  explicit read-write choice and `--no-docker` revokes either.
+- **Shell completions cover every aic command.** `aic completion` emits
+  ready-to-install Bash, Zsh, or fish completions for commands and flags.
+
+### Changed
+
+- **Docker object access is off by default.** The proxy exposes only ping and
+  version until the host user explicitly consents, hiding unrelated container,
+  image, network, volume, log, and file metadata.
+- **Projects receive path-unique runtime identities.** Compose resources and
+  session volumes include a canonical-path hash; existing transcript data is
+  migrated automatically without another login.
+- **The shared session root has a tool-neutral name.** Container state now lives
+  below `~/.aic-sessions`; legacy `.claude-sessions` data is carried forward.
+- **Host preferences pass through an isolated sanitizer.** A fixed networkless
+  service sees the raw Git/tool files and gives the agent only root-owned,
+  allowlisted JSON output.
+- **Tool homes are isolated while logins remain reusable.** Credentials sync
+  through a fixed networkless helper, while config, instructions, plugins,
+  prompt history, and transcripts stay in each project's volume.
+- **Git config is installed behind a root boundary.** Only fixed safe host
+  preferences survive parsing, and the validated result is created once as
+  `root:root 0444` with executable/path-bearing keys refused.
+- **Shell startup ignores writable home profiles.** Zsh, Bash, and fish launch
+  from root-managed system config, preventing next-session persistence without
+  importing host rc code.
+- **AI safety policy uses managed system precedence.** Claude, Codex, and
+  OpenCode autonomous settings plus the shared guardrail cannot be disabled by
+  user-level tool config.
+- **Container creation no longer resolves Python dependencies.** Post-create,
+  seed sanitization, and credential sync use system Python plus a hash-pinned
+  baked TOML writer, improving offline startup and removing a pre-policy fetch.
+- **Weekly images refresh their base layers reliably.** Scheduled/manual image
+  builds pull current bases and bypass stale caches while pinned release tags
+  remain reproducible.
+- **Package metadata now names all supported agents.** The npm description and
+  keywords include OpenCode.
+- **Packed artifacts exclude development debris.** Python caches/bytecode and
+  operating-system metadata no longer enter the npm tarball.
+
+### Fixed
+
+- **Sync does not inherit unconsented Docker access.** Repository-only proxy
+  modes reset to `none`; users who need Docker opt in once and record host
+  consent explicitly.
+- **VS Code selects a compatible host CLI.** Direct editor starts skip old
+  aic installs that lack managed initialization, scan every supported
+  Node-manager fallback, and print an actionable upgrade command when needed.
+- **Same-named checkouts no longer share containers or transcripts.** Legacy
+  cleanup requires an exact owned primary, permits only fixed unlabeled
+  sidecars, and never removes arbitrary orphans. Transcript import verifies the
+  actual session mount and absence of a conflicting owner; ambiguity is
+  preserved rather than guessed.
+- **Symlinked control paths are rejected.** Host-side init/sync refuses links or
+  special files at managed and project-owned control inputs instead of
+  following them outside the repository.
+- **Managed template replacement is atomic.** Files and hooks are staged beside
+  their destination before rename.
+- **Mode switches remove stale managed artifacts.** Switching to pull mode
+  removes every build-only file so later syncs cannot flip modes accidentally.
+- **VS Code settings cannot escape their merge point.** Project settings are
+  parsed and re-serialized as strict JSON; invalid input and managed-key
+  collisions are warned and skipped.
+- **Non-interactive destroy requires explicit confirmation.** `aic destroy`
+  now needs `--yes` when no terminal is present instead of treating closed
+  input as permission to delete history.
+- **Release retries preserve immutable artifacts.** Reruns reuse verified
+  version images and matching npm publications, advancing `:latest` only from
+  the current npm release to prevent accidental overwrite or rollback.
+- **Legacy image recovery cannot widen an unknown artifact.** Unannotated GHCR
+  versions require a matching immutable npm tarball and are never promoted to
+  `:latest`.
+
+### Security
+
+- **Seeded config no longer carries literal credentials.** Inline provider and
+  MCP environment/header secrets are stripped recursively across Claude,
+  Codex, and OpenCode.
+- **Cross-project prompt persistence is blocked.** Auto-loaded memory, skills,
+  commands, rules, prompts, plugins, histories, and transcripts are scoped to
+  the path-unique project rather than the reusable credential store.
+- **Privileged volume ownership verifies daemon metadata.** The fixed helper
+  accepts only canonical mountpoints backed by ordinary option-free Docker
+  named volumes and rejects binds, symlinks, nesting, and custom drivers.
+- **The runtime drops unnecessary Linux capabilities.** The devcontainer starts
+  from `cap_drop: ALL`; `NET_RAW` remains absent and only fixed helper/firewall
+  capabilities return.
+- **Raw Docker access is hidden from the agent.** The fixed helper socket sits
+  behind a root-only directory that `vscode` cannot traverse.
+- **The Docker proxy image is digest-pinned.** Its verified multi-architecture
+  digest prevents a mutable dependency from replacing the raw-socket holder.
+- **Metadata blocking covers IPv4 and IPv6 providers.** Always-on drops include
+  IPv4/IPv6 link-local plus AWS and Alibaba metadata endpoints, independent of
+  the optional full allowlist.
+- **Firewall refreshes stay fail-closed.** IPv4/IPv6 rules are built off-path
+  and switched atomically; failed or prohibited DNS resolution leaves the
+  active restrictive policy untouched.
+- **CI publishing uses narrower credentials.** Checkout credentials are not
+  persisted and package-write permission exists only in the publishing job.
+- **Registry publication is serialized across workflows.** Release and
+  security-refresh GHCR jobs share a non-cancelling lock, closing mutable-tag
+  check-then-publish races without changing their workflow cancellation rules.
+- **Managed path normalization cannot hide host aliases.** Build contexts,
+  workspace/control binds, project volumes, and networks are verified against
+  the canonical checkout before installation-specific paths are normalized.
+- **Unmanaged Dev Container startup hooks are rejected.** Features and
+  lifecycle commands fail validation before aic hands configuration off.
+- **Compose startup behavior cannot be replaced silently.** Command,
+  entrypoint, healthcheck, and related service changes require review.
+- **Managed Python ignores environment module injection.** Post-create,
+  sanitization, and credential sync run isolated from `PYTHONPATH`/`PYTHONHOME`.
+- **Host variables cannot be forwarded silently.** Active Compose interpolation
+  or bare environment/build-arg pass-through requires exact-config trust without
+  exposing the resolved value; literals and escaped templates remain prompt-free.
+- **Managed startup environment cannot be shadowed silently.** Overrides of
+  tool homes, shell/Git startup, loader paths, or the Docker proxy endpoint now
+  require explicit review before creation.
+- **Validation output cannot inject terminal controls.** Repository-controlled
+  names, paths, and values are rendered safely in host-side findings.
+
 ## [0.5.0] - 2026-07-06
 
 ### Changed

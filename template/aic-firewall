@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # =============================================================================
 # aic-firewall — opt-in outbound allowlist for aicontainer
 # =============================================================================
@@ -16,18 +16,24 @@
 # the firewall — calling it can only re-apply or strengthen it.
 #
 # A third, always-on subcommand `block-metadata` (run by post-create.py on
-# every container create) drops egress to cloud metadata / link-local
-# (169.254.0.0/16) independent of the full allowlist. It's strengthen-only like
-# the rest: it only ever adds a DROP, closing the highest-severity network path
-# (cloud credential theft via 169.254.169.254) even when the full firewall is
-# never enabled. When the full firewall IS enabled, its default-DROP policy
-# covers the same range, so the two compose cleanly.
+# every container create) drops IPv4 link-local plus the Alibaba metadata
+# endpoint (169.254.0.0/16 and 100.100.100.200), and IPv6 link-local/AWS IMDSv6.
+# It is strengthen-only: the chains are never flushed and their jumps stay
+# ahead of every allow rule. Full enable uses double-buffered chains/ipsets, so
+# re-enabling never removes these unconditional drops or opens a rule-update
+# window.
 #
 # Per-project extra domains: list one domain per line in
 #   /workspace/.devcontainer/firewall-allowlist
 # (comment lines starting with `#` are ignored).
 # =============================================================================
 set -euo pipefail
+readonly PATH=/usr/sbin:/usr/bin:/sbin:/bin
+readonly LC_ALL=C
+readonly HOME=/root
+export PATH LC_ALL HOME
+unset CDPATH ENV BASH_ENV XTABLES_LIBDIR RES_OPTIONS LOCALDOMAIN HOSTALIASES
+umask 077
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "aic-firewall: must run via sudo (the scoped sudoers entry allows it)" >&2
@@ -66,113 +72,388 @@ DEFAULT_ALLOWLIST=(
 
 EXTRA_FILE="/workspace/.devcontainer/firewall-allowlist"
 
-resolve_into_ipset() {
+ipt() { iptables -w 5 "$@"; }
+ip6t() { ip6tables -w 5 "$@"; }
+
+lock_firewall() {
+  # Serialize scoped-sudo invocations. The inactive rule/set buffer is safe
+  # from traffic, but two simultaneous builders must not mutate the same one.
+  # mkdir is an atomic lock primitive and adds no runtime dependency. /run is
+  # container-ephemeral, so a crash can only require a rebuild (fail closed).
+  local lock_dir=/run/aic-firewall.lock
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    echo "aic-firewall: another firewall operation is running (or a previous one did not finish)" >&2
+    exit 1
+  fi
+  trap 'rmdir /run/aic-firewall.lock 2>/dev/null || true' EXIT
+}
+
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s\n' "$value"
+}
+
+normalize_domain() {
+  local domain="${1%.}"
+  domain="${domain,,}"
+  if [ "${#domain}" -gt 253 ] ||
+     ! [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+    echo "aic-firewall: invalid allowlist domain: $1" >&2
+    return 1
+  fi
+  printf '%s\n' "$domain"
+}
+
+ensure_prohibited_set() {
+  ipset create aic-prohibited-v4 hash:net family inet -exist
+  ipset add aic-prohibited-v4 169.254.0.0/16 -exist
+  ipset add aic-prohibited-v4 100.100.100.200/32 -exist
+}
+
+is_prohibited_v4() {
+  ipset test aic-prohibited-v4 "$1" >/dev/null 2>&1
+}
+
+PROHIBITED_RESOLUTION=0
+
+add_resolved_ipv4() {
+  local set="$1" description="$2" ip="$3"
+  if is_prohibited_v4 "$ip"; then
+    echo "aic-firewall: refusing prohibited address $ip resolved for $description" >&2
+    PROHIBITED_RESOLUTION=1
+    return 0
+  fi
+  ipset add "$set" "$ip/32" -exist
+}
+
+resolve_domain_into_set() {
   local set="$1" domain="$2" ip
   while IFS= read -r ip; do
-    [ -n "$ip" ] && ipset add "$set" "$ip/32" -exist
+    [ -n "$ip" ] && add_resolved_ipv4 "$set" "$domain" "$ip"
   done < <(
     {
-      dig +short A "$domain" 2>/dev/null || true
-      getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}'
+      dig -r +short A "$domain" 2>/dev/null || true
+      getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' || true
     } | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u
   )
+}
+
+resolve_proxy_into_set() {
+  local set="$1" ip
+  while IFS= read -r ip; do
+    [ -n "$ip" ] && add_resolved_ipv4 "$set" socket-proxy "$ip"
+  done < <(
+    getent ahostsv4 socket-proxy 2>/dev/null \
+      | awk '{print $1}' \
+      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+      | sort -u || true
+  )
+}
+
+ipset_count() {
+  ipset list "$1" | awk '/Number of entries:/ {print $4}'
+}
+
+chain_exists_v4() { ipt -nL "$1" >/dev/null 2>&1; }
+chain_exists_v6() { ip6t -nL "$1" >/dev/null 2>&1; }
+
+ensure_metadata_v4() {
+  chain_exists_v4 AIC_METADATA || ipt -N AIC_METADATA
+  ipt -C AIC_METADATA -d 169.254.0.0/16 -j DROP 2>/dev/null ||
+    ipt -I AIC_METADATA 1 -d 169.254.0.0/16 -j DROP
+  ipt -C AIC_METADATA -d 100.100.100.200/32 -j DROP 2>/dev/null ||
+    ipt -I AIC_METADATA 2 -d 100.100.100.200/32 -j DROP
+
+  # Keep the unconditional jump first. If an older version left a lower jump,
+  # inserting a new first rule strengthens immediately; no delete/open window.
+  local first
+  first=$(ipt -L OUTPUT -n --line-numbers | awk '$1 == "1" {print $2}')
+  [ "$first" = AIC_METADATA ] || ipt -I OUTPUT 1 -j AIC_METADATA
+}
+
+ipv6_configured() {
+  ip -o -6 addr show up 2>/dev/null | awk '$2 != "lo" {found=1} END {exit !found}'
+}
+
+ipv6_filter_available() {
+  command -v ip6tables >/dev/null 2>&1 && ip6t -S OUTPUT >/dev/null 2>&1
+}
+
+ensure_metadata_v6() {
+  chain_exists_v6 AIC_METADATA || ip6t -N AIC_METADATA
+  ip6t -C AIC_METADATA -d fe80::/10 -j DROP 2>/dev/null ||
+    ip6t -I AIC_METADATA 1 -d fe80::/10 -j DROP
+  ip6t -C AIC_METADATA -d fd00:ec2::254/128 -j DROP 2>/dev/null ||
+    ip6t -I AIC_METADATA 2 -d fd00:ec2::254/128 -j DROP
+
+  local first
+  first=$(ip6t -L OUTPUT -n --line-numbers | awk '$1 == "1" {print $2}')
+  [ "$first" = AIC_METADATA ] || ip6t -I OUTPUT 1 -j AIC_METADATA
+}
+
+active_chain_v4() {
+  ipt -L "$1" -n --line-numbers \
+    | awk '$2 == "AIC_OUT_A" || $2 == "AIC_OUT_B" || $2 == "AIC_IN_A" || $2 == "AIC_IN_B" {print $2; exit}'
+}
+
+active_chain_v6() {
+  ip6t -L "$1" -n --line-numbers \
+    | awk '$2 == "AIC6_OUT_A" || $2 == "AIC6_OUT_B" || $2 == "AIC6_IN_A" || $2 == "AIC6_IN_B" {print $2; exit}'
+}
+
+prepare_chain_v4() {
+  local chain="$1"
+  if chain_exists_v4 "$chain"; then
+    ipt -F "$chain"
+  else
+    ipt -N "$chain"
+  fi
+}
+
+prepare_chain_v6() {
+  local chain="$1"
+  if chain_exists_v6 "$chain"; then
+    ip6t -F "$chain"
+  else
+    ip6t -N "$chain"
+  fi
+}
+
+switch_chain_v4() {
+  local builtin="$1" old="$2" new="$3" number first
+  if [ -n "$old" ]; then
+    number=$(ipt -L "$builtin" -n --line-numbers | awk -v target="$old" '$2 == target {print $1; exit}')
+    [ -n "$number" ] || { echo "aic-firewall: active $old jump disappeared" >&2; return 1; }
+    ipt -R "$builtin" "$number" -j "$new"
+  else
+    first=$(ipt -L "$builtin" -n --line-numbers | awk '$1 == "1" {print $2}')
+    if [ "$builtin" = OUTPUT ] && [ "$first" = AIC_METADATA ]; then
+      ipt -I "$builtin" 2 -j "$new"
+    else
+      ipt -I "$builtin" 1 -j "$new"
+    fi
+  fi
+}
+
+switch_chain_v6() {
+  local builtin="$1" old="$2" new="$3" number first
+  if [ -n "$old" ]; then
+    number=$(ip6t -L "$builtin" -n --line-numbers | awk -v target="$old" '$2 == target {print $1; exit}')
+    [ -n "$number" ] || { echo "aic-firewall: active $old jump disappeared" >&2; return 1; }
+    ip6t -R "$builtin" "$number" -j "$new"
+  else
+    first=$(ip6t -L "$builtin" -n --line-numbers | awk '$1 == "1" {print $2}')
+    if [ "$builtin" = OUTPUT ] && [ "$first" = AIC_METADATA ]; then
+      ip6t -I "$builtin" 2 -j "$new"
+    else
+      ip6t -I "$builtin" 1 -j "$new"
+    fi
+  fi
+}
+
+load_extra_domains() {
+  local set="$1" real line domain
+  [ -e "$EXTRA_FILE" ] || [ -L "$EXTRA_FILE" ] || return 0
+  real=$(realpath -e -- "$EXTRA_FILE" 2>/dev/null || true)
+  if [ "$real" != "$EXTRA_FILE" ] || [ ! -f "$EXTRA_FILE" ] || [ -L "$EXTRA_FILE" ]; then
+    echo "aic-firewall: refusing non-regular or symlinked allowlist: $EXTRA_FILE" >&2
+    return 1
+  fi
+
+  echo "==> aic-firewall: loading extras from $EXTRA_FILE"
+  while IFS= read -r line || [ -n "$line" ]; do
+    domain=$(trim "${line%%#*}")
+    [ -n "$domain" ] || continue
+    domain=$(normalize_domain "$domain") || return 1
+    resolve_domain_into_set "$set" "$domain"
+  done < "$EXTRA_FILE"
 }
 
 cmd_enable() {
   echo "==> aic-firewall: building allowlist..."
 
-  # Snapshot the upstream DNS resolvers up front, so we can keep DNS reachable
-  # after DROP is in effect.
-  local resolvers
-  resolvers=$(awk '/^nameserver/ {print $2}' /etc/resolv.conf | sort -u)
+  lock_firewall
+  ensure_prohibited_set
+  # Repair/strengthen the always-on baseline before doing any fallible DNS or
+  # staging work. These additions never widen an existing policy.
+  ensure_metadata_v4
 
-  # Resolve the whole allowlist into a STAGING ipset *before* touching the live
-  # policy. The previous version flushed OUTPUT and set `policy ACCEPT` first,
-  # which (a) blew a multi-second wide-open hole on every re-enable while it
-  # re-resolved ~17 domains and (b) left the firewall fully open if resolution
-  # yielded 0 IPs and the script `exit 1`d under `set -e`. Staging keeps the
-  # documented invariant true: enabling can only ever re-apply or strengthen,
-  # never transiently or permanently weaken.
-  ipset create aic-allowed       hash:net -exist     # the live set the rules match
-  ipset create aic-allowed-stage hash:net -exist
-  ipset flush  aic-allowed-stage
-
-  local d line
-  for d in "${DEFAULT_ALLOWLIST[@]}"; do
-    resolve_into_ipset aic-allowed-stage "$d"
-  done
-
-  if [ -f "$EXTRA_FILE" ]; then
-    echo "==> aic-firewall: loading extras from $EXTRA_FILE"
-    while IFS= read -r line || [ -n "$line" ]; do
-      d=$(sed 's/#.*//' <<<"$line" | xargs)
-      [ -n "$d" ] && resolve_into_ipset aic-allowed-stage "$d"
-    done < "$EXTRA_FILE"
-  fi
-
-  local count
-  count=$(ipset list aic-allowed-stage | awk '/Number of entries:/ {print $4}')
-  if ! [[ "${count:-0}" =~ ^[0-9]+$ ]] || [ "${count:-0}" -eq 0 ]; then
-    ipset destroy aic-allowed-stage 2>/dev/null || true
-    echo "aic-firewall: ERROR — resolved 0 IPs; leaving the current policy unchanged." >&2
+  local have_ipv6=0
+  if ipv6_filter_available; then
+    have_ipv6=1
+    ensure_metadata_v6
+  elif ipv6_configured; then
+    echo "aic-firewall: ERROR — IPv6 is configured but ip6tables is unavailable; refusing an IPv6-bypassable policy." >&2
     exit 1
   fi
-  echo "==> aic-firewall: $count IPs in allowlist"
 
-  # Promote the staged set into the live set atomically — the OUTPUT rule
-  # matches `aic-allowed` by name, so swapping contents needs no rule churn.
-  ipset swap aic-allowed-stage aic-allowed
-  ipset destroy aic-allowed-stage 2>/dev/null || true
+  # Snapshot the upstream DNS resolvers up front, so we can keep DNS reachable
+  # after DROP is in effect.
+  local -a resolvers=()
+  mapfile -t resolvers < <(
+    awk '/^nameserver/ {print $2}' /etc/resolv.conf \
+      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+      | sort -u || true
+  )
+  if [ "${#resolvers[@]}" -eq 0 ]; then
+    echo "aic-firewall: ERROR — no IPv4 DNS resolver found; leaving the allowlist policy unchanged." >&2
+    exit 1
+  fi
 
-  # Build the rules. We add the allow rules first and set `policy DROP` last,
-  # and we never set `policy ACCEPT` — so a re-enable (policy already DROP)
-  # stays closed throughout (flushing rules doesn't reset the policy), and a
-  # first enable is only briefly open while ~5 rules are added synchronously.
-  local r
-  iptables -N AIC_OUT 2>/dev/null || iptables -F AIC_OUT
-  iptables -A AIC_OUT -m set --match-set aic-allowed dst -j ACCEPT
-  iptables -A AIC_OUT -j RETURN
+  local old_out old_in suffix out_chain in_chain allow_set proxy_set refs
+  old_out=$(active_chain_v4 OUTPUT)
+  old_in=$(active_chain_v4 INPUT)
+  refs=$(
+    {
+      ipt -L OUTPUT -n --line-numbers
+      ipt -L INPUT -n --line-numbers
+    } | awk '$2 ~ /^AIC_(OUT|IN)_[AB]$/ {count++} END {print count+0}'
+  )
+  case "$old_out:$old_in:$refs" in
+    ::0) suffix=a ;;
+    AIC_OUT_A:AIC_IN_A:2) suffix=b ;;
+    AIC_OUT_B:AIC_IN_B:2) suffix=a ;;
+    *)
+      echo "aic-firewall: ERROR — inconsistent active IPv4 rule generations; refusing to flush a possibly live chain." >&2
+      exit 1 ;;
+  esac
+  if [ "$suffix" = a ]; then
+    out_chain=AIC_OUT_A; in_chain=AIC_IN_A
+  else
+    out_chain=AIC_OUT_B; in_chain=AIC_IN_B
+  fi
+  allow_set="aic-allowed-v4-$suffix"
+  proxy_set="aic-proxy-v4-$suffix"
 
-  iptables -F OUTPUT
-  iptables -A OUTPUT -o lo -j ACCEPT
-  iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-  # DNS to the configured resolvers stays open so curl/dig keep working.
-  for r in $resolvers; do
-    iptables -A OUTPUT -p udp -d "$r" --dport 53 -j ACCEPT
-    iptables -A OUTPUT -p tcp -d "$r" --dport 53 -j ACCEPT
+  # Build the inactive ipsets/chains completely before the one-rule jump swap.
+  # The active generation continues handling traffic throughout DNS resolution
+  # and rule construction; an error leaves it untouched.
+  ipset create "$allow_set" hash:net family inet -exist
+  ipset create "$proxy_set" hash:net family inet -exist
+  ipset flush "$allow_set"
+  ipset flush "$proxy_set"
+
+  PROHIBITED_RESOLUTION=0
+  local d
+  for d in "${DEFAULT_ALLOWLIST[@]}"; do
+    resolve_domain_into_set "$allow_set" "$d"
   done
-  # Reach the socket-proxy on the compose-internal network.
-  iptables -A OUTPUT -p tcp --dport 2375 -j ACCEPT
-  iptables -A OUTPUT -j AIC_OUT
-  iptables -P OUTPUT DROP
+  load_extra_domains "$allow_set"
+  resolve_proxy_into_set "$proxy_set"
 
-  iptables -F INPUT
-  iptables -A INPUT -i lo -j ACCEPT
-  iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-  iptables -P INPUT DROP
+  if [ "$PROHIBITED_RESOLUTION" -ne 0 ]; then
+    echo "aic-firewall: ERROR — a name resolved into a prohibited metadata/link-local range; leaving the allowlist policy unchanged." >&2
+    exit 1
+  fi
 
-  echo "==> aic-firewall: enabled (default DROP, allowlist active)"
+  local count proxy_count
+  count=$(ipset_count "$allow_set")
+  proxy_count=$(ipset_count "$proxy_set")
+  if ! [[ "${count:-0}" =~ ^[0-9]+$ ]] || [ "${count:-0}" -eq 0 ]; then
+    echo "aic-firewall: ERROR — resolved 0 allowlist IPs; leaving the allowlist policy unchanged." >&2
+    exit 1
+  fi
+  if ! [[ "${proxy_count:-0}" =~ ^[0-9]+$ ]] || [ "${proxy_count:-0}" -eq 0 ]; then
+    echo "aic-firewall: ERROR — socket-proxy resolved 0 IPs; leaving the allowlist policy unchanged." >&2
+    exit 1
+  fi
+  echo "==> aic-firewall: $count allowlist IPs; $proxy_count socket-proxy IP(s)"
+
+  prepare_chain_v4 "$out_chain"
+  # Keep metadata/link-local drops before every accept, even if the baseline
+  # jump is later damaged by an older helper version.
+  ipt -A "$out_chain" -d 169.254.0.0/16 -j DROP
+  ipt -A "$out_chain" -d 100.100.100.200/32 -j DROP
+  ipt -A "$out_chain" -o lo -j ACCEPT
+  ipt -A "$out_chain" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  # DNS to the configured resolvers stays open so curl/dig keep working.
+  local resolver
+  for resolver in "${resolvers[@]}"; do
+    ipt -A "$out_chain" -p udp -d "$resolver" --dport 53 -j ACCEPT
+    ipt -A "$out_chain" -p tcp -d "$resolver" --dport 53 -j ACCEPT
+  done
+  # Port 2375 is reachable only at the current compose socket-proxy address,
+  # never at an arbitrary destination that happens to listen on that port.
+  ipt -A "$out_chain" -p tcp -m set --match-set "$proxy_set" dst --dport 2375 -j ACCEPT
+  ipt -A "$out_chain" -m set --match-set "$allow_set" dst -j ACCEPT
+  ipt -A "$out_chain" -j DROP
+
+  prepare_chain_v4 "$in_chain"
+  ipt -A "$in_chain" -i lo -j ACCEPT
+  ipt -A "$in_chain" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  ipt -A "$in_chain" -j DROP
+
+  local old6_out="" old6_in="" suffix6="" out6_chain="" in6_chain="" refs6=""
+  if [ "$have_ipv6" -eq 1 ]; then
+    old6_out=$(active_chain_v6 OUTPUT)
+    old6_in=$(active_chain_v6 INPUT)
+    refs6=$(
+      {
+        ip6t -L OUTPUT -n --line-numbers
+        ip6t -L INPUT -n --line-numbers
+      } | awk '$2 ~ /^AIC6_(OUT|IN)_[AB]$/ {count++} END {print count+0}'
+    )
+    case "$old6_out:$old6_in:$refs6" in
+      ::0) suffix6=a ;;
+      AIC6_OUT_A:AIC6_IN_A:2) suffix6=b ;;
+      AIC6_OUT_B:AIC6_IN_B:2) suffix6=a ;;
+      *)
+        echo "aic-firewall: ERROR — inconsistent active IPv6 rule generations; refusing to flush a possibly live chain." >&2
+        exit 1 ;;
+    esac
+    if [ "$suffix6" = a ]; then
+      out6_chain=AIC6_OUT_A; in6_chain=AIC6_IN_A
+    else
+      out6_chain=AIC6_OUT_B; in6_chain=AIC6_IN_B
+    fi
+
+    # Fail closed for IPv6 rather than letting AAAA/direct-address traffic
+    # bypass the IPv4 allowlist. Loopback and established replies remain usable.
+    prepare_chain_v6 "$out6_chain"
+    ip6t -A "$out6_chain" -d fe80::/10 -j DROP
+    ip6t -A "$out6_chain" -d fd00:ec2::254/128 -j DROP
+    ip6t -A "$out6_chain" -o lo -j ACCEPT
+    ip6t -A "$out6_chain" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    ip6t -A "$out6_chain" -j DROP
+
+    prepare_chain_v6 "$in6_chain"
+    ip6t -A "$in6_chain" -i lo -j ACCEPT
+    ip6t -A "$in6_chain" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    ip6t -A "$in6_chain" -j DROP
+
+    # Close IPv6 first; if a later IPv4 switch somehow fails, the result is
+    # stricter, never an IPv6 bypass.
+    switch_chain_v6 OUTPUT "$old6_out" "$out6_chain"
+    switch_chain_v6 INPUT "$old6_in" "$in6_chain"
+    ip6t -P OUTPUT DROP
+    ip6t -P INPUT DROP
+  fi
+
+  # A single rule replacement promotes the fully prepared v4 generation.
+  switch_chain_v4 OUTPUT "$old_out" "$out_chain"
+  switch_chain_v4 INPUT "$old_in" "$in_chain"
+  ipt -P OUTPUT DROP
+  ipt -P INPUT DROP
+
+  echo "==> aic-firewall: enabled (default DROP, allowlist active; IPv6 blocked)"
   echo "    To widen: 'aic rebuild' from the host."
 }
 
-# Always-on baseline: drop egress to cloud metadata + link-local (169.254.0.0/16),
-# independent of the opt-in allowlist. Idempotent (dedicated AIC_METADATA chain,
-# re-flushed each run; the OUTPUT jump is inserted once). Strengthen-only: it
-# adds a DROP and never opens anything. Best-effort IPv6 (AWS IMDSv6 fd00:ec2::254
-# + link-local) when ip6tables is present — absence is not an error.
+# Always-on baseline. Dedicated chains are additive and never flushed; ensuring
+# a first-position jump is strengthen-only even when upgrading an old container.
 cmd_block_metadata() {
-  iptables -N AIC_METADATA 2>/dev/null || iptables -F AIC_METADATA
-  iptables -A AIC_METADATA -d 169.254.0.0/16 -j DROP
-  iptables -C OUTPUT -j AIC_METADATA 2>/dev/null || iptables -I OUTPUT 1 -j AIC_METADATA
-
-  if command -v ip6tables >/dev/null 2>&1; then
-    ip6tables -N AIC_METADATA 2>/dev/null || ip6tables -F AIC_METADATA 2>/dev/null || true
-    ip6tables -A AIC_METADATA -d fd00:ec2::254 -j DROP 2>/dev/null || true
-    ip6tables -A AIC_METADATA -d fe80::/10 -j DROP 2>/dev/null || true
-    ip6tables -C OUTPUT -j AIC_METADATA 2>/dev/null || ip6tables -I OUTPUT 1 -j AIC_METADATA 2>/dev/null || true
+  lock_firewall
+  ensure_metadata_v4
+  if ipv6_filter_available; then
+    ensure_metadata_v6
+  elif ipv6_configured; then
+    echo "aic-firewall: ERROR — IPv6 is configured but its metadata/link-local filter could not be installed." >&2
+    exit 1
   fi
 
-  echo "==> aic-firewall: metadata/link-local egress blocked (169.254.0.0/16)"
+  echo "==> aic-firewall: metadata/link-local egress blocked (169.254.0.0/16, 100.100.100.200, IPv6 link-local/IMDSv6)"
 }
 
 cmd_status() {
@@ -180,10 +461,30 @@ cmd_status() {
   iptables -L OUTPUT -n --line-numbers
   echo
   echo "## iptables AIC_METADATA chain (always-on metadata/link-local block)"
-  iptables -L AIC_METADATA -n --line-numbers 2>/dev/null || echo "(not created yet — run: sudo aic-firewall block-metadata)"
+  ipt -L AIC_METADATA -n --line-numbers 2>/dev/null || echo "(not created yet — run: sudo aic-firewall block-metadata)"
   echo
-  echo "## ipset aic-allowed"
-  ipset list aic-allowed 2>/dev/null || echo "(not created yet — run: sudo aic-firewall enable)"
+  if ipv6_filter_available; then
+    echo "## ip6tables OUTPUT chain"
+    ip6t -L OUTPUT -n --line-numbers
+    echo
+    echo "## ip6tables AIC_METADATA chain"
+    ip6t -L AIC_METADATA -n --line-numbers 2>/dev/null || echo "(not created yet)"
+    echo
+  fi
+  echo "## active IPv4 allowlist ipset"
+  local active suffix set
+  active=$(active_chain_v4 OUTPUT)
+  case "$active" in
+    AIC_OUT_A) suffix=a ;;
+    AIC_OUT_B) suffix=b ;;
+    *) suffix="" ;;
+  esac
+  if [ -n "$suffix" ]; then
+    set="aic-allowed-v4-$suffix"
+    ipset list "$set"
+  else
+    echo "(not created yet — run: sudo aic-firewall enable)"
+  fi
 }
 
 case "${1:-}" in

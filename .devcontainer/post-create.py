@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # /// script
-# requires-python = ">=3.13"
-# dependencies = ["tomli-w"]
+# requires-python = ">=3.12"
 # ///
 """Post-create configuration for aicontainer.
 
@@ -10,31 +9,56 @@ Runs once per container creation. Wires up:
 - bypassPermissions for Claude Code + PreToolUse hook registration
 - Auto-approve / sandbox-off for Codex
 - permission=allow for OpenCode + shared guardrail wired as a plugin
-- Allowlisted seeding of host ~/.claude/settings.json, ~/.codex/config.toml and
-  ~/.config/opencode/opencode.json (security-critical fields forced to container
-  defaults; inline provider API keys are stripped from the opencode seed)
-- Per-project session symlinks (~/.claude-sessions). Tool credentials (claude
-  .credentials.json, codex auth.json, gh hosts.yml) persist via subpath
-  mounts of aic-auth-global declared in docker-compose.yml — no leaf-file
-  symlinks, which would be clobbered by atomic-rename writes.
+- A root-only sanitizer mode that turns fixed host config inputs into strict,
+  JSON-only allowlisted seeds before the unrestricted devcontainer can see them
+- Whole per-project tool homes under ~/.aic-sessions. A separate networkless
+  sidecar syncs only the tools' exact JSON credential files with the global
+  auth volume, so login persists without sharing config, prompts, or plugins.
 - Ownership fix for named volumes (they come up root-owned the first time)
-- Container-only git config that [include]s the read-only host gitconfig
+- Container-only git config installed into a root-owned system path
 """
 
+import fcntl
+import hashlib
 import json
 import os
-import shutil
+import secrets
+import stat
 import subprocess
 import sys
+import tempfile
+import time
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
-
-import tomli_w
 
 HOME = Path.home()
 AUTH = HOME / ".config" / "aic-auth"            # global volume
-SESSIONS = HOME / ".claude-sessions"             # per-project volume
-HOST_GITCONFIG = HOME / ".gitconfig"             # bind-mounted RO from host
+SESSIONS = HOME / ".aic-sessions"                # per-project volume
+TOOL_HOMES = SESSIONS / "tool-homes"
+CLAUDE_HOME = TOOL_HOMES / "claude"
+CODEX_HOME = TOOL_HOMES / "codex"
+OPENCODE_CONFIG_DIR = TOOL_HOMES / "opencode-config"
+OPENCODE_DATA_DIR = TOOL_HOMES / "opencode-data"
+CODEX_RUNTIME_HOME = HOME / ".local" / "share" / "aic-tools" / "codex"
+
+# The unrestricted devcontainer sees only these root-owned JSON outputs from
+# the one-shot Compose sanitizer. Raw host files are mounted exclusively into
+# that networkless service at RAW_HOST_SEED and never enter this container.
+HOST_SEED = Path("/host-seed")
+RAW_HOST_SEED = Path("/raw-host-seed")
+SANITIZED_HOST_SEED = Path("/sanitized-host-seed")
+HOST_SEED_CLAUDE = HOST_SEED / "claude.json"
+HOST_SEED_CODEX = HOST_SEED / "codex.json"
+HOST_SEED_OPENCODE = HOST_SEED / "opencode.json"
+HOST_SEED_GIT = HOST_SEED / "git.json"
+
+# post-create writes the dynamic config as vscode to this fixed staging path;
+# aic-lock-gitconfig validates and atomically installs it into the root-owned
+# destination without granting a general-purpose privileged copy primitive.
+GITCONFIG_STAGING = HOME / ".aic-gitconfig.staging"
+GITCONFIG_MANAGED = Path("/etc/aic/user-config/gitconfig")
+GITIGNORE_MANAGED = Path("/etc/aic/gitignore")
 
 # Sandbox commit-signing material, provisioned by `aic signing` and persisted
 # in the aic-auth-global volume (so the pubkey is registered on GitHub once and
@@ -44,17 +68,9 @@ SIGNING = AUTH / "signing"
 SIGNING_KEY = SIGNING / "id_ed25519"             # private key (0600, vscode-owned)
 SIGNING_MODE = SIGNING / "mode"                  # "auto" | "byok" | "disabled"
 SIGNING_ALLOWED = SIGNING / "allowed_signers"    # for in-container verification
-HOST_SEED_CLAUDE = Path("/host-seed/claude")     # bind-mounted RO file/dir
-HOST_SEED_CODEX = Path("/host-seed/codex")       # bind-mounted RO file
-HOST_SEED_OPENCODE = Path("/host-seed/opencode") # bind-mounted RO file
-
-# OpenCode splits config from data. The config dir holds opencode.json + the
-# global AGENTS.md (rewritten fresh each create, like claude settings.json); the
-# data dir is the aic-auth-global:opencode subpath mount where auth.json /
-# account.json persist. The session db lives per-project, relocated via
-# OPENCODE_DB (devcontainer.json) into the SESSIONS volume.
-OPENCODE_CONFIG_DIR = HOME / ".config" / "opencode"
-OPENCODE_DATA_DIR = HOME / ".local" / "share" / "opencode"
+# OpenCode splits config from data. Both whole directories are per-project;
+# auth.json/account.json in the data dir are the only paths synchronized to the
+# global auth volume by the dedicated sidecar.
 
 # Optional project-declared volume mountpoints to re-own, one path per line in
 # .devcontainer/chown-paths. The prefix allowlist mirrors (advisory-only) the
@@ -89,7 +105,7 @@ ENABLED_TOOLS = frozenset(
 # ~/.claude/settings.json — re-applying that trust inside the container
 # matches how Codex handles its mcp_servers tables.
 CLAUDE_ALLOWED_FIELDS = frozenset({
-    "env", "attribution", "statusLine",
+    "attribution",
     "enabledPlugins", "extraKnownMarketplaces",
     "mcpServers", "enabledMcpjsonServers",
     "disabledMcpjsonServers", "enableAllProjectMcpServers",
@@ -124,9 +140,10 @@ CODEX_ALLOWED_TABLES = frozenset({
 # guardrail) regardless, and never seed `$schema` (we write our own). `provider`
 # is seeded so custom providers (e.g. a DeepSeek endpoint) carry over — but any
 # inline API key under it is scrubbed (see _scrub_provider_secrets): credentials
-# are never forwarded; the user runs `opencode auth login` inside. `mcp` is
-# seeded verbatim (parallel to Claude/Codex MCP seeding — server secrets in
-# env/headers ride along under the same accepted trade-off).
+# are never forwarded; the user runs `opencode auth login` inside. MCP command
+# metadata is preserved in parallel with Claude/Codex, but inline env/header
+# maps are recursively stripped; non-secret environment-variable references
+# can still be represented by the tool's ordinary config syntax.
 OPENCODE_ALLOWED_KEYS = frozenset({
     "provider", "model", "small_model",
     "mcp", "agent", "instructions",
@@ -138,14 +155,27 @@ OPENCODE_ALLOWED_KEYS = frozenset({
 # (or an unforwarded "{env:...}" reference) is not written into the sandbox config.
 OPENCODE_SECRET_KEY_HINTS = ("key", "token", "secret", "password")
 
+# Exact names that conventionally carry literal credentials. Apply this across
+# every allowlisted seed subtree, not just known MCP/provider locations: config
+# formats evolve, and preserving an unknown inline secret is worse than making
+# that one host convenience require an in-container login. Environment-variable
+# *references* such as env_vars / env_http_headers / bearer_token_env_var do not
+# match these exact names and remain available.
+INLINE_SECRET_FIELDS = frozenset({
+    "env", "environment", "headers", "http_headers",
+    "apikey", "api_key", "token", "access_token", "bearer_token",
+    "secret", "password", "authorization",
+})
+
 # A managed note written into each enabled tool's user-level memory file
 # (~/.claude/CLAUDE.md for Claude, ~/.codex/AGENTS.md for Codex,
 # ~/.config/opencode/AGENTS.md for OpenCode — all auto-loaded by their tool on
 # every session), so an agent doesn't burn tokens "fixing" the
 # read-only git internals. .git/config, .git/hooks, and .devcontainer/ are
 # bind-mounted read-only (see docker-compose.yml); the resulting write failures
-# are by-design, not bugs. Marker-delimited so the note can evolve across
-# versions and any user-added content in the same file is preserved.
+# are by-design, not bugs. These user-level instruction files are deliberately
+# reset on every create; intentional project instructions belong in the repo's
+# CLAUDE.md/AGENTS.md, where they remain project-owned and reviewable.
 SANDBOX_MEMORY_BEGIN = "<!-- BEGIN aicontainer sandbox notes (managed) -->"
 SANDBOX_MEMORY_END = "<!-- END aicontainer sandbox notes (managed) -->"
 SANDBOX_MEMORY_NOTE = """\
@@ -169,9 +199,76 @@ around them:
 If a change to `.git/config` or `.git/hooks` is genuinely required, make it from
 the host, outside the container."""
 
+# Host git keys that are data/preferences rather than executable behavior or
+# paths. Deliberately absent: include/includeIf, credential.*, url.*, alias.*,
+# core.sshCommand, core.hooksPath, pagers/editors, signing-key paths, and every
+# other command/path-bearing key. Signing *intent* is retained so the sandbox
+# can decide whether to enable its own isolated key or disable signing cleanly.
+GIT_SEED_KEYS = (
+    "user.name", "user.email", "user.useConfigOnly",
+    "init.defaultBranch",
+    "core.autocrlf", "core.safecrlf", "core.ignoreCase", "core.precomposeUnicode",
+    "pull.rebase", "pull.ff",
+    "push.default", "push.autoSetupRemote", "push.followTags",
+    "fetch.prune", "fetch.pruneTags",
+    "rebase.autoStash", "rebase.autoSquash", "rebase.updateRefs",
+    "branch.autoSetupMerge", "branch.autoSetupRebase",
+    "diff.algorithm", "diff.colorMoved",
+    "merge.conflictStyle",
+    "commit.gpgSign", "tag.gpgSign",
+)
+
 
 def log(msg: str) -> None:
     print(f"[post-create] {msg}", file=sys.stderr)
+
+
+def _safe_write_text(path: Path, text: str, *, create: bool = False) -> None:
+    """Write one fixed config/memory file without following links.
+
+    Tool homes are ordinary directories in the per-project sessions volume.
+    Validate the parent and existing inode before writing so a stale or hostile
+    symlink cannot redirect the create-time seed outside that tool home.
+    """
+    parent = path.parent
+    try:
+        parent_info = parent.lstat()
+        if not stat.S_ISDIR(parent_info.st_mode) or parent.is_symlink():
+            raise OSError(f"unsafe non-directory parent: {parent}")
+        if parent.resolve(strict=True) != parent:
+            raise OSError(f"unsafe symlinked parent: {parent}")
+    except (OSError, RuntimeError) as error:
+        raise OSError(f"cannot safely resolve parent for {path}: {error}") from error
+
+    flags = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    before: os.stat_result | None
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        before = None
+    if before is None:
+        if not create:
+            raise OSError(f"required mounted file is missing: {path}")
+        flags |= os.O_CREAT | os.O_EXCL
+    elif not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise OSError(f"refusing symlink/non-regular/hard-linked file: {path}")
+
+    fd = os.open(path, flags, 0o600)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise OSError(f"opened unsafe file: {path}")
+        if before is not None and (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError(f"file changed while opening: {path}")
+        os.ftruncate(fd, 0)
+        payload = text.encode()
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
 
 
 def _project_chown_paths() -> list[Path]:
@@ -202,23 +299,17 @@ def fix_volume_ownership() -> None:
     needs_chown = False
     for path in (
         HOME / ".shell-history",
-        AUTH,
+        AUTH / "signing",
+        AUTH / "semgrep",
         SESSIONS,
-        HOME / ".claude",
-        HOME / ".codex",
-        OPENCODE_DATA_DIR,
         HOME / ".config" / "gh",
         HOME / ".config" / "npm",
     ):
         path.mkdir(parents=True, exist_ok=True)
         if path.stat().st_uid != uid:
             needs_chown = True
-    # NOTE: the signing dir (AUTH/signing) is intentionally NOT created here.
-    # On first creation AUTH is a root-owned named volume, and mkdir-ing a NEW
-    # subdir as vscode before the chown below would EACCES (the other entries
-    # are pre-existing Docker mountpoints, so their mkdir is a harmless no-op).
-    # `aic signing` creates signing/ as vscode once the volume is writable, and
-    # aic-chown-volumes re-owns AUTH recursively, so it stays vscode-owned.
+    # Signing and semgrep are exact subpath mounts; the broad auth-volume root
+    # is deliberately not exposed at AUTH.
     # Project-declared mountpoints: don't mkdir (they're volume mounts that
     # exist iff the volume is attached); only flag a chown when one is present
     # and still root-owned — e.g. a rebuild where aic's own volumes are already
@@ -233,252 +324,81 @@ def fix_volume_ownership() -> None:
         except subprocess.CalledProcessError as e:
             log(f"warning: aic-chown-volumes failed: {e}")
 
-
-def _is_empty_placeholder(p: Path) -> bool:
-    """True if p is a 0-byte file or empty directory — i.e. a placeholder
-    created by `mkdir` in the Dockerfile (or `touch` from a previous run)
-    rather than user/tool-written content."""
-    if p.is_symlink() or not p.exists():
-        return False
-    if p.is_file():
-        return p.stat().st_size == 0
-    if p.is_dir():
-        return not any(p.iterdir())
-    return False
+    # Docker creates a named volume's root with the mode inherited from the
+    # first container that mounts it. The auth-sync sidecar can win that race,
+    # leaving this otherwise-private root at 0755 even though its tool-home
+    # children are 0700. It is owned by the runtime user after the fixed helper
+    # above, so tightening it here needs no additional sudo grant.
+    try:
+        SESSIONS.chmod(0o700)
+    except OSError as error:
+        log(f"warning: could not make {SESSIONS} private: {error}")
 
 
-def _ensure_link_target(src: Path) -> None:
-    """Create `src` (a symlink target) if it's missing, so the link never
-    dangles. Heuristic: paths with a suffix (.json, .jsonl) are files;
-    otherwise directories. Login/session flows that write through the symlink
-    then land on the persistent volume immediately."""
-    if src.exists():
-        return
-    src.parent.mkdir(parents=True, exist_ok=True)
-    if src.suffix:
-        src.touch()
-    else:
-        src.mkdir(parents=True, exist_ok=True)
-
-
-def link(src: Path, dst: Path) -> None:
-    """Make `dst` a symlink pointing at `src`.
-
-    Cases handled:
-    - dst already correctly points at src → ensure src exists (heal a dangling
-      target), then no-op. This matters because the session symlinks live in
-      the SHARED aic-auth-global volume but point into the PER-PROJECT
-      aic-sessions volume: the first project to run creates both the symlink
-      and its target, but every *other* project mounts the same shared volume,
-      inherits the already-correct symlink, and would otherwise never create
-      its own target — leaving it dangling so `mkdir` of the transcript dir
-      fails ("File exists") and `/resume` finds nothing.
-    - dst is a stale symlink → unlink and recreate
-    - dst is an empty placeholder (0-byte file or empty dir) and src has real
-      content → replace dst with the symlink (the rebuild case where the
-      Dockerfile pre-creates dst but the persistent volume already holds the
-      data — without this branch, `gh auth login` etc. silently appears lost)
-    - dst is a real file/dir and src doesn't exist → move dst's contents into
-      src, then symlink (first run after a fresh `gh auth login` etc.)
-    - dst is a real file/dir and src also exists with content → leave dst
-      alone and warn
-    - dst doesn't exist → ensure src exists (as file or dir based on whether
-      we're linking a file path or a dir path), then symlink
-    """
-    src.parent.mkdir(parents=True, exist_ok=True)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-
-    if dst.is_symlink():
-        if dst.resolve() == src.resolve():
-            _ensure_link_target(src)
-            return
-        dst.unlink()
-    elif dst.exists():
-        src_has_content = src.exists() and not _is_empty_placeholder(src)
-        if _is_empty_placeholder(dst) and src_has_content:
-            if dst.is_dir():
-                dst.rmdir()
-            else:
-                dst.unlink()
-        elif src.exists():
-            log(f"warning: both {dst} and {src} exist; leaving {dst} alone")
-            return
-        else:
-            # shutil.move (not Path.rename) so dst on the container rootfs can
-            # move to src on a named-volume mount — rename() fails EXDEV
-            # across filesystems.
-            shutil.move(str(dst), str(src))
-
-    _ensure_link_target(src)
-
-    dst.symlink_to(src)
-    log(f"linked {dst} -> {src}")
+def _load_sanitized_seed(path: Path) -> dict:
+    """Load one root-owned JSON product from the sanitizer service."""
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"warning: sanitized seed {path.name} unavailable/invalid ({e}); using defaults")
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def load_host_claude_settings() -> dict:
-    """Read host's ~/.claude/settings.json (bind-mounted RO), keep only
-    fields in CLAUDE_ALLOWED_FIELDS, and rewrite statusLine.command paths
-    that reference the host ~/.claude/ directory to point at the RO seed
-    mount. Returns an empty dict if no host file or unparseable."""
-    src = HOST_SEED_CLAUDE / "settings.json"
-    if not src.exists() or src.stat().st_size == 0:
-        return {}
+    """Load the already-allowlisted Claude JSON emitted by the sanitizer."""
+    return _load_sanitized_seed(HOST_SEED_CLAUDE)
+
+
+def ensure_sandbox_memory(path: Path, *, create: bool = False) -> None:
+    """Replace an auto-loaded user-memory file with the managed sandbox note.
+
+    Preserving arbitrary prior text lets one compromised session plant prompts
+    that execute in a later create. Users keep intentional project instructions
+    in the repository's CLAUDE.md/AGENTS.md; these user-level files are managed
+    security surfaces and are reset on every create.
+    """
+    block = f"{SANDBOX_MEMORY_BEGIN}\n{SANDBOX_MEMORY_NOTE}\n{SANDBOX_MEMORY_END}\n"
     try:
-        host = json.loads(src.read_text())
-    except json.JSONDecodeError as e:
-        log(f"warning: host settings.json invalid JSON ({e}); skipping seed")
-        return {}
-
-    seeded = {k: v for k, v in host.items() if k in CLAUDE_ALLOWED_FIELDS}
-    dropped = sorted(k for k in host if k not in CLAUDE_ALLOWED_FIELDS)
-    if dropped:
-        log(f"seed: dropped host settings.json fields {dropped} (forced by container)")
-
-    sl = seeded.get("statusLine")
-    if isinstance(sl, dict) and isinstance(sl.get("command"), str):
-        cmd = sl["command"]
-        if "/.claude/" in cmd:
-            head, _, tail = cmd.partition("/.claude/")
-            # `head` is e.g. "node /Users/stefano" — interpreter then host
-            # HOME path. Drop the host HOME path; keep the interpreter.
-            interp = head.rpartition(" ")[0].strip()
-            host_script = f"/host-seed/claude/{tail}".split()[0]
-            if not Path(host_script).exists():
-                log(
-                    f"warning: statusLine.command references {host_script}, but only "
-                    f"~/.claude/statusline/ is bind-mounted into the container. The "
-                    f"statusline may fail to run. Move the script under "
-                    f"~/.claude/statusline/ on the host, or edit "
-                    f".devcontainer/docker-compose.yml to mount its location."
-                )
-            new_cmd = f"{interp} /host-seed/claude/{tail}".strip()
-            sl["command"] = new_cmd
-            log(f"seed: rewrote statusLine.command -> {new_cmd}")
-
-    return seeded
-
-
-def ensure_sandbox_memory(path: Path) -> None:
-    """Upsert the managed sandbox note (SANDBOX_MEMORY_NOTE) into a tool's
-    user-level memory file. Three cases, all idempotent:
-
-    - file absent → create it holding just the marker-wrapped note.
-    - markers already present → replace only what's between them (so the note
-      text can change in a future version without duplicating).
-    - file exists without our markers → append the block, preserving the user's
-      own content (they may keep personal notes in the same file).
-
-    Best-effort: a write failure is logged, not fatal, matching the rest of
-    post-create's defensive degradation."""
-    # No trailing newline on the block itself: in the in-place-replace branch
-    # the existing tail (the text after the END marker) supplies it, so a
-    # re-run is byte-identical. The create/append branches add the final "\n".
-    block = f"{SANDBOX_MEMORY_BEGIN}\n{SANDBOX_MEMORY_NOTE}\n{SANDBOX_MEMORY_END}"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing = path.read_text() if path.is_file() else ""
-        if SANDBOX_MEMORY_BEGIN in existing and SANDBOX_MEMORY_END in existing:
-            head, _, rest = existing.partition(SANDBOX_MEMORY_BEGIN)
-            _, _, tail = rest.partition(SANDBOX_MEMORY_END)
-            updated = f"{head}{block}{tail}"
-        elif existing.strip():
-            updated = f"{existing.rstrip(chr(10))}\n\n{block}\n"
-        else:
-            updated = f"{block}\n"
-        if updated != existing:
-            path.write_text(updated)
-            log(f"wrote sandbox note -> {path}")
+        _safe_write_text(path, block, create=create)
+        log(f"reset managed sandbox note -> {path}")
     except OSError as e:
         log(f"warning: could not write sandbox note to {path}: {e}")
 
 
 def setup_claude() -> None:
-    """Configure Claude Code: seed allowlisted host settings, then force
-    bypassPermissions + the PreToolUse hook. ~/.claude itself is the
-    aic-auth-global:claude subpath mount, so .credentials.json persists
-    by virtue of being inside that volume — no leaf-file symlink needed
-    (which would be clobbered by Claude's atomic-rename writes)."""
-    claude_dir = HOME / ".claude"
+    """Configure Claude Code preferences. Autonomous mode and the PreToolUse
+    hook are enforced separately in /etc/claude-code/managed-settings.json, at
+    higher precedence than this writable, per-project user config. The
+    auth-sync sidecar copies only .credentials.json between this whole home and
+    the global credential store."""
+    claude_dir = CLAUDE_HOME
     claude_dir.mkdir(parents=True, exist_ok=True)
 
     settings_file = claude_dir / "settings.json"
     settings = load_host_claude_settings()
 
-    # Force-override fields that are the actual security/sandbox boundary.
-    # `permissions` is irrelevant in bypassPermissions mode but we set it
-    # explicitly so the file is self-documenting.
-    settings.setdefault("permissions", {})["defaultMode"] = "bypassPermissions"
-
-    hook_spec = json.loads(Path("/etc/aic/hooks/claude-settings.json").read_text())
-    settings["hooks"] = hook_spec["hooks"]
-    settings_file.write_text(json.dumps(settings, indent=2) + "\n")
+    _safe_write_text(settings_file, json.dumps(settings, indent=2) + "\n", create=True)
     log(f"wrote {settings_file}")
 
-    # User-level memory Claude auto-loads every session.
-    ensure_sandbox_memory(claude_dir / "CLAUDE.md")
+    # User-level memory is project-local and reset to the managed note on every
+    # create, preventing a prior autonomous session from planting instructions.
+    ensure_sandbox_memory(claude_dir / "CLAUDE.md", create=True)
 
-    # sessions: ~/.claude/projects/ → per-project volume. This symlink lives
-    # inside aic-auth-global (because claude_dir IS that mount) but its
-    # target is an absolute path string that resolves into aic-sessions at
-    # access time, so different projects see distinct project directories.
-    link(SESSIONS / "claude-projects", claude_dir / "projects")
-    # prompt history: ~/.claude/history.jsonl → per-project volume, so up-arrow
-    # recall is scoped per project. Without this it lives in the shared
-    # aic-auth-global:claude mount, and because every container's cwd is
-    # /workspace, Claude's per-cwd history filter (entry.project === cwd) matches
-    # *every* project's entries — so up-arrow bleeds across all projects.
-    # A leaf-file symlink is safe here: Claude appends to history.jsonl (the
-    # append follows the symlink to the target). The only rewrite-via-atomic-
-    # rename is the explicit, confirmation-gated "delete project data" command;
-    # if a user runs it the symlink is replaced by a regular file on the shared
-    # mount (no data lost — just reverts to shared scope until the next rebuild
-    # re-links). Mirrors the codex-history.jsonl handling in setup_codex().
-    link(SESSIONS / "claude-history.jsonl", claude_dir / "history.jsonl")
-    # Note: we deliberately do NOT symlink ~/.claude.json into the per-project
-    # volume. Claude reads/writes that file via atomic rename, which would
-    # replace any symlink with a regular file on first write — so the data
-    # would land on the rootfs anyway and the symlink would only mislead.
-    # The file therefore lives on the rootfs and is rebuild-volatile (only
-    # onboarding state + project history; auth is in .credentials.json, which
-    # is inside the aic-auth-global:claude subpath mount and persists).
+    # Every session/history/customization path now lives in this whole
+    # per-project home; no globally writable directory controls it.
+    (claude_dir / "projects").mkdir(exist_ok=True)
 
 
 def load_host_codex_config() -> dict:
-    """Read host's ~/.codex/config.toml (bind-mounted RO), keep allowlisted
-    top-level scalars and tables. [hooks*] is dropped (we own it),
-    approval_policy / sandbox_mode are stripped (we force them)."""
-    src = HOST_SEED_CODEX / "config.toml"
-    if not src.exists() or src.stat().st_size == 0:
-        return {}
-    try:
-        host = tomllib.loads(src.read_text())
-    except tomllib.TOMLDecodeError as e:
-        log(f"warning: host config.toml invalid TOML ({e}); skipping seed")
-        return {}
-
-    seeded: dict = {}
-    dropped: list[str] = []
-    for k, v in host.items():
-        if isinstance(v, dict):
-            if k in CODEX_ALLOWED_TABLES:
-                seeded[k] = v
-            else:
-                dropped.append(k)
-        else:
-            if k in CODEX_ALLOWED_TOPLEVEL and k not in {"approval_policy", "sandbox_mode"}:
-                seeded[k] = v
-            else:
-                dropped.append(k)
-    if dropped:
-        log(f"seed: dropped host config.toml entries {sorted(dropped)} (forced by container or unsafe to seed)")
-    return seeded
+    """Load the already-allowlisted Codex JSON emitted by the sanitizer."""
+    return _load_sanitized_seed(HOST_SEED_CODEX)
 
 
 def setup_codex() -> None:
     """Configure Codex: seed allowlisted host config, then force
-    approval-policy=never and sandbox=danger-full-access. ~/.codex is itself the
-    aic-auth-global:codex subpath mount; auth.json persists inside it (same
-    atomic-rename reasoning as Claude).
+    approval-policy=never and sandbox=danger-full-access. The whole CODEX_HOME
+    is per-project; the auth-sync sidecar shares only auth.json.
 
     The shared PreToolUse hook is NOT wired here: Codex command hooks are
     trust-gated, so a hook in this (non-managed) config.toml would be skipped
@@ -486,7 +406,7 @@ def setup_codex() -> None:
     hook in /etc/codex/requirements.toml (see template/Dockerfile), which Codex
     auto-trusts and the in-container user can't disable. A host `[hooks]` table
     is already dropped by load_host_codex_config()'s allowlist."""
-    codex_dir = HOME / ".codex"
+    codex_dir = CODEX_HOME
     codex_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = load_host_codex_config()
@@ -494,16 +414,19 @@ def setup_codex() -> None:
     cfg["sandbox_mode"] = "danger-full-access"
 
     config_toml = codex_dir / "config.toml"
-    config_toml.write_text(tomli_w.dumps(cfg))
+    # Pinned and baked into /opt by the Dockerfile; importing lazily keeps the
+    # networkless sanitizer mode stdlib-only.
+    sys.path.insert(0, "/opt/aic-python")
+    import tomli_w  # type: ignore[import-not-found]  # noqa: PLC0415
+
+    _safe_write_text(config_toml, tomli_w.dumps(cfg), create=True)
     log(f"wrote {config_toml}")
 
-    # Global AGENTS.md Codex auto-loads for every project (verified on 0.135).
-    ensure_sandbox_memory(codex_dir / "AGENTS.md")
+    # AGENTS.md auto-loads for Codex, but is project-local and reset to the
+    # managed note on every create.
+    ensure_sandbox_memory(codex_dir / "AGENTS.md", create=True)
 
-    # sessions: ~/.codex/sessions/ and history.jsonl → per-project volume.
-    # Same cross-volume symlink trick as the claude projects/ symlink.
-    link(SESSIONS / "codex-sessions", codex_dir / "sessions")
-    link(SESSIONS / "codex-history.jsonl", codex_dir / "history.jsonl")
+    (codex_dir / "sessions").mkdir(exist_ok=True)
 
 
 def _scrub_provider_secrets(provider: dict) -> bool:
@@ -531,45 +454,571 @@ def _scrub_provider_secrets(provider: dict) -> bool:
     return removed
 
 
-def load_host_opencode_config() -> dict:
-    """Read host's ~/.config/opencode/opencode.json (bind-mounted RO), keep only
-    keys in OPENCODE_ALLOWED_KEYS, and scrub inline provider secrets. `permission`
-    and `plugin` are dropped here (we force them in setup_opencode). Returns an
-    empty dict if no host file or unparseable."""
-    src = HOST_SEED_OPENCODE / "opencode.json"
-    if not src.exists() or src.stat().st_size == 0:
+def _drop_keys_recursive(value: object, blocked: frozenset[str]) -> bool:
+    """Remove fixed secret-bearing keys from a nested JSON/TOML subtree."""
+    removed = False
+    if isinstance(value, dict):
+        for key in list(value):
+            if isinstance(key, str) and key.lower() in blocked:
+                del value[key]
+                removed = True
+            elif _drop_keys_recursive(value[key], blocked):
+                removed = True
+    elif isinstance(value, list):
+        for item in value:
+            if _drop_keys_recursive(item, blocked):
+                removed = True
+    return removed
+
+
+def _read_json_object(path: Path, label: str) -> dict:
+    if not path.is_file() or path.stat().st_size == 0:
         return {}
     try:
-        host = json.loads(src.read_text())
-    except json.JSONDecodeError as e:
-        log(f"warning: host opencode.json invalid JSON ({e}); skipping seed")
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"sanitizer: invalid {label} ({e}); emitting empty seed")
         return {}
-    if not isinstance(host, dict):
+    if not isinstance(value, dict):
+        log(f"sanitizer: {label} is not an object; emitting empty seed")
         return {}
+    return value
 
-    seeded = {k: v for k, v in host.items() if k in OPENCODE_ALLOWED_KEYS}
-    dropped = sorted(k for k in host if k not in OPENCODE_ALLOWED_KEYS and k != "$schema")
+
+def _sanitize_claude_seed() -> dict:
+    host = _read_json_object(RAW_HOST_SEED / "claude-settings.json", "Claude settings")
+    seeded = {k: v for k, v in host.items() if k in CLAUDE_ALLOWED_FIELDS}
+    dropped = sorted(k for k in host if k not in CLAUDE_ALLOWED_FIELDS)
     if dropped:
-        log(f"seed: dropped host opencode.json keys {dropped} (forced by container or unsafe to seed)")
-
-    prov = seeded.get("provider")
-    if isinstance(prov, dict) and _scrub_provider_secrets(prov):
-        log("seed: stripped inline provider API key(s) from opencode.json — host "
-            "credentials are not forwarded; run 'opencode auth login' inside the container")
+        log(f"sanitizer: dropped Claude settings fields {dropped}")
+    if _drop_keys_recursive(seeded, INLINE_SECRET_FIELDS):
+        log("sanitizer: dropped literal Claude config credentials")
     return seeded
 
 
-def setup_opencode() -> None:
-    """Configure OpenCode: seed allowlisted host config, then force
-    permission=allow (the bypass/autonomous boundary) and wire the shared
-    PreToolUse guardrail as a plugin (absolute path to the root-owned shim).
+def _sanitize_codex_seed() -> dict:
+    src = RAW_HOST_SEED / "codex-config.toml"
+    if not src.is_file() or src.stat().st_size == 0:
+        return {}
+    try:
+        host = tomllib.loads(src.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        log(f"sanitizer: invalid Codex config ({e}); emitting empty seed")
+        return {}
 
-    ~/.local/share/opencode is the aic-auth-global:opencode subpath mount, so
-    auth.json / account.json persist inside it across rebuilds. Session
-    transcripts stay project-scoped: the sqlite db is relocated per-project via
-    OPENCODE_DB (devcontainer.json) into ~/.claude-sessions, and the file-based
-    storage dir is symlinked there too — same cross-volume trick as setup_claude's
-    projects/ symlink."""
+    seeded: dict = {}
+    dropped: list[str] = []
+    for key, value in host.items():
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            dropped.append(key)
+            continue
+        if isinstance(value, dict):
+            if key in CODEX_ALLOWED_TABLES:
+                seeded[key] = value
+            else:
+                dropped.append(key)
+        elif key in CODEX_ALLOWED_TOPLEVEL:
+            seeded[key] = value
+        else:
+            dropped.append(key)
+    if dropped:
+        log(f"sanitizer: dropped Codex config entries {sorted(dropped)}")
+    if _drop_keys_recursive(seeded, INLINE_SECRET_FIELDS):
+        log("sanitizer: dropped literal Codex config credentials")
+    return seeded
+
+
+def _sanitize_opencode_seed() -> dict:
+    host = _read_json_object(RAW_HOST_SEED / "opencode.json", "OpenCode config")
+    seeded = {k: v for k, v in host.items() if k in OPENCODE_ALLOWED_KEYS}
+    dropped = sorted(k for k in host if k not in OPENCODE_ALLOWED_KEYS and k != "$schema")
+    if dropped:
+        log(f"sanitizer: dropped OpenCode config keys {dropped}")
+    if _drop_keys_recursive(seeded, INLINE_SECRET_FIELDS):
+        log("sanitizer: dropped literal OpenCode config credentials")
+    provider = seeded.get("provider")
+    if isinstance(provider, dict) and _scrub_provider_secrets(provider):
+        log("sanitizer: stripped inline OpenCode provider secret(s)")
+    return seeded
+
+
+def _sanitize_git_seed() -> dict:
+    """Extract only fixed, non-executable keys from the raw host gitconfig.
+
+    --no-includes is load-bearing: a host include can point anywhere, while the
+    sanitizer receives exactly one raw input file by design.
+    """
+    src = RAW_HOST_SEED / "gitconfig"
+    if not src.is_file() or src.stat().st_size == 0:
+        return {}
+    seeded: dict[str, str] = {}
+    for key in GIT_SEED_KEYS:
+        try:
+            result = subprocess.run(
+                ["/usr/bin/git", "config", "--file", str(src), "--no-includes", "--null", "--get-all", key],
+                capture_output=True,
+            )
+        except OSError as e:
+            log(f"sanitizer: git unavailable ({e}); emitting empty git seed")
+            return {}
+        if result.returncode == 0:
+            values = [v for v in result.stdout.decode(errors="replace").split("\0") if v]
+            if values:
+                seeded[key.lower()] = values[-1]
+    return seeded
+
+
+def _write_sanitized_seed(name: str, value: dict) -> None:
+    """Atomically replace one of four fixed JSON outputs without following a
+    pre-existing symlink in the per-project sanitizer volume."""
+    SANITIZED_HOST_SEED.mkdir(parents=True, exist_ok=True)
+    os.chmod(SANITIZED_HOST_SEED, 0o700)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{name}.", dir=SANITIZED_HOST_SEED)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(value, f, indent=2, sort_keys=True)
+            f.write("\n")
+        tmp.chmod(0o444)
+        os.replace(tmp, SANITIZED_HOST_SEED / name)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def sanitize_seeds() -> int:
+    """One-shot Compose service entry point. It alone sees raw host inputs;
+    the long-running devcontainer receives only these four root-owned JSON
+    products through a read-only volume."""
+    if os.geteuid() != 0:
+        log("sanitizer: must run as root")
+        return 1
+    outputs = {
+        "claude.json": _sanitize_claude_seed(),
+        "codex.json": _sanitize_codex_seed(),
+        "opencode.json": _sanitize_opencode_seed(),
+        "git.json": _sanitize_git_seed(),
+    }
+    for name, value in outputs.items():
+        _write_sanitized_seed(name, value)
+    os.chmod(SANITIZED_HOST_SEED, 0o555)
+    log("sanitizer: wrote fixed allowlisted seeds")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Credential-only synchronization sidecar
+# ---------------------------------------------------------------------------
+# The long-running devcontainer never mounts these global tool directories.
+# Only the networkless auth-sync service sees them, and only these exact JSON
+# filenames are considered. Config, memory, sessions, skills, plugins, and all
+# unknown future files remain in the per-project tool home.
+AUTH_SYNC_GLOBAL = Path("/auth-global")
+AUTH_SYNC_PROJECT = Path("/project-sessions")
+AUTH_SYNC_READY = Path("/run/aic-auth-sync.ready")
+AUTH_SYNC_MAX_BYTES = 1024 * 1024
+AUTH_SYNC_INTERVAL_SECONDS = 1.0
+AUTH_SYNC_SPECS = (
+    ("Claude", "claude", "claude", ".credentials.json"),
+    ("Codex", "codex", "codex", "auth.json"),
+    ("OpenCode", "opencode", "opencode-data", "auth.json"),
+    ("OpenCode", "opencode", "opencode-data", "account.json"),
+)
+_AUTH_SYNC_WARNED: set[tuple[str, str]] = set()
+
+
+def auth_sync_log(message: str) -> None:
+    print(f"[auth-sync] {message}", file=sys.stderr, flush=True)
+
+
+@dataclass(frozen=True)
+class _CredentialState:
+    kind: str  # absent | invalid | valid
+    payload: bytes | None = None
+    digest: str = ""
+    mtime_ns: int = 0
+    detail: str = ""
+
+    @property
+    def fingerprint(self) -> tuple[str, str]:
+        if self.kind == "valid":
+            return (self.kind, self.digest)
+        if self.kind == "invalid":
+            return (self.kind, self.detail)
+        return (self.kind, "")
+
+
+def _auth_sync_warn(label: str, reason: str) -> None:
+    key = (label, reason)
+    if key not in _AUTH_SYNC_WARNED:
+        _AUTH_SYNC_WARNED.add(key)
+        auth_sync_log(f"ignoring unsafe/invalid {label}: {reason}")
+
+
+def _open_auth_directory(path: Path) -> int:
+    """Open one fixed mount directory without following an ancestor link."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError as error:
+        raise OSError(f"required auth-sync directory is missing: {path}") from error
+    if path.is_symlink() or not stat.S_ISDIR(before.st_mode):
+        raise OSError(f"refusing non-directory auth-sync path: {path}")
+    if path.resolve(strict=True) != path:
+        raise OSError(f"refusing symlinked auth-sync directory: {path}")
+    if before.st_uid != os.getuid():
+        raise OSError(f"auth-sync directory has unexpected owner: {path}")
+    if stat.S_IMODE(before.st_mode) & 0o077:
+        raise OSError(f"auth-sync directory must be mode 0700: {path}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        os.close(fd)
+        raise OSError(f"auth-sync directory changed while opening: {path}")
+    return fd
+
+
+def _read_credential(directory_fd: int, name: str, label: str) -> _CredentialState:
+    try:
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return _CredentialState("absent")
+    detail = f"{before.st_ino}:{before.st_mtime_ns}:{before.st_size}"
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        _auth_sync_warn(label, "not a single-link regular file")
+        return _CredentialState("invalid", mtime_ns=before.st_mtime_ns, detail=detail)
+    if before.st_uid != os.getuid():
+        _auth_sync_warn(label, "unexpected owner")
+        return _CredentialState("invalid", mtime_ns=before.st_mtime_ns, detail=detail)
+    if before.st_size <= 0 or before.st_size > AUTH_SYNC_MAX_BYTES:
+        _auth_sync_warn(label, f"size is outside 1..{AUTH_SYNC_MAX_BYTES} bytes")
+        return _CredentialState("invalid", mtime_ns=before.st_mtime_ns, detail=detail)
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as error:
+        _auth_sync_warn(label, f"safe open failed ({error.errno})")
+        return _CredentialState("invalid", mtime_ns=before.st_mtime_ns, detail=detail)
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_uid != os.getuid()
+            or opened.st_size <= 0
+            or opened.st_size > AUTH_SYNC_MAX_BYTES
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            _auth_sync_warn(label, "file changed during validation")
+            return _CredentialState("invalid", mtime_ns=opened.st_mtime_ns, detail=detail)
+        payload = bytearray()
+        while len(payload) <= AUTH_SYNC_MAX_BYTES:
+            chunk = os.read(fd, min(64 * 1024, AUTH_SYNC_MAX_BYTES + 1 - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        after = os.fstat(fd)
+        if len(payload) > AUTH_SYNC_MAX_BYTES or (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            _auth_sync_warn(label, "file changed while reading")
+            return _CredentialState("invalid", mtime_ns=after.st_mtime_ns, detail=detail)
+        try:
+            parsed = json.loads(bytes(payload))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            _auth_sync_warn(label, "not valid UTF-8 JSON")
+            return _CredentialState("invalid", mtime_ns=after.st_mtime_ns, detail=detail)
+        if not isinstance(parsed, dict):
+            _auth_sync_warn(label, "JSON root is not an object")
+            return _CredentialState("invalid", mtime_ns=after.st_mtime_ns, detail=detail)
+        os.fchmod(fd, 0o600)
+        raw = bytes(payload)
+        return _CredentialState(
+            "valid",
+            payload=raw,
+            digest=hashlib.sha256(raw).hexdigest(),
+            mtime_ns=after.st_mtime_ns,
+        )
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_credential(directory_fd: int, name: str, payload: bytes) -> None:
+    temp_name = f".aic-auth-sync.{name}.{os.getpid()}.{secrets.token_hex(6)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    temp_fd = os.open(temp_name, flags, 0o600, dir_fd=directory_fd)
+    installed = False
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(temp_fd, view)
+            view = view[written:]
+        os.fchmod(temp_fd, 0o600)
+        os.fsync(temp_fd)
+        os.replace(temp_name, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        installed = True
+        os.fsync(directory_fd)
+    finally:
+        os.close(temp_fd)
+        if not installed:
+            try:
+                os.unlink(temp_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+
+
+def _delete_credential(directory_fd: int, name: str, label: str) -> None:
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        _auth_sync_warn(label, "refusing to delete a non-regular or foreign-owned path")
+        return
+    os.unlink(name, dir_fd=directory_fd)
+    os.fsync(directory_fd)
+
+
+def _open_auth_lock(global_fd: int) -> int:
+    name = ".aic-auth-sync.lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, 0o600, dir_fd=global_fd)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        os.close(fd)
+        raise OSError("refusing unsafe auth-sync lock file")
+    os.fchmod(fd, 0o600)
+    return fd
+
+
+def _copy_credential(
+    source: _CredentialState,
+    destination_fd: int,
+    filename: str,
+    tool: str,
+    direction: str,
+) -> None:
+    if source.kind != "valid" or source.payload is None:
+        raise OSError("internal auth-sync copy without a valid source")
+    _atomic_write_credential(destination_fd, filename, source.payload)
+    auth_sync_log(f"{tool} {filename}: synchronized {direction}")
+
+
+def _initial_reconcile(
+    global_state: _CredentialState,
+    local_state: _CredentialState,
+    global_fd: int,
+    local_fd: int,
+    filename: str,
+    tool: str,
+) -> None:
+    if global_state.kind == "valid" and local_state.kind == "valid":
+        if global_state.digest == local_state.digest:
+            return
+        if local_state.mtime_ns > global_state.mtime_ns:
+            _copy_credential(local_state, global_fd, filename, tool, "project -> global")
+        else:
+            _copy_credential(global_state, local_fd, filename, tool, "global -> project")
+    elif global_state.kind == "valid":
+        _copy_credential(global_state, local_fd, filename, tool, "global -> project")
+    elif local_state.kind == "valid":
+        _copy_credential(local_state, global_fd, filename, tool, "project -> global")
+
+
+def _poll_reconcile(
+    global_state: _CredentialState,
+    local_state: _CredentialState,
+    previous: tuple[tuple[str, str], tuple[str, str]],
+    global_fd: int,
+    local_fd: int,
+    filename: str,
+    tool: str,
+) -> None:
+    previous_global, previous_local = previous
+    global_changed = global_state.fingerprint != previous_global
+    local_changed = local_state.fingerprint != previous_local
+
+    # Malformed/symlinked files never propagate. Repair them from the valid
+    # peer when possible; otherwise preserve the last known global state.
+    if global_state.kind == "invalid" or local_state.kind == "invalid":
+        if global_state.kind == "valid" and local_state.kind != "valid":
+            _copy_credential(global_state, local_fd, filename, tool, "global -> project")
+        elif local_state.kind == "valid" and global_state.kind != "valid":
+            _copy_credential(local_state, global_fd, filename, tool, "project -> global")
+        return
+
+    if local_changed and not global_changed:
+        if local_state.kind == "valid":
+            _copy_credential(local_state, global_fd, filename, tool, "project -> global")
+        elif local_state.kind == "absent":
+            _delete_credential(global_fd, filename, f"global {tool} {filename}")
+            auth_sync_log(f"{tool} {filename}: synchronized project logout")
+        return
+    if global_changed and not local_changed:
+        if global_state.kind == "valid":
+            _copy_credential(global_state, local_fd, filename, tool, "global -> project")
+        elif global_state.kind == "absent":
+            _delete_credential(local_fd, filename, f"project {tool} {filename}")
+            auth_sync_log(f"{tool} {filename}: synchronized global logout")
+        return
+    if global_changed and local_changed:
+        # Concurrent writes are rare (usually token refreshes). Keep a valid
+        # credential rather than turning a racing logout into a surprise login
+        # failure; when both are valid, the newer atomic write wins.
+        if global_state.kind == "valid" and local_state.kind == "valid":
+            if global_state.digest == local_state.digest:
+                return
+            if local_state.mtime_ns > global_state.mtime_ns:
+                _copy_credential(local_state, global_fd, filename, tool, "project -> global")
+            else:
+                _copy_credential(global_state, local_fd, filename, tool, "global -> project")
+        elif global_state.kind == "valid":
+            _copy_credential(global_state, local_fd, filename, tool, "global -> project")
+        elif local_state.kind == "valid":
+            _copy_credential(local_state, global_fd, filename, tool, "project -> global")
+        return
+
+    # A sidecar restart loses its in-memory change history. If files somehow
+    # diverge without a detected change, converge deterministically.
+    if global_state.fingerprint != local_state.fingerprint:
+        _initial_reconcile(global_state, local_state, global_fd, local_fd, filename, tool)
+
+
+def _sync_credential_pair(
+    tool: str,
+    global_dir: str,
+    local_dir: str,
+    filename: str,
+    states: dict[tuple[str, str], tuple[tuple[str, str], tuple[str, str]]],
+) -> None:
+    global_path = AUTH_SYNC_GLOBAL / global_dir
+    local_path = AUTH_SYNC_PROJECT / "tool-homes" / local_dir
+    global_fd = _open_auth_directory(global_path)
+    local_fd = _open_auth_directory(local_path)
+    lock_fd = -1
+    try:
+        lock_fd = _open_auth_lock(global_fd)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        global_label = f"global {tool} {filename}"
+        local_label = f"project {tool} {filename}"
+        global_state = _read_credential(global_fd, filename, global_label)
+        local_state = _read_credential(local_fd, filename, local_label)
+        key = (global_dir, filename)
+        previous = states.get(key)
+        if previous is None:
+            _initial_reconcile(global_state, local_state, global_fd, local_fd, filename, tool)
+        else:
+            _poll_reconcile(
+                global_state,
+                local_state,
+                previous,
+                global_fd,
+                local_fd,
+                filename,
+                tool,
+            )
+        # Re-read after our atomic copy/delete so polling compares against the
+        # state we actually committed, not the stale pre-reconciliation view.
+        global_state = _read_credential(global_fd, filename, global_label)
+        local_state = _read_credential(local_fd, filename, local_label)
+        states[key] = (global_state.fingerprint, local_state.fingerprint)
+    finally:
+        if lock_fd >= 0:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+        os.close(local_fd)
+        os.close(global_fd)
+
+
+def auth_sync_main() -> int:
+    """Continuously synchronize exact credential files, never tool config."""
+    # This service commonly creates/mounts the project volume before the main
+    # container. Make the volume root private before advertising readiness;
+    # its fixed tool-home children are independently validated as 0700 below.
+    project_fd = -1
+    try:
+        before = AUTH_SYNC_PROJECT.lstat()
+        if not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode):
+            raise OSError("project sessions root is not a real directory")
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        project_fd = os.open(AUTH_SYNC_PROJECT, flags)
+        opened = os.fstat(project_fd)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise OSError("project sessions root changed or has an unexpected owner")
+        os.fchmod(project_fd, 0o700)
+    except OSError as error:
+        auth_sync_log(f"refusing unsafe project sessions root ({error})")
+        return 1
+    finally:
+        if project_fd >= 0:
+            os.close(project_fd)
+
+    states: dict[tuple[str, str], tuple[tuple[str, str], tuple[str, str]]] = {}
+    failures = 0
+    first_cycle = True
+    while True:
+        try:
+            for spec in AUTH_SYNC_SPECS:
+                _sync_credential_pair(*spec, states)
+            AUTH_SYNC_READY.touch(mode=0o600, exist_ok=True)
+            os.utime(AUTH_SYNC_READY, None)
+            if first_cycle:
+                auth_sync_log("initial credential reconciliation complete")
+                first_cycle = False
+            failures = 0
+        except (OSError, RuntimeError) as error:
+            failures += 1
+            auth_sync_log(f"synchronization cycle failed ({type(error).__name__}: {error})")
+            if failures >= 5:
+                try:
+                    AUTH_SYNC_READY.unlink()
+                except FileNotFoundError:
+                    pass
+                return 1
+        time.sleep(AUTH_SYNC_INTERVAL_SECONDS)
+
+
+def load_host_opencode_config() -> dict:
+    """Load the already-allowlisted OpenCode JSON emitted by the sanitizer."""
+    return _load_sanitized_seed(HOST_SEED_OPENCODE)
+
+
+def setup_opencode() -> None:
+    """Configure OpenCode preferences. permission=allow and the shared
+    guardrail plugin are enforced separately by /etc/opencode/opencode.json,
+    OpenCode's highest-precedence root-managed configuration.
+
+    Both OpenCode homes are per-project. The auth-sync sidecar copies only
+    auth.json/account.json between the data home and the global credential
+    store; config, plugins, databases, storage, and snapshots never cross the
+    project boundary."""
     cfg = load_host_opencode_config()
     # Force the sandbox boundary regardless of what the host had.
     cfg["$schema"] = "https://opencode.ai/config.json"
@@ -578,48 +1027,31 @@ def setup_opencode() -> None:
 
     OPENCODE_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config_json = OPENCODE_CONFIG_DIR / "opencode.json"
-    config_json.write_text(json.dumps(cfg, indent=2) + "\n")
+    _safe_write_text(config_json, json.dumps(cfg, indent=2) + "\n", create=True)
     log(f"wrote {config_json}")
 
-    # Global AGENTS.md OpenCode auto-loads for every session (it takes precedence
-    # over ~/.claude/CLAUDE.md).
-    ensure_sandbox_memory(OPENCODE_CONFIG_DIR / "AGENTS.md")
+    # OpenCode AGENTS.md auto-loads every session (it takes precedence over
+    # ~/.claude/CLAUDE.md) and is reset on every create.
+    ensure_sandbox_memory(OPENCODE_CONFIG_DIR / "AGENTS.md", create=True)
 
-    # Per-project session isolation. OPENCODE_DB points the sqlite session db at
-    # ~/.claude-sessions/opencode/opencode.db (the per-project SESSIONS volume) —
-    # sqlite creates the file but not the parent dir, so make it here. Also
-    # symlink the file-based session-artifact dirs out into SESSIONS so they stay
-    # project-scoped too (kept on the SAME per-project side as the db, so it never
-    # indexes them across a volume boundary). `storage/` is current; `snapshot/`
-    # holds working-tree checkpoints — in 1.16 these are db-backed, but symlink it
-    # anyway so a future version that revives file-based snapshots can't bleed one
-    # project's file contents into another. (repos/ and log/ deliberately stay in
-    # the shared global volume — clones and logs, the same accepted trade-off as
-    # claude/codex shared metadata.)
-    (SESSIONS / "opencode").mkdir(parents=True, exist_ok=True)
-    link(SESSIONS / "opencode-storage", OPENCODE_DATA_DIR / "storage")
-    link(SESSIONS / "opencode-snapshot", OPENCODE_DATA_DIR / "snapshot")
+    # sqlite creates the DB file but not its parent. Everything below this
+    # directory is an ordinary per-project path, so OpenCode's atomic updates
+    # retain their normal semantics.
+    OPENCODE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (OPENCODE_DATA_DIR / "storage").mkdir(exist_ok=True)
+    (OPENCODE_DATA_DIR / "snapshot").mkdir(exist_ok=True)
 
 
 def _host_git_config(key: str) -> str:
-    """Read a single value straight from the read-only host ~/.gitconfig
-    (not the effective config, so we see the host's intent regardless of our
-    own override ordering). Empty string if unset or git is unavailable."""
-    try:
-        r = subprocess.run(
-            ["git", "config", "--file", str(HOST_GITCONFIG), "--get", key],
-            capture_output=True, text=True,
-        )
-        return r.stdout.strip() if r.returncode == 0 else ""
-    except FileNotFoundError:
-        return ""
+    """Read one value from the fixed-key JSON git seed."""
+    value = _load_sanitized_seed(HOST_SEED_GIT).get(key.lower(), "")
+    return value if isinstance(value, str) else ""
 
 
 def setup_commit_signing() -> str:
     """Return the container-local commit-signing config to append to
-    ~/.gitconfig.local *after* the host [include] (so it overrides the host's
-    signing settings — inside the sandbox only; the host gitconfig is mounted
-    read-only and never touched).
+    the managed gitconfig after sanitized host preferences (so it overrides the
+    host's signing intent inside the sandbox only).
 
     Why this exists: the host's signing key never enters the container (~/.ssh
     and the SSH agent are deliberately not forwarded), so a host configured for
@@ -635,10 +1067,9 @@ def setup_commit_signing() -> str:
         so commits don't fail cryptically before a key is set up).
       - host doesn't sign       -> nothing.
 
-    Takes effect on container (re)create only: ~/.gitconfig.local is rewritten
-    fresh each creation and then root-locked, so a mode change via `aic signing`
-    lands on the next rebuild — no live edit of the locked file is needed (and
-    no privileged unlock primitive, which a compromised session could abuse)."""
+    Takes effect on container (re)create only: the config is installed fresh
+    into a root-owned directory, so a mode change via `aic signing` lands on the
+    next rebuild without a privileged unlock primitive."""
     off = "[commit]\n    gpgsign = false\n[tag]\n    gpgsign = false\n"
     mode = SIGNING_MODE.read_text().strip() if SIGNING_MODE.is_file() else ""
 
@@ -689,39 +1120,60 @@ def setup_commit_signing() -> str:
 
 
 def setup_gitconfig() -> None:
-    """Write ~/.gitconfig.local (pointed at by GIT_CONFIG_GLOBAL in
-    devcontainer.json). Includes the read-only host gitconfig and adds
-    container-only settings."""
-    excludes = HOME / ".gitignore_global"
-    excludes.write_text(
-        "# aicontainer global excludes\n"
-        ".claude/\n.codex/\nnode_modules/\n.venv/\n__pycache__/\n"
-        ".DS_Store\n*.pyc\n.env\n.env.local\n.env.*.local\n"
-    )
+    """Stage the dynamic global git config for privileged fixed-target install.
 
-    local = HOME / ".gitconfig.local"
-    if local.exists() and local.stat().st_uid == 0:
-        # Already locked by aic-lock-gitconfig from a previous post-create run
-        # (file is root:root 0444). Skip the rewrite — we'd hit EACCES and the
-        # contents are stable anyway.
+    The sanitizer emitted only fixed non-executable host keys. Git itself writes
+    those values into the staging file so arbitrary names/emails are escaped
+    correctly; aic's own settings and signing override are appended last.
+    """
+    if GITCONFIG_MANAGED.is_file():
+        # Re-running post-create in the same container must not replace the
+        # already-installed security config. A rebuild starts from a fresh image.
         return
-    # Commit-signing config goes LAST so it overrides the host [include] above
-    # (git takes the last value for single-valued keys; the include is inlined
-    # at the top, our block is appended at the bottom).
+
+    if GITCONFIG_STAGING.is_symlink() or GITCONFIG_STAGING.exists():
+        if GITCONFIG_STAGING.is_dir():
+            log(f"warning: refusing non-file gitconfig staging path {GITCONFIG_STAGING}")
+            return
+        GITCONFIG_STAGING.unlink()
+    GITCONFIG_STAGING.touch(mode=0o600)
+
+    seeded = _load_sanitized_seed(HOST_SEED_GIT)
+    for key in GIT_SEED_KEYS:
+        value = seeded.get(key.lower())
+        if not isinstance(value, str):
+            continue
+        try:
+            subprocess.run(
+                ["git", "config", "--file", str(GITCONFIG_STAGING), key, value],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as e:
+            log(f"warning: could not seed git preference {key}: {e}")
+
+    # Container settings and signing go last so they override seeded values.
     signing = setup_commit_signing()
-    local.write_text(
-        f"# aicontainer container-local git config\n"
-        f"[include]\n    path = {HOST_GITCONFIG}\n"
-        f"[core]\n"
-        f"    excludesfile = {excludes}\n"
-        f"    pager = delta\n"
-        f"[interactive]\n    diffFilter = delta --color-only\n"
-        f"[delta]\n    navigate = true\n    line-numbers = true\n"
-        f"[merge]\n    conflictstyle = diff3\n"
-        f"[diff]\n    colorMoved = default\n"
-        f"{signing}"
-    )
-    log(f"wrote {local}")
+    with GITCONFIG_STAGING.open("a") as local:
+        local.write(
+            f"\n# aicontainer container-local git config\n"
+            f"[core]\n"
+            f"    excludesfile = {GITIGNORE_MANAGED}\n"
+            f"    pager = delta\n"
+            f"[interactive]\n    diffFilter = delta --color-only\n"
+            f"[delta]\n    navigate = true\n    line-numbers = true\n"
+            f"[merge]\n    conflictstyle = diff3\n"
+            f"[diff]\n    colorMoved = default\n"
+            f"{signing}"
+        )
+    # The staging config contains only the sanitizer's non-secret fixed-key
+    # preferences plus aic-owned constants. Root intentionally lacks broad
+    # DAC_OVERRIDE in the long-running container, so make this one file
+    # readable by the fixed sudo helper while its ownership/inode/link checks
+    # still prevent path substitution.
+    GITCONFIG_STAGING.chmod(0o644)
+    log(f"staged {GITCONFIG_STAGING} for root-owned install")
 
 
 def block_metadata() -> None:
@@ -745,18 +1197,15 @@ def block_metadata() -> None:
 
 
 def lock_config() -> None:
-    """Hand the self-protection files to root via aic-lock-gitconfig (root:root
-    0444): ~/.gitconfig.local (so a compromised tool session can't inject
-    credential.helper / core.sshCommand to capture tokens) and the baked
-    login-shell rc files ~/.zshrc / ~/.bashrc / fish config (so it can't plant a
-    payload that runs on the next `aic shell`). The wrapper locks a hardcoded
-    list and skips absent targets, so we invoke it unconditionally each
-    creation — the baked rc files ship owned by `vscode` and need re-locking on
-    every rebuild, independent of the (freshly written) gitconfig.local."""
+    """Install the fixed staging file at the hardcoded root-owned gitconfig
+    target through the narrow aic-lock-gitconfig helper. The helper deliberately
+    lacks DAC_OVERRIDE, so the unprivileged owner removes its own staging file
+    only after the atomic install succeeds."""
     try:
         subprocess.run(["sudo", "/usr/local/bin/aic-lock-gitconfig"], check=True)
-        log("locked ~/.gitconfig.local + baked shell rc files")
-    except subprocess.CalledProcessError as e:
+        GITCONFIG_STAGING.unlink()
+        log(f"installed root-owned git config at {GITCONFIG_MANAGED}")
+    except (OSError, subprocess.CalledProcessError) as e:
         log(f"warning: aic-lock-gitconfig failed: {e}")
 
 
@@ -765,17 +1214,14 @@ def verify_git_identity() -> None:
     instead of cryptically mid-session on the first `git commit` ("Author
     identity unknown").
 
-    The sandbox has NO identity of its own: ~/.gitconfig.local [include]s the
-    read-only host ~/.gitconfig, so identity is whatever the host file provided
-    when the container was (re)created. A host gitconfig that was empty/broken at
-    that moment leaves no identity here — and it can't be fixed from inside:
-    `git config --global` writes to the root-locked ~/.gitconfig.local, and
+    The sandbox has NO identity of its own: the root-only sanitizer copies only
+    user.name/user.email from the host seed. A missing identity can't be fixed
+    from inside: `git config --global` writes to the root-managed config, and
     `git config --local` writes to /workspace/.git/config, which is mounted
     read-only. The only fix is on the host, so that's where we point. Non-fatal —
     matches the rest of post-create's defensive degradation."""
     def configured(key: str) -> bool:
-        # cwd=HOME (not a repo) reads system + global only — the include chain
-        # through ~/.gitconfig.local — with no repo-local config or
+        # cwd=HOME (not a repo) reads system + managed-global only, with no repo-local config or
         # dubious-ownership checks to muddy the result.
         try:
             r = subprocess.run(
@@ -791,9 +1237,9 @@ def verify_git_identity() -> None:
     log("git identity: no user.name/user.email is configured — commits here will "
         "fail with 'Author identity unknown' (unless the repo sets its own). The "
         "sandbox inherits its identity "
-        "from your host ~/.gitconfig (mounted read-only), which was empty/unset "
+        "from the sanitized host ~/.gitconfig seed, which was empty/unset "
         "when this container was built. Fix it on the HOST, then 'aic rebuild' — "
-        "it can't be fixed from inside (~/.gitconfig.local is root-locked and "
+        f"it can't be fixed from inside ({GITCONFIG_MANAGED} is root-managed and "
         "/workspace/.git/config is read-only): "
         "git config --global user.name '<you>' && "
         "git config --global user.email '<you@example.com>'.")
@@ -837,14 +1283,10 @@ def run_project_hook() -> None:
     if not PROJECT_POST_CREATE.is_file():
         return
     log(f"running project hook {PROJECT_POST_CREATE}")
-    # Our postCreateCommand is `uv run --no-project /opt/post-create.py`, which
-    # activates an ephemeral env for THIS script — exporting VIRTUAL_ENV (and
-    # prepending its bin/ to PATH) into the inherited environment. Passed
-    # through, a project hook running `uv sync`/`uv run` would see VIRTUAL_ENV
-    # pointing at .cache/uv/environments-v2/post-create-* instead of the
-    # project's .venv and warn ("does not match the project environment path
-    # `.venv` and will be ignored"). Strip the leaked activation so the hook's
-    # uv resolves the project environment cleanly.
+    # postCreateCommand now uses the baked system Python directly, so it does
+    # not create an ephemeral environment. Still strip any inherited
+    # VIRTUAL_ENV defensively: a project hook running `uv sync`/`uv run` should
+    # resolve the project's own .venv rather than an outer launcher environment.
     env = os.environ.copy()
     stale_venv = env.pop("VIRTUAL_ENV", None)
     if stale_venv:
@@ -869,26 +1311,45 @@ def refresh_ai_tools() -> None:
     versions for a reproducible sandbox.
 
     Claude/Codex live in ~/.local/bin and OpenCode in ~/.opencode/bin, both of
-    which we force onto PATH for the updaters: `codex update` re-runs the official
-    installer, which only edits a login-shell rc file (root-locked at runtime by
-    aic-lock-gitconfig) when its bin dir is NOT already on PATH — keeping it on
-    PATH makes the update a clean no-write. (`opencode upgrade` replaces the
-    binary in place and was installed with --no-modify-path.)"""
+    which we force onto PATH for the updaters. Codex's standalone package lives
+    in a separate rootfs directory, not the per-project CODEX_HOME; supplying
+    CODEX_HOME/CODEX_INSTALL_DIR only to its updater preserves that split.
+    (`opencode upgrade` replaces the binary in place and was installed with
+    --no-modify-path.)"""
     freeze = os.environ.get("AIC_FREEZE_TOOLS", "").strip().lower()
     if freeze not in ("", "0", "false", "no"):
         log("AIC_FREEZE_TOOLS set — keeping the baked Claude/Codex versions")
         return
     env = {**os.environ, "PATH": f"{HOME / '.local' / 'bin'}:{HOME / '.opencode' / 'bin'}:{os.environ.get('PATH', '')}"}
-    updaters = []
+    updaters: list[tuple[str, list[str], int, dict[str, str]]] = []
     if "claude-code" in ENABLED_TOOLS:
-        updaters.append(("claude", ["claude", "update"], 180))
+        # Claude's native updater records its install method in this ordinary
+        # per-project state file. Seed only a missing file so a brand-new
+        # project does not emit a migration warning before self-healing; never
+        # replace or merge an existing user's state.
+        claude_state = CLAUDE_HOME / ".claude.json"
+        if not claude_state.exists():
+            try:
+                _safe_write_text(
+                    claude_state,
+                    json.dumps({"installMethod": "native"}, indent=2) + "\n",
+                    create=True,
+                )
+            except OSError as error:
+                log(f"warning: could not initialize Claude updater state: {error}")
+        updaters.append(("claude", ["claude", "update"], 180, env))
     if "codex" in ENABLED_TOOLS:
-        updaters.append(("codex", ["codex", "update"], 300))
+        codex_update_env = {
+            **env,
+            "CODEX_HOME": str(CODEX_RUNTIME_HOME),
+            "CODEX_INSTALL_DIR": str(HOME / ".local" / "bin"),
+        }
+        updaters.append(("codex", ["codex", "update"], 300, codex_update_env))
     if "opencode" in ENABLED_TOOLS:
-        updaters.append(("opencode", ["opencode", "upgrade"], 300))
-    for name, cmd, timeout in updaters:
+        updaters.append(("opencode", ["opencode", "upgrade"], 300, env))
+    for name, cmd, timeout, updater_env in updaters:
         try:
-            subprocess.run(cmd, check=True, timeout=timeout, env=env)
+            subprocess.run(cmd, check=True, timeout=timeout, env=updater_env)
             log(f"{name} refreshed to latest")
         except (subprocess.SubprocessError, OSError) as e:
             log(f"{name} refresh skipped ({e}); keeping baked version")
@@ -927,4 +1388,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["sanitize-seeds"]:
+        raise SystemExit(sanitize_seeds())
+    if sys.argv[1:] == ["auth-sync"]:
+        raise SystemExit(auth_sync_main())
+    if sys.argv[1:]:
+        log(f"unknown arguments: {' '.join(sys.argv[1:])}")
+        raise SystemExit(2)
     main()

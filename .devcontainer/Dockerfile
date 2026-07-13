@@ -1,5 +1,5 @@
 # =============================================================================
-# aicontainer — base image for Claude Code + Codex in bypass mode
+# aicontainer — base image for Claude Code + Codex + OpenCode in bypass mode
 # =============================================================================
 # Build inside a project's .devcontainer/ via `aic up` (which runs `devcontainer
 # up` and reads docker-compose.yml). Image is rebuilt by CI weekly so AI CLI
@@ -11,7 +11,7 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04@sha256:6e5abd134eb1c2b7479
 
 # OCI labels: lets GitHub auto-link the GHCR package back to this repo.
 LABEL org.opencontainers.image.source="https://github.com/stefanoginella/aicontainer" \
-      org.opencontainers.image.description="Sandboxed devcontainer for running Claude Code and Codex in bypass / auto-approve mode." \
+      org.opencontainers.image.description="Sandboxed devcontainer for running Claude Code, Codex, and OpenCode in bypass / auto-approve mode." \
       org.opencontainers.image.licenses="MIT"
 
 ARG TZ
@@ -28,6 +28,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # to *sign*, not only to generate — so make the dependency explicit here rather
 # than relying on the base image happening to include it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-minimal \
       fd-find \
       ripgrep \
       tmux \
@@ -88,31 +89,50 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
 # ---------------------------------------------------------------------------
 # Persistent directories and ownership
 # ---------------------------------------------------------------------------
+# `.aic-sessions` is the tool-neutral, per-project state root. Each tool keeps
+# its complete home below `tool-homes/`; the separate auth bridge shares only
+# the four explicitly allowlisted credential JSON files between projects.
 RUN mkdir -p /workspace \
-             /home/vscode/.claude \
-             /home/vscode/.codex \
-             /home/vscode/.config/opencode \
-             /home/vscode/.local/share/opencode \
+             /project-sessions \
+             /home/vscode/.aic-sessions/tool-homes/claude \
+             /home/vscode/.aic-sessions/tool-homes/codex \
+             /home/vscode/.aic-sessions/tool-homes/opencode-config \
+             /home/vscode/.aic-sessions/tool-homes/opencode-data \
              /home/vscode/.semgrep \
              /home/vscode/.config/gh \
              /home/vscode/.config/npm \
-             /home/vscode/.config/aic-auth \
-             /home/vscode/.claude-sessions \
+             /home/vscode/.config/aic-auth/signing \
+             /home/vscode/.config/aic-auth/semgrep \
+             /home/vscode/.local/share \
              /home/vscode/.shell-history \
              /opt \
-    && chown -R vscode:vscode /workspace /home/vscode/.claude /home/vscode/.codex /home/vscode/.config/opencode /home/vscode/.local /home/vscode/.semgrep /home/vscode/.config /home/vscode/.config/aic-auth /home/vscode/.claude-sessions /home/vscode/.shell-history /opt
+    && ln -s /home/vscode/.aic-sessions/tool-homes/claude /home/vscode/.claude \
+    && ln -s /home/vscode/.aic-sessions/tool-homes/codex /home/vscode/.codex \
+    && ln -s /home/vscode/.aic-sessions/tool-homes/opencode-config /home/vscode/.config/opencode \
+    && ln -s /home/vscode/.aic-sessions/tool-homes/opencode-data /home/vscode/.local/share/opencode \
+    && chown -R vscode:vscode /workspace /project-sessions /home/vscode/.local /home/vscode/.semgrep /home/vscode/.config /home/vscode/.config/aic-auth /home/vscode/.aic-sessions /home/vscode/.shell-history /opt \
+    && chmod 0700 /project-sessions /home/vscode/.aic-sessions /home/vscode/.aic-sessions/tool-homes /home/vscode/.aic-sessions/tool-homes/* \
+    && chown -h vscode:vscode /home/vscode/.claude /home/vscode/.codex /home/vscode/.config/opencode /home/vscode/.local/share/opencode
+
+# Reserved root-helper namespace. The host Docker socket is mounted read-only at
+# the nested path by Compose; vscode cannot traverse this directory, while the
+# fixed aic-chown-volumes helper can perform narrowly scoped GET validation.
+RUN install -d -o root -g root -m 0700 /run/aic-host
 
 ENV DEVCONTAINER=true
 ENV SHELL=/bin/zsh
 ENV EDITOR=nano
 ENV VISUAL=nano
+# The host p10k config is intentionally not sourced inside the sandbox. Avoid
+# an interactive first-shell wizard while keeping the managed theme defaults.
+ENV POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true
 
 WORKDIR /workspace
 
 # Scoped sudoers: every entry is a wrapper with hardcoded targets, so the
 # grant cannot be turned into arbitrary chown / file write. aic-firewall is
-# enable-only; aic-chown-volumes touches three known volume paths;
-# aic-lock-gitconfig locks one known file. A bare `chown` here would let AI
+# strengthen-only; aic-chown-volumes validates exact named-volume mountpoints;
+# aic-lock-gitconfig installs one fixed config. A bare `chown` here would let AI
 # `chown vscode /etc/sudoers.d/vscode` and escalate to root.
 RUN echo 'vscode ALL=(ALL) NOPASSWD: /usr/local/bin/aic-chown-volumes, /usr/local/bin/aic-lock-gitconfig, /usr/local/bin/aic-firewall' > /etc/sudoers.d/vscode \
     && chmod 0440 /etc/sudoers.d/vscode
@@ -136,6 +156,17 @@ RUN chmod 755 /etc/aic/hooks /etc/aic /etc/aic/hooks/*.sh \
     && chmod 644 /etc/aic/hooks/*.json /etc/aic/hooks/*.js \
     && chown -R root:root /etc/aic
 
+# Claude Code and OpenCode both support root-owned managed settings on Linux.
+# Put the autonomous-mode defaults and the shared guardrail registration there,
+# at higher precedence than user/project config. post-create still writes the
+# allowlisted user preferences for compatibility, but an unrestricted process
+# can no longer persistently remove either tool's guardrail by editing $HOME.
+RUN mkdir -p /etc/claude-code /etc/opencode \
+    && jq '. + {"permissions":{"defaultMode":"bypassPermissions"},"skipDangerousModePermissionPrompt":true}' /etc/aic/hooks/claude-settings.json > /etc/claude-code/managed-settings.json \
+    && jq -n '{"$schema":"https://opencode.ai/config.json","permission":{"*":"allow"},"plugin":["/etc/aic/hooks/opencode-guardrail.js"]}' > /etc/opencode/opencode.json \
+    && chmod 0644 /etc/claude-code/managed-settings.json /etc/opencode/opencode.json \
+    && chown -R root:root /etc/claude-code /etc/opencode
+
 # ---------------------------------------------------------------------------
 # Codex managed hook (wires the shared PreToolUse guardrail into Codex)
 # ---------------------------------------------------------------------------
@@ -154,8 +185,19 @@ RUN chmod 755 /etc/aic/hooks /etc/aic /etc/aic/hooks/*.sh \
 RUN mkdir -p /etc/codex && cat > /etc/codex/requirements.toml <<'CODEX_REQ_EOF'
 # Managed by aicontainer — baked into the image, do not edit. Forces the shared
 # PreToolUse guardrail to run for Codex without an interactive trust prompt.
+allow_managed_hooks_only = true
+allowed_approval_policies = ["never"]
+# Codex 0.144+ requires `read-only` to be present whenever any permission
+# profile is allowed. The generated user config still selects
+# `danger-full-access`; including the inert fallback here satisfies the managed
+# requirements schema without adding a prompt or changing the default mode.
+allowed_sandbox_modes = ["read-only", "danger-full-access"]
+
 [features]
 hooks = true
+
+[hooks]
+managed_dir = "/etc/aic/hooks"
 
 [[hooks.PreToolUse]]
 matcher = "^Bash$"
@@ -173,7 +215,21 @@ RUN chmod 0644 /etc/codex/requirements.toml \
 # Lifecycle script
 # ---------------------------------------------------------------------------
 COPY post-create.py /opt/post-create.py
-RUN chmod 0755 /opt/post-create.py
+# tomli-w is a hash-pinned, image-baked dependency. post-create adds this fixed
+# root-owned target to sys.path, so container creation never resolves or fetches
+# Python packages at runtime (and still works offline from the baked floor).
+RUN printf '%s\n' \
+      'tomli-w==1.2.0 --hash=sha256:188306098d013b691fcadc011abd66727d3c414c571bb01b1a174ba8c983cf90' \
+      > /tmp/aic-python-requirements.txt \
+    && uv pip install --target /opt/aic-python \
+      --python-version 3.13 \
+      --require-hashes \
+      --only-binary :all: \
+      --requirement /tmp/aic-python-requirements.txt \
+    && rm -f /tmp/aic-python-requirements.txt \
+    && chmod -R a-w /opt/aic-python \
+    && chown -R root:root /opt/aic-python /opt/post-create.py \
+    && chmod 0755 /opt/post-create.py
 
 USER vscode
 
@@ -189,13 +245,24 @@ ENV NPM_CONFIG_IGNORE_SCRIPTS=true
 # These are the baseline "floor" baked into the image; post-create.py's
 # refresh_ai_tools() floats all three to the latest release on every container
 # (re)create, so `aic rebuild` always lands current AI CLIs. The Claude/Codex
-# installers skip editing the login-shell rc files (root-locked at runtime by
-# aic-lock-gitconfig) because ~/.local/bin is already on PATH; OpenCode's
+# installers skip editing login-shell rc files because ~/.local/bin is already
+# on PATH; OpenCode's
 # installer is told not to touch them with --no-modify-path (zsh-in-docker owns
 # the rc files and we set PATH explicitly above + in each rc below).
+# `claude --version` may create one-time migration state. Do not bake that
+# machine identity into every project; runtime state belongs in the
+# per-project CLAUDE_CONFIG_DIR.
 RUN curl -fsSL https://claude.ai/install.sh | bash \
-    && claude --version
-RUN curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh \
+    && claude --version \
+    && rm -f /home/vscode/.claude.json \
+    && rm -rf /home/vscode/.aic-sessions/tool-homes/claude/backups
+# Keep the standalone package separate from CODEX_HOME: ~/.codex is a
+# per-project config/session home, while this rootfs path is the refreshable
+# executable floor. `refresh_ai_tools()` supplies the same two installer vars.
+RUN curl -fsSL https://chatgpt.com/codex/install.sh \
+      | CODEX_NON_INTERACTIVE=1 \
+        CODEX_HOME=/home/vscode/.local/share/aic-tools/codex \
+        CODEX_INSTALL_DIR=/home/vscode/.local/bin sh \
     && codex --version
 RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
     && opencode --version
@@ -214,8 +281,8 @@ RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$FNM_D
     && fnm default ${NODE_VERSION}
 
 # Semgrep (used by Claude Code's semgrep plugin; installed into ~/.local/bin
-# via uv tool so the binary is on PATH for the vscode user). Auth (settings.yml)
-# is symlinked to the global aic-auth volume by post-create.py.
+# via uv tool so the binary is on PATH for the vscode user). Its settings path
+# is configured directly inside the persistent global auth volume.
 RUN uv tool install semgrep \
     && semgrep --version
 
@@ -234,24 +301,26 @@ RUN sh -c "$(curl -fsSL https://github.com/deluan/zsh-in-docker/releases/downloa
       -a 'setopt SHARE_HISTORY' \
       -a 'export PATH="$FNM_DIR:$PATH"' \
       -a 'eval "$(fnm env --use-on-cd)"' \
-      -a '[[ -s ~/.p10k.zsh ]] && source ~/.p10k.zsh' \
-      -a '[[ -s ~/.zshrc.local ]] && source ~/.zshrc.local' \
       -x
 
-# Container-tailored zshrc additions are baked into ~/.zshrc above by
-# zsh-in-docker's `-a` flag. We keep template/.zshrc in the repo for reference
-# and as a single source of truth that contributors can edit.
-COPY --chown=vscode:vscode .zshrc /home/vscode/.zshrc.aic
+# Keep a root-owned reference copy alongside the generated managed startup file.
+COPY .zshrc /etc/aic/shell/zshrc.reference
 
 # ---------------------------------------------------------------------------
 # Bash + fish: minimal parity with the zsh setup for users who pick
 # AIC_SHELL=bash|fish via `aic init`. Bash gets persistent history (shared
-# volume with zsh) and fnm on PATH; fish gets fnm on PATH. Theming
-# (oh-my-zsh + powerlevel10k) is zsh-only — bash/fish stay barebones, with a
-# ~/.bashrc.local / ~/.config/fish/config.local.fish opt-in so users can layer
-# their own config without rebuilding the image.
+# volume with zsh) and fnm on PATH; fish gets fnm on PATH. Managed startup
+# files live under root-owned system directories, not replaceable files in a
+# vscode-owned $HOME. Host rc/p10k code is deliberately never sourced.
 # ---------------------------------------------------------------------------
-RUN cat >> /home/vscode/.bashrc <<'BASHRC_EOF'
+USER root
+
+RUN install -d -o root -g root -m 0755 \
+      /etc/aic/shell/zsh /etc/aic/shell /etc/aic/user-config \
+    && mv /home/vscode/.zshrc /etc/aic/shell/zsh/.zshrc \
+    && cp /home/vscode/.bashrc /etc/aic/shell/bashrc \
+    && rm -f /home/vscode/.bashrc \
+    && cat >> /etc/aic/shell/bashrc <<'BASHRC_EOF'
 
 # aicontainer additions
 export HISTFILE=/home/vscode/.shell-history/.bash_history
@@ -260,16 +329,45 @@ export HISTFILESIZE=50000
 shopt -s histappend
 export PATH="$FNM_DIR:$PATH"
 eval "$(fnm env --use-on-cd)"
-[ -f ~/.bashrc.local ] && . ~/.bashrc.local
 BASHRC_EOF
 
-RUN mkdir -p /home/vscode/.config/fish \
-    && cat > /home/vscode/.config/fish/config.fish <<'FISH_EOF'
-# aicontainer fish config (baked at image build; see template/Dockerfile)
+RUN cat > /etc/profile.d/aic-bash.sh <<'PROFILE_EOF'
+# Managed aicontainer Bash startup for login shells.
+if [ -n "${BASH_VERSION:-}" ] && [[ $- == *i* ]]; then
+  . /etc/aic/shell/bashrc
+fi
+PROFILE_EOF
+
+RUN mkdir -p /etc/fish/conf.d \
+    && cat > /etc/fish/conf.d/aic.fish <<'FISH_EOF'
+# Managed aicontainer fish config (baked at image build)
 set -gx FNM_DIR /home/vscode/.fnm
-fish_add_path $FNM_DIR
+set -gx PATH $FNM_DIR $PATH
 fnm env --use-on-cd | source
-if test -f ~/.config/fish/config.local.fish
-    source ~/.config/fish/config.local.fish
-end
 FISH_EOF
+
+RUN cat > /etc/aic/gitignore <<'GITIGNORE_EOF'
+# aicontainer global excludes
+.claude/
+.codex/
+node_modules/
+.venv/
+__pycache__/
+.DS_Store
+*.pyc
+.env
+.env.local
+.env.*.local
+GITIGNORE_EOF
+
+RUN chown -R root:root /etc/aic/shell /etc/aic/user-config \
+                       /etc/profile.d/aic-bash.sh /etc/fish/conf.d/aic.fish \
+                       /etc/aic/gitignore \
+    && chmod 0755 /etc/aic/shell /etc/aic/shell/zsh /etc/aic/user-config \
+    && chmod 0444 /etc/aic/shell/zsh/.zshrc /etc/aic/shell/zshrc.reference \
+                  /etc/aic/shell/bashrc /etc/profile.d/aic-bash.sh \
+                  /etc/fish/conf.d/aic.fish /etc/aic/gitignore
+
+ENV ZDOTDIR=/etc/aic/shell/zsh
+
+USER vscode

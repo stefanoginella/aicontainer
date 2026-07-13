@@ -27,8 +27,8 @@
         "terminal.integrated.defaultProfile.linux": "zsh",
         "terminal.integrated.profiles.linux": {
           "zsh": { "path": "zsh" },
-          "bash": { "path": "bash" },
-          "fish": { "path": "fish" }
+          "bash": { "path": "bash", "args": ["--noprofile", "--rcfile", "/etc/aic/shell/bashrc"] },
+          "fish": { "path": "fish", "args": ["--no-config", "-C", "source /etc/fish/conf.d/aic.fish"] }
         },
         "terminal.integrated.fontFamily": "'MesloLGS NF', monospace",
         "terminal.integrated.sendKeybindingsToShell": true,
@@ -53,7 +53,7 @@
     "AIC_SHELL": "zsh",
     "DEVCONTAINER": "true",
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
-    "OPENCODE_DB": "/home/vscode/.claude-sessions/opencode/opencode.db",
+    "OPENCODE_DB": "/home/vscode/.local/share/opencode/opencode.db",
     "SEMGREP_SETTINGS_FILE": "/home/vscode/.config/aic-auth/semgrep/settings.yml",
     "NPM_CONFIG_IGNORE_SCRIPTS": "true",
     "NPM_CONFIG_AUDIT": "true",
@@ -63,24 +63,16 @@
     "NPM_CONFIG_USERCONFIG": "/home/vscode/.config/npm/npmrc",
     "PYTHONDONTWRITEBYTECODE": "1",
     "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-    "GIT_CONFIG_GLOBAL": "/home/vscode/.gitconfig.local"
+    "GIT_CONFIG_GLOBAL": "/etc/aic/user-config/gitconfig"
   },
 
-  // Host-side bootstrap that must run before `docker compose up`.
-  //   1. mkdir/touch the host paths bind-mounted RO into the container (mounts
-  //      fail if the source doesn't exist).
-  //   2. Create the global volumes (aic-auth-global, aic-shell-history). Both
-  //      are declared `external: true` in docker-compose.yml so Compose neither
-  //      auto-creates them nor stamps them with a per-project owner label
-  //      (which would make every other project warn on `up`) — so this
-  //      bootstrap must guarantee they exist.
-  //   3. Ensure aic-auth-global contains every subpath referenced by
-  //      docker-compose.yml. Docker only auto-initializes a named volume from
-  //      the image's mountpoint on its very first mount; if a new subpath is
-  //      added later (e.g. npm), existing users' volumes are already non-empty
-  //      and the mount fails with "no such file or directory". busybox is tiny
-  //      (~5MB) and pulled once.
-  "initializeCommand": "mkdir -p \"$HOME/.claude/statusline\" \"$HOME/.codex\" \"$HOME/.config/opencode\" && touch \"$HOME/.claude/settings.json\" \"$HOME/.codex/config.toml\" \"$HOME/.config/opencode/opencode.json\" \"$HOME/.gitconfig\" \"$HOME/.zshrc.local\" \"$HOME/.p10k.zsh\" && docker volume create aic-auth-global >/dev/null && docker volume create aic-shell-history >/dev/null && docker run --rm -v aic-auth-global:/v busybox mkdir -p /v/claude /v/codex /v/opencode /v/gh /v/npm && { command -v aic >/dev/null 2>&1 && aic check-drift >/dev/null; true; }",
+  // Fail-closed host initialization. The managed aic CLI validates the
+  // generated control files, prepares seed paths and volumes, migrates legacy
+  // sessions, and refreshes the one-shot sanitizer before Compose starts. GUI
+  // launches often have a trimmed PATH, so check common git/npm install paths
+  // and popular Node-manager shims, skipping stale CLIs and checking every
+  // compatible fallback before giving one actionable error.
+  "initializeCommand": "sh -c 'supports_initialize() { [ -n \"$1\" ] && [ -x \"$1\" ] && grep -Eq \"^[[:space:]]*initialize\\\\)\" \"$1\" 2>/dev/null; }; aic_bin=; incompatible=0; for candidate in \"$(command -v aic 2>/dev/null || true)\" \"$HOME/.aicontainer/aic\" \"$HOME/.local/bin/aic\" \"$HOME/.npm-global/bin/aic\" \"$HOME/.npm/bin/aic\" \"$HOME/.volta/bin/aic\" \"$HOME/.asdf/shims/aic\" \"$HOME/.local/share/mise/shims/aic\" /opt/homebrew/bin/aic /usr/local/bin/aic /usr/bin/aic; do if [ -n \"$candidate\" ] && [ -x \"$candidate\" ]; then if supports_initialize \"$candidate\"; then aic_bin=$candidate; break; else incompatible=1; fi; fi; done; if [ -z \"$aic_bin\" ]; then for candidate in \"$HOME\"/.nvm/versions/node/*/bin/aic \"$HOME\"/.local/share/fnm/node-versions/*/installation/bin/aic; do if [ -x \"$candidate\" ]; then if supports_initialize \"$candidate\"; then aic_bin=$candidate; else incompatible=1; fi; fi; done; fi; if [ -z \"$aic_bin\" ]; then if [ \"$incompatible\" -eq 1 ]; then echo \"aic: installed host CLI is too old for this project. Upgrade it with: npm update -g aicontainer (then reopen/rebuild).\" >&2; else echo \"aic: required host CLI not found. Install it with: npm install -g aicontainer (then reopen/rebuild).\" >&2; fi; exit 1; fi; exec \"$aic_bin\" initialize'",
 
-  "postCreateCommand": "uv run --no-project /opt/post-create.py"
+  "postCreateCommand": "/usr/bin/python3 -I /opt/post-create.py"
 }

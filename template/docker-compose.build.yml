@@ -1,38 +1,60 @@
 # =============================================================================
 # aicontainer — devcontainer + Tecnativa docker-socket-proxy
 # =============================================================================
-# `aic up` invokes `devcontainer up` which uses this compose file. The
-# devcontainer CLI sets COMPOSE_PROJECT_NAME to the host workspace folder
-# basename, which scopes the per-project named volumes below.
+# `aic up` invokes `devcontainer up` which uses this compose file. `aic init`
+# writes a deterministic path-unique top-level `name`, which scopes the
+# per-project containers, networks, and named volumes below.
 #
 # If a project has its own services (postgres, redis, etc.), add them to a
 # root compose.yml and uncomment the second entry in dockerComposeFile in
 # devcontainer.json.
 # =============================================================================
 
+# Managed placeholder: `aic init` / `aic sync` replace this with a stable name
+# derived from the absolute project path. Keep the literal value sed-friendly.
+name: aic-project
+
+# `.devcontainer/.env` is generated and gitignored by `aic initialize`; it
+# supplies the UID:GID Dev Containers will use (Linux host uid, or 1000 on
+# Docker Desktop), so the no-capability auth-sync sidecar can keep credentials
+# mode 0600 without creating machine-specific diffs in this managed file.
+x-aic-runtime-user: &aic-runtime-user "${AIC_RUNTIME_USER:-1000:1000}"
+
+x-aic-build: &aic-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    TZ: ${TZ:-UTC}
+
 services:
   devcontainer:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        TZ: ${TZ:-UTC}
+    build: *aic-build
     command: sleep infinity
     # Bound a runaway agent (fork bomb / accidental infinite spawn) so it can't
     # exhaust host PIDs. Generous enough for normal dev (parallel builds, browser
     # automation); raise it in docker-compose.override.yml if a workload needs
     # more. Add mem_limit / cpus there too if you want to cap memory or CPU.
     pids_limit: 4096
-    # NET_ADMIN + NET_RAW let the opt-in `sudo aic-firewall` script set up
-    # an iptables allowlist for outbound traffic. Capabilities are confined
-    # to this container's network namespace; they do not grant any access
-    # to the host's network configuration.
+    # Start from no Linux capabilities, then add only what the three fixed sudo
+    # helpers need: ownership/permission changes (including traversal of old-UID
+    # 0700 volume trees), sudo's uid/gid transition, and firewall rules in this
+    # container's network namespace. NET_RAW is not needed and remains dropped.
+    cap_drop:
+      - ALL
     cap_add:
+      - CHOWN
+      - DAC_READ_SEARCH
+      - FOWNER
+      - SETGID
+      - SETUID
       - NET_ADMIN
-      - NET_RAW
     environment:
       DOCKER_HOST: tcp://socket-proxy:2375
     depends_on:
+      aic-auth-sync:
+        condition: service_healthy
+      aic-seed-sanitizer:
+        condition: service_completed_successfully
       socket-proxy:
         condition: service_healthy
     volumes:
@@ -44,56 +66,21 @@ services:
       - ../.devcontainer:/workspace/.devcontainer:ro
       - ../.git/config:/workspace/.git/config:ro
       - ../.git/hooks:/workspace/.git/hooks:ro
+      # Reserved helper-only socket path. /run/aic-host is root:root 0700 in the
+      # image, so vscode cannot traverse/open this mount.
+      - ${AIC_DOCKER_SOCKET:-/var/run/docker.sock}:/run/aic-host/docker.sock:ro
 
-      # Host shell look-and-feel (read-only; initializeCommand touches the
-      # files so the mount succeeds even if they don't exist on the host).
-      - ${HOME}/.gitconfig:/home/vscode/.gitconfig:ro
-      - ${HOME}/.p10k.zsh:/home/vscode/.p10k.zsh:ro
-      - ${HOME}/.zshrc.local:/home/vscode/.zshrc.local:ro
+      # The long-running unrestricted user sees only fixed allowlisted JSON
+      # emitted by the root-only, networkless sanitizer service below — never
+      # the raw host git/Claude/Codex/OpenCode files.
+      - aic-sanitized-seed:/host-seed:ro
 
-      # Host AI-config seeding (RO). post-create.py reads these to copy an
-      # allowlisted subset of fields into the container's settings, then
-      # forces security overrides (bypassPermissions, sandbox-off, our
-      # PreToolUse hook) on top. Mounts are scoped to the config files and
-      # the statusline directory specifically — chat history, auth tokens,
-      # plans, sessions, etc. under ~/.claude / ~/.codex are NOT mounted.
-      - ${HOME}/.claude/settings.json:/host-seed/claude/settings.json:ro
-      - ${HOME}/.claude/statusline:/host-seed/claude/statusline:ro
-      - ${HOME}/.codex/config.toml:/host-seed/codex/config.toml:ro
-      - ${HOME}/.config/opencode/opencode.json:/host-seed/opencode/opencode.json:ro
-
-      # Persistence — see README "Multi-project model".
+      # Persistence — see README "Multi-project model". All Claude/Codex/
+      # OpenCode config, prompts, plugins, and sessions live below this one
+      # per-project volume. Only the credential-sync sidecar sees the global
+      # tool-auth directories.
       - aic-shell-history:/home/vscode/.shell-history
-      - aic-sessions:/home/vscode/.claude-sessions
-
-      # Tool credential dirs mounted as subpaths of aic-auth-global. Critical
-      # detail: Claude and Codex write `.credentials.json` / `auth.json` via
-      # atomic rename(tmp, target), which replaces a leaf-file symlink with a
-      # regular file — that's why an earlier symlink-based approach lost the
-      # login on every rebuild. With the *parent dir* being the volume mount,
-      # the rename stays inside the volume and survives container recreation.
-      # Requires Docker 25+ / Compose 2.24+ (subpath support).
-      - type: volume
-        source: aic-auth-global
-        target: /home/vscode/.claude
-        volume:
-          subpath: claude
-      - type: volume
-        source: aic-auth-global
-        target: /home/vscode/.codex
-        volume:
-          subpath: codex
-      # OpenCode keeps auth (auth.json / account.json) at the top level of its
-      # data dir; mounting the dir as a volume subpath persists the login across
-      # rebuilds (same atomic-rename reasoning as claude/codex). Session
-      # transcripts do NOT bleed across projects: the sqlite db is relocated
-      # per-project via OPENCODE_DB (devcontainer.json) and storage/ is symlinked
-      # into the per-project sessions volume by post-create.py.
-      - type: volume
-        source: aic-auth-global
-        target: /home/vscode/.local/share/opencode
-        volume:
-          subpath: opencode
+      - aic-sessions:/home/vscode/.aic-sessions
       - type: volume
         source: aic-auth-global
         target: /home/vscode/.config/gh
@@ -108,12 +95,100 @@ services:
         target: /home/vscode/.config/npm
         volume:
           subpath: npm
-      # Kept for semgrep settings.yml (still symlink-managed) and as the
-      # stable path for any future shared-auth additions.
-      - aic-auth-global:/home/vscode/.config/aic-auth
+      # Expose only the two fixed shared helper-data subpaths here. Mounting the
+      # auth volume root would give every project an alternate path to every
+      # other tool's credentials and auto-loaded prompt/code directories.
+      - type: volume
+        source: aic-auth-global
+        target: /home/vscode/.config/aic-auth/signing
+        volume:
+          subpath: signing
+      - type: volume
+        source: aic-auth-global
+        target: /home/vscode/.config/aic-auth/semgrep
+        volume:
+          subpath: semgrep
+
+  # Credential bridge: the only service that sees both the shared tool-login
+  # dirs and this project's sessions volume. It validates and atomically syncs
+  # four exact JSON files; no config/prompt/plugin path is shared. The main
+  # container waits for its initial newer-wins reconciliation before starting.
+  aic-auth-sync:
+    build: *aic-build
+    user: *aic-runtime-user
+    command: ["/usr/bin/python3", "-I", "/opt/post-create.py", "auth-sync"]
+    restart: unless-stopped
+    network_mode: none
+    privileged: false
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 32
+    stop_grace_period: 3s
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    tmpfs:
+      # The service runs as the dynamically mapped non-root user. This tmpfs is
+      # private to the one-process container; sticky 1777 lets it publish the
+      # readiness sentinel without adding a capability or writable rootfs.
+      - /run:rw,nosuid,nodev,noexec,size=1m,mode=1777
+    volumes:
+      - aic-sessions:/project-sessions
+      - type: volume
+        source: aic-auth-global
+        target: /auth-global/claude
+        volume:
+          subpath: claude
+      - type: volume
+        source: aic-auth-global
+        target: /auth-global/codex
+        volume:
+          subpath: codex
+      - type: volume
+        source: aic-auth-global
+        target: /auth-global/opencode
+        volume:
+          subpath: opencode
+    healthcheck:
+      test: ["CMD", "/usr/bin/test", "-f", "/run/aic-auth-sync.ready"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 1s
+
+  # Reserved security service: the only container that sees raw host config.
+  # Fixed command, no network/workspace/auth/session mounts, read-only rootfs,
+  # and one narrowly justified capability (0600 host files may have another
+  # uid). Its root-owned JSON products are mounted RO into devcontainer above.
+  aic-seed-sanitizer:
+    build: *aic-build
+    user: "0:0"
+    command: ["/usr/bin/python3", "-I", "/opt/post-create.py", "sanitize-seeds"]
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    pids_limit: 64
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    volumes:
+      - ${HOME}/.gitconfig:/raw-host-seed/gitconfig:ro
+      - ${HOME}/.claude/settings.json:/raw-host-seed/claude-settings.json:ro
+      - ${HOME}/.codex/config.toml:/raw-host-seed/codex-config.toml:ro
+      - ${HOME}/.config/opencode/opencode.json:/raw-host-seed/opencode.json:ro
+      - aic-sanitized-seed:/sanitized-host-seed
 
   socket-proxy:
-    image: tecnativa/docker-socket-proxy:v0.4.2
+    # Digest-pin the multi-arch index: this service holds the raw host socket.
+    image: tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     restart: unless-stopped
     privileged: false
     read_only: true
@@ -122,20 +197,23 @@ services:
       # 0.4.x writes the rendered haproxy.cfg to /tmp/haproxy.cfg on startup.
       - /tmp
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${AIC_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
       # haproxy 3.x in 0.4.x loads /var/lib/haproxy/server-state on startup;
       # an anonymous volume seeds it from the image (the file is pre-touched
       # in the Dockerfile) while keeping the path writable.
       - /var/lib/haproxy
     environment:
-      # Reads — needed by `docker ps`, `docker compose ls`, image inspection,
-      # testcontainers, etc.
-      CONTAINERS: 1
-      EVENTS: 1
-      IMAGES: 1
-      INFO: 1
-      NETWORKS: 1
-      VOLUMES: 1
+      # Host object reads are OFF by default: an unrestricted agent does not
+      # need visibility into unrelated containers, images, networks, or
+      # volumes. `aic init/sync --docker-read` flips these six toggles to 1;
+      # `--docker` does the same and enables writes below.
+      CONTAINERS: 0
+      EVENTS: 0
+      IMAGES: 0
+      INFO: 0
+      NETWORKS: 0
+      VOLUMES: 0
+      # Keep only the minimal liveness/version surface in the default mode.
       VERSION: 1
       PING: 1
 
@@ -182,6 +260,7 @@ volumes:
   aic-auth-global:
     name: aic-auth-global
     external: true
-  # Per-project — scoped to the compose project name, which devcontainer CLI
-  # sets to the host workspace folder basename.
+  # Per-project — scoped to the deterministic top-level Compose name.
   aic-sessions:
+  # Reserved sanitizer output; contains only root-owned allowlisted JSON.
+  aic-sanitized-seed:

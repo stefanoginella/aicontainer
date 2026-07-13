@@ -11,9 +11,15 @@ A sandboxed devcontainer for running [Claude Code](https://claude.ai/code), [Cod
 
 **Why?** Auto-approve is the only way these CLIs actually fly — but pointed at your real `$HOME` it also lets a prompt-injected dependency read `.env`, exfiltrate shell history, or push through your `gh` token. `aicontainer` puts the AI behind a devcontainer boundary so you can keep auto-approve on without rebuilding your machine each time.
 
-**What you get:** filesystem isolation, a **read-only** Docker socket via [Tecnativa's docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) (write access is opt-in per project), a minimal PreToolUse hook, an always-on block of cloud-metadata/link-local egress, and an **opt-in** iptables outbound allowlist. No AI-generated config, no per-project re-login. Defaults are listed in [What's in the box](#whats-in-the-box) so you know exactly what you're adopting.
+**What you get:** filesystem isolation, **no Docker object access by default**
+through a digest-pinned [socket proxy](https://github.com/Tecnativa/docker-socket-proxy),
+a minimal shared tool hook, an always-on cloud-metadata/link-local block, and an
+**opt-in** outbound allowlist. Host preferences are reduced to fixed safe fields
+before the agent sees them; logins still carry across projects. Defaults are
+listed in [What's in the box](#whats-in-the-box) so you know exactly what you're
+adopting.
 
-> Adjacent work: same shape as the [Trail of Bits devcontainer](https://github.com/trailofbits/claude-code-devcontainer), with Codex and OpenCode added, opt-in Docker access, and host shell look-and-feel preserved.
+> Adjacent work: same shape as the [Trail of Bits devcontainer](https://github.com/trailofbits/claude-code-devcontainer), with Codex and OpenCode added, three explicit Docker-access modes, and managed shell/config startup.
 
 ## What crosses the boundary
 
@@ -24,24 +30,32 @@ shown automatically at the end of every `aic up`).
 | Surface | Crosses the boundary? |
 |---|---|
 | Project directory | **Yes, read-write** (`/workspace`) — the one writable host path. |
-| `~/.gitconfig`, `~/.p10k.zsh`, `~/.zshrc.local` | Read-only (shell look-and-feel). |
-| `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.config/opencode/opencode.json` | Read-only **seed** — an allowlisted subset of fields; security-critical ones are force-overridden (and inline provider API keys are stripped from the OpenCode seed). See [Config seeding](#config-seeding-from-the-host). |
+| Host Git / Claude / Codex / OpenCode config | The raw files are visible only to a fixed, root-only, networkless one-shot sanitizer. The agent receives root-owned JSON containing allowlisted preferences; executable Git config, inline credentials, MCP env/header secrets, and security-policy fields are removed. See [Config seeding](#config-seeding-from-the-host). |
+| Host shell startup files (`.zshrc`, `.bashrc`, fish config, p10k) | **No.** Shells start from root-managed aicontainer profiles, so a previous session cannot plant startup code and host startup scripts never enter the sandbox. |
 | Host home, `~/.ssh`, SSH-agent socket | **No** — not mounted, not forwarded. |
 | Host credentials (API keys, `gh` token, keychain) | **No** — nothing auto-forwarded; you log in once *inside* the container. |
 | Package-manager caches | **No** — container-local volumes, not your host caches. |
 | Clipboard / browser | **No** — nothing bridged. |
 | `.env*` files | Blocked from the agent by the [PreToolUse hook](#whats-in-the-box). Your project's own `.env` is physically in `/workspace`, but the hook stops the agent from reading it — defense-in-depth at the tool layer, not a missing file. |
-| Session transcripts | Persist in a **per-project named volume**, never written back to your host home. See [Multi-project model](#multi-project-model). |
-| Host Docker daemon | **Read-only by default** (via the socket-proxy: inspect/list, no create/build). Opt in to write access per project with `aic init --docker` when you need testcontainers / in-container `docker compose` — see [Threat model](#threat-model). |
-| **Outbound network** | **Mostly open by default.** Reaches the internet and your LAN; **cloud metadata / link-local (`169.254.0.0/16`) is blocked on every create**. Opt in to the [iptables allowlist](#opt-in-network-allowlist) to restrict the rest. |
+| Session transcripts, prompt history, user-level skills/plugins/instructions | Persist in a **path-unique per-project volume**, never written back to your host home or shared with another checkout. See [Multi-project model](#multi-project-model). |
+| Host Docker daemon | **Object APIs off by default**: only proxy ping/version remain. `--docker-read` opts into sensitive object/inspect/log/file APIs; `--docker` opts into read-write host-daemon control for testcontainers / in-container Compose. See [Threat model](#threat-model). |
+| **Outbound network** | **Mostly open by default.** Reaches the internet and your LAN; IPv4/IPv6 link-local and common cloud-provider metadata endpoints are blocked on every create. Opt in to the [allowlist](#opt-in-network-allowlist) to restrict the rest. |
 
 The full reasoning is in [Threat model](#threat-model); the network row is the
 one most worth your attention.
 
 ## Prerequisites
 
-- Docker runtime: [Docker Desktop](https://docker.com/products/docker-desktop), [OrbStack](https://orbstack.dev/), or [Colima](https://github.com/abiosoft/colima).
+- Docker Engine 25+ with Compose 2.24+ (volume-subpath support): [Docker
+  Desktop](https://docker.com/products/docker-desktop),
+  [OrbStack](https://orbstack.dev/), or
+  [Colima](https://github.com/abiosoft/colima), or rootless Docker Engine,
+  using a local Unix socket. aic discovers the selected context automatically.
 - Node.js 18+ (for npm and the bundled `@devcontainers/cli`).
+- A conventional Git checkout opened at its repository root (`.git` must be a
+  directory so its config/hooks can be protected with exact read-only mounts).
+
+Run `aic doctor` for an exact, non-mutating compatibility check.
 
 ## One-time install
 
@@ -65,11 +79,18 @@ echo 'eval "$(aic completion zsh)"'  >> ~/.zshrc
 aic completion fish > ~/.config/fish/completions/aic.fish
 ```
 
-Then reopen your shell. You'll get tab-completion for subcommands (`init`, `sync`, `up`, …), their flags (`--build`, `--force`, `--with`, `--pull`, `--shell`), and the `--with` / `--shell` values (`claude-code`, `codex`, `opencode`, `claude-code,codex,opencode` and `zsh`, `bash`, `fish`).
+Then reopen your shell. You'll get tab-completion for subcommands (`init`,
+`sync`, `up`, `trust`, …), Docker modes (`--no-docker`, `--docker-read`,
+`--docker`), and the `--with` / `--shell` values.
 
 ## First-time auth
 
-Authenticate once. Tokens land in the global `aic-auth-global` volume and are reused across every project.
+Authenticate once. A networkless credential bridge synchronizes only the four
+known tool credential JSON files into fixed subpaths of the global
+`aic-auth-global` volume; GitHub, npm, signing, and Semgrep use their own fixed
+subpaths. Prompt-bearing config, instructions, skills, plugins, and transcripts
+stay in the current project's volume, so login convenience does not turn one
+project's persistent instructions into another project's.
 
 ```bash
 mkdir -p ~/sandbox/scratch && cd ~/sandbox/scratch
@@ -91,19 +112,70 @@ After this, every `aic up` in any project picks up the same credentials. You do 
 
 ```bash
 cd my-project
-aic init           # writes a 2-file .devcontainer/ that pulls the GHCR image
-aic up             # pulls ghcr.io/stefanoginella/aicontainer:vX.Y.Z (pinned to your aic version), starts container + socket-proxy
+aic init           # writes a small managed .devcontainer/ that pulls the GHCR image
+aic up             # pulls the version-pinned image, validates config, then starts the sandbox
 aic shell          # opens the configured interactive shell (zsh by default)
 claude             # runs in bypass mode (permissions skip)
 codex              # runs in auto-approve mode (sandbox off)
 opencode           # runs with permissions set to allow (guardrail still on)
 ```
 
-`aic init` defaults to **pull mode**: it drops in only `devcontainer.json` and `docker-compose.yml`, and `aic up` pulls the prebuilt image from GHCR (≈30s on a warm runtime, vs. several minutes to build from scratch). Everything else — the Dockerfile, `post-create.py`, the firewall script, hooks — is baked into the image.
+`aic init` defaults to **pull mode**: it writes `devcontainer.json`,
+`docker-compose.yml`, a managed guide/ignore file, and a gitignored `.env` with
+the selected host socket and runtime UID/GID. `aic initialize` refreshes that
+host-only file automatically, so rootless Docker, Docker Desktop, Colima, and
+OrbStack need no aicontainer-specific flags. `aic up` pulls the prebuilt image
+from GHCR (≈30s on a warm runtime, vs. several minutes to build from scratch).
+Everything else — the Dockerfile, `post-create.py`, firewall, and hooks — is
+baked into the image.
 
 If you want to own the build (custom apt packages, air-gapped environments, hacking on the base image), run `aic init --build` instead. That copies the full template — `Dockerfile`, `post-create.py`, hooks, helper scripts — into `.devcontainer/`, and `aic up` builds the image locally.
 
 Other commands: `aic run CMD ...` runs a one-shot inside the container without opening a shell, and `aic down` stops the container without removing its volumes (resume with `aic up`). Full list in `aic help`.
+
+Every aic-launched startup validates the managed control files and fully
+resolved Compose model before handing them to Dev Containers. The generated VS
+Code initializer repeats the gate before Compose creates anything. Normal
+generated projects stay silent. If a project intentionally adds a custom image,
+host bind, device, capability, or namespace, review the findings and run `aic
+trust` once; the exact-config approval lives outside the repository and expires
+when the relevant config changes. For a single reviewed run, use `aic up
+--allow-unsafe` or `aic rebuild --allow-unsafe`. Docker daemon visibility is a
+separate opt-in: use `aic init --docker-read` / `aic sync --docker-read` or the
+corresponding `--docker` form; matching consent also lives outside the
+repository.
+
+> **Direct VS Code bootstrap caveat:** Dev Containers must read the repository's
+> `devcontainer.json` and execute its host-side `initializeCommand` before `aic
+> initialize` can validate it. Never click **Reopen in Container** on an
+> arbitrary repository-supplied `.devcontainer/`. Run `aic init --force` (or
+> `aic sync` for an existing aicontainer project), inspect the resulting diff
+> and project-owned override files, then use `aic up` or reopen in VS Code.
+
+### Diagnostics and review
+
+Three read-only commands make the boundary inspectable without starting or
+changing the project:
+
+```bash
+aic doctor     # host prerequisites + project wiring, concise OK/WARN/FAIL
+aic status     # identity, modes, runtime, credential bridge, and volumes
+aic validate   # managed provenance + fully resolved Compose security model
+```
+
+`doctor` can run before `init`; it checks Node 18+, Docker Engine 25+ and
+Compose 2.24+ (needed for volume subpaths), the selected local Unix socket,
+the Dev Container CLI, Git/project-root shape, install integrity, and
+control-path safety. Warnings remain exit 0; blockers exit nonzero. Standard,
+rootless, Colima, OrbStack, and Docker Desktop Unix-socket contexts are
+discovered automatically; remote TCP/SSH contexts, subdirectories below the
+Git root, and worktree-style checkouts are reported explicitly rather than
+failing later with an opaque Compose error.
+
+`status` is a quick factual snapshot (including credential-bridge health) and
+tolerates a stopped daemon. `validate` is suitable for CI: it never prompts or
+records trust, honors an existing exact approval, and exits nonzero for managed
+drift or an untrusted boundary expansion.
 
 ### Choosing tools per project
 
@@ -132,14 +204,22 @@ The choice is stored as `containerEnv.AIC_SHELL` in `.devcontainer/devcontainer.
 
 ### VS Code
 
-If you work in VS Code, you can skip `aic up` and `aic shell` entirely — the editor handles both:
+If you work in VS Code, you can skip `aic up` and `aic shell` after aic has
+generated the control files — the editor handles both:
 
 1. Install the **Dev Containers** extension `ms-vscode-remote.remote-containers`
 2. `aic init` in your project (one time).
 3. Open the project folder in the editor.
 4. `Cmd+Shift+P` → **Dev Containers: Reopen in Container**.
 
-The editor builds the image, brings up the compose stack (devcontainer + socket-proxy), runs `postCreateCommand`, and drops you into an integrated terminal that's already inside the container. `claude`, `codex`, and `opencode` are available immediately.
+The generated initializer runs the same host validation and volume migration as
+`aic up`, sanitizes the host preference seeds in a networkless one-shot service,
+brings up the devcontainer and socket-proxy, and drops you into an integrated
+terminal. `claude`, `codex`, and `opencode` are available immediately. The host
+`aic` CLI is required; the initializer checks common npm/Node-manager paths and
+prints one install command if a GUI-launched editor cannot find it. Step 2 is
+the host-control-plane boundary: do not directly reopen a devcontainer supplied
+by an untrusted repository before aic has replaced and you have reviewed it.
 
 You can still use `aic` from a separate terminal at the same time — `aic rebuild`, `aic destroy`, etc. operate on the same compose project as the editor, so the two paths don't conflict.
 
@@ -187,16 +267,35 @@ Uninstall the plugin and drop the marketplace:
 **Security-driven defaults** (don't change casually — many are the actual sandbox boundary):
 
 - **npm hardening**: `NPM_CONFIG_IGNORE_SCRIPTS=true` blocks `postinstall` RCE, the most common supply-chain vector. `NPM_CONFIG_MIN_RELEASE_AGE=1` rejects any package published in the last 24h (mitigates fast-moving malicious releases — npm interprets the value in days). `audit=true`, `fund=false`.
-- **Locked config + shell rc**: `~/.gitconfig.local` is chowned `root:root 0444` after first run, so a compromised AI session can't inject `credential.helper` or `core.sshCommand` to capture tokens during in-container `git push` / `gh` flows. The baked login-shell rc files (`~/.zshrc`, `~/.bashrc`, fish config) are root-locked the same way, so a session can't plant a payload that runs on the next `aic shell`. Host `~/.gitconfig` is included read-only.
+- **Root-managed Git and shell startup**: a networkless sanitizer extracts only
+  fixed, non-executable preferences (identity, line-ending, pull/push behavior,
+  and signing intent) from the host Git config. A narrow helper validates the
+  generated config and installs it once at `/etc/aic/user-config/gitconfig` as
+  `root:root 0444`; credential helpers, aliases, includes, hooks, remotes, and
+  command/path-bearing settings never cross. Zsh, Bash, and fish likewise start
+  from root-owned aicontainer profiles, never writable user or host rc files.
 - **PreToolUse hook** (Claude, Codex + OpenCode, fires even with bypass/auto-approve/allow on) blocks:
   - reads of `.env*` files — via `Read`/`Edit`/`Write`/`Grep`/`Glob` and in Bash commands (allowing `.env.example|.sample|.template|.defaults`),
   - `curl|sh` / `wget|bash` fetch-and-execute in Bash (including `| sudo bash`, `| tee | sh`, and `bash -c "$(curl …)"` variants),
   - writes to `/etc/aic/`, `/workspace/.devcontainer/`, and the login-shell rc files (`~/.zshrc` / `~/.bashrc` / fish config + their `.local` includes) — defense-in-depth on top of the RO mounts and root-locks above.
 
   One script (`/etc/aic/hooks/pre-tool-use.sh`) is the single source of truth for all three tools: Claude registers it in `settings.json`, Codex via a managed hook, and OpenCode via a small plugin (`opencode-guardrail.js`) that translates its tool calls and shells out to the same script.
-- **Forced AI sandbox settings** — host config can't loosen these: Claude `permissions.defaultMode=bypassPermissions` + hook registration, Codex `approval_policy=never` + `sandbox_mode=danger-full-access` + hook registration, OpenCode `permission."*"=allow` + the guardrail plugin. See [Config seeding from the host](#config-seeding-from-the-host) for the full allowlist/dropped fields.
+- **Forced AI sandbox settings** — root-managed policy, not writable user
+  config, enforces Claude `permissions.defaultMode=bypassPermissions` + hook,
+  Codex `approval_policy=never` + `sandbox_mode=danger-full-access` + managed
+  hook, and OpenCode `permission."*"=allow` + guardrail plugin. See [Config
+  seeding](#config-seeding-from-the-host) for the preference allowlist.
+- **Reduced runtime privilege**: the devcontainer starts with every Linux
+  capability dropped, then receives only the small set required by UID/GID
+  startup, the fixed ownership helper, and its own network firewall. The raw
+  Docker socket is hidden behind a root-only path used solely to verify named
+  volumes; the agent talks only to the socket proxy.
 - **Container global gitignore** covers `.env*`, `.claude/`, `.codex/`, `node_modules/`, `.venv/`, `__pycache__/`, `.DS_Store` — fewer ways to accidentally commit a secret.
-- **No host credential forwarding**: no SSH-agent socket, no `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` passthrough, no host `gh` token. You log in once *inside* the container; tokens persist in `aic-auth-global`. Because the SSH agent and `~/.ssh` aren't forwarded, host **commit signing** can't work in here either — use [`aic signing`](#commit-signing) for the sandbox-key alternative.
+- **No host credential forwarding**: no SSH-agent socket, API-key passthrough,
+  host `gh` token, or literal secrets from seeded tool/MCP config. You log in
+  once *inside* the container; tokens persist in hardened subpaths of
+  `aic-auth-global`. Because the SSH agent and `~/.ssh` are absent, use [`aic
+  signing`](#commit-signing) for a sandbox-only signing key.
 
 **Developer-experience defaults** (personal taste; override in `Dockerfile.project` if you disagree):
 
@@ -206,7 +305,10 @@ Uninstall the plugin and drop the marketplace:
 - **CLI utilities**: `ripgrep`, `fd-find`, `fzf`, `tmux`, `jq`, `gh`, `docker` CLI (+ buildx, compose), `semgrep`, [`git-delta`](https://github.com/dandavison/delta) (wired in as `core.pager` and `interactive.diffFilter`).
 - **VS Code extensions** auto-installed when you open in the editor: `anthropic.claude-code`, `openai.chatgpt`, `sst-dev.opencode` (each gated by `AIC_TOOLS`), `eamodio.gitlens`, `pflannery.vscode-versionlens`, `BracketPairColorDLW.bracket-pair-color-dlw`, `vincaslt.highlight-matching-tag`, `yzhang.markdown-all-in-one`. Add your own per project (e.g. the Python or TypeScript editor stack) via [`.devcontainer/vscode-extensions` and `vscode-settings.json`](#project-specific-vs-code-extensions--settings).
 - **VS Code terminal settings**: default profile + font family follow the project's `AIC_SHELL` (zsh → `MesloLGS NF`; bash/fish → `monospace`), right-click pastes, only `http/https/mailto/vscode` link schemes opened (`file://` OSC 8 links suppressed to dodge [microsoft/vscode#211443](https://github.com/microsoft/vscode/issues/211443)).
-- **Misc env**: `PYTHONDONTWRITEBYTECODE=1`, `PIP_DISABLE_PIP_VERSION_CHECK=1`, `GIT_CONFIG_GLOBAL=/home/vscode/.gitconfig.local` (so the host gitconfig stays read-only).
+- **Misc env**: `PYTHONDONTWRITEBYTECODE=1`,
+  `PIP_DISABLE_PIP_VERSION_CHECK=1`, and
+  `GIT_CONFIG_GLOBAL=/etc/aic/user-config/gitconfig` (the validated root-managed
+  config).
 
 If you want a different baseline, see [Installing extra tools](#installing-extra-tools) for the project-Dockerfile pattern — most of the dev-experience choices can be flipped in 2-3 lines there.
 
@@ -226,7 +328,10 @@ npm install -g <node-cli>
 
 These are **wiped on `aic destroy` or `aic rebuild`**. Fine for exploration; not for things your project depends on.
 
-> Note: `sudo` inside the container is scoped to three security wrappers (`aic-chown-volumes`, `aic-lock-gitconfig`, `aic-firewall`) — bare `apt-get`, `chown`, etc. are denied (this is what blocks an in-container AI from escalating to root). To install apt packages, put them in a project Dockerfile (below) and `aic rebuild`.
+> Note: `sudo` inside the container is scoped to three fixed-purpose wrappers
+> (`aic-chown-volumes`, `aic-lock-gitconfig`, `aic-firewall`) — bare
+> `apt-get`, `chown`, etc. are denied. To install apt packages, use a reviewed
+> project Dockerfile (below) and `aic rebuild`.
 
 ### (b) Persistent, in a project Dockerfile
 
@@ -253,20 +358,34 @@ RUN uv tool install ruff \
     && uv tool install pre-commit
 ```
 
-Edit `.devcontainer/docker-compose.yml` and swap the `image:` line for a build block pointing at the new file:
+Point at it from the sync-safe
+`.devcontainer/docker-compose.override.yml`; never edit the managed Compose
+file:
 
 ```yaml
 services:
   devcontainer:
-    # image: ghcr.io/stefanoginella/aicontainer:vX.Y.Z   # was this
     build:
       context: .
       dockerfile: Dockerfile.project
 ```
 
-Then `aic rebuild`. The tools survive `aic destroy` and are versioned with the project — teammates get the same environment.
+Run `aic sync`, inspect the resolved warning, then `aic trust` once and `aic
+rebuild`. A project Dockerfile executes as root while the image is built and can
+replace any sandbox helper, so aic intentionally treats every custom build as a
+host-boundary expansion even when its `FROM` is the official base. The trust is
+for the exact relevant config hash; changing the Dockerfile or override asks for
+review again. The tools then survive rebuilds and are versioned with the project.
 
-> If you ran `aic init --build` instead of the default, your `Dockerfile.project` should use `FROM aicontainer-base:latest` (the locally-built tag) and the compose file already has a `build:` block — just change `dockerfile: Dockerfile` to `dockerfile: Dockerfile.project`.
+The example's `context: .` is deliberately bounded to `.devcontainer/`, so its
+contents fit the persistent trust hash. A build context outside that directory
+(for example `context: ..`) can change through arbitrary project files; `aic
+trust` therefore refuses to persist it, and each reviewed `aic up`/`rebuild`
+must use `--allow-unsafe`.
+
+> If you ran `aic init --build`, use `FROM aicontainer-base:latest` and put only
+> `build.dockerfile: Dockerfile.project` in the override; the same explicit
+> trust step applies.
 
 **Rule of thumb:** if you'd be annoyed to reinstall it after every container rebuild, put it in `Dockerfile.project`. If you're just trying something, install ad-hoc.
 
@@ -297,7 +416,8 @@ RUN export PATH="$FNM_DIR:$PATH" && eval "$(fnm env)" \
     && npx --yes playwright@${PLAYWRIGHT_VERSION} install chromium
 ```
 
-Swap the compose `image:` line for the `build:` block shown above, then `aic rebuild`.
+Use the project-owned override `build:` block shown above, then `aic sync`,
+`aic trust`, and `aic rebuild`.
 
 - **If Chromium won't launch, disable its sandbox.** Depending on your Docker runtime's capability/seccomp setup, Chromium's own sandbox may fail to start inside the container. If you hit launch errors, set `chromiumSandbox: false` in `playwright.config.ts` (or pass `--no-sandbox` for ad-hoc launches) — the standard Chromium-in-Docker fix.
 - **Testing `localhost` needs no firewall change** — loopback is always allowed, so driving your own dev server works even with the allowlist enabled. Only pointing the browser at the public internet (with the firewall on) means adding hosts to `.devcontainer/firewall-allowlist`.
@@ -305,11 +425,30 @@ Swap the compose `image:` line for the `build:` block shown above, then `aic reb
 
 ## Per-project overrides that survive `aic sync`
 
-`devcontainer.json` and `docker-compose.yml` are **template-managed** — `aic init` writes them and `aic sync` overwrites them (only your `AIC_TOOLS` / `AIC_SHELL` choices are carried across). So don't hand-edit those two files for project-specific tweaks; your edits get reset on the next sync/upgrade.
+`devcontainer.json` and `docker-compose.yml` are **template-managed** — `aic
+init` writes them and `aic sync` overwrites them. Tool, shell, and explicitly
+consented Docker modes are re-applied; hand edits are not.
 
 > `aic` also drops a **`.devcontainer/README.md`** into every project spelling out this exact managed-vs-project-owned split — it's there mostly so an AI agent poking at the devcontainer edits the right files (and learns it can't edit `devcontainer.json`) instead of fighting the sync. That README is itself template-managed, so don't edit it either; the project-owned files below are where customization lives.
 
-Instead, drop a **`.devcontainer/docker-compose.override.yml`**. It's project-owned: `aic` never copies over it, and `aic init` / `aic sync` auto-append it to `dockerComposeFile` in `devcontainer.json`, so the wiring is re-applied every sync. Docker Compose merges it on top of the base file (override wins).
+Instead, drop a **`.devcontainer/docker-compose.override.yml`**. It's
+project-owned: aic never overwrites it, automatically re-wires it on sync, and
+validates the fully resolved result before any startup command. Ordinary env
+and named-volume data mounts under `/workspace` or `/home/vscode/.cache` remain
+frictionless. Host binds, bounded custom images/builds, devices, capabilities,
+namespaces, external resources, or non-loopback published ports require an
+exact-config `aic trust` approval stored outside the repo. A build context
+outside `.devcontainer/` is unbounded and instead requires `--allow-unsafe` on
+each reviewed `up`/`rebuild`.
+
+Literal application environment values remain prompt-free. Active Compose
+`$HOST_VAR` / `${HOST_VAR}` expressions and bare pass-through entries such as
+`environment: [HOST_TOKEN]` require the same one-time trust because they forward
+data from the host shell; validation names the variable but never prints its
+resolved value. Use `$${VAR}` when the container should receive literal template
+text. Overrides of managed startup variables (`PATH`, tool homes, Git/shell
+config, loader variables, or `DOCKER_HOST`) also require review because they can
+bypass the sandbox's startup and isolation wiring.
 
 This is the right home for anything you'd otherwise have put in `containerEnv` or the compose service — env vars, `extra_hosts`, extra mounts, ports:
 
@@ -329,7 +468,9 @@ services:
     #   - "host.docker.internal:host-gateway"
 ```
 
-Run `aic rebuild` after editing. Verify the wiring landed with `grep dockerComposeFile .devcontainer/devcontainer.json` (you should see both files in the array).
+Run `aic sync` after first creating the override, inspect `git diff`, then `aic
+rebuild`. If the validator reports a deliberate boundary expansion, run `aic
+trust` after reviewing it.
 
 > The same file is also the sync-safe place to point at a [`Dockerfile.project`](#b-persistent-in-a-project-dockerfile): put the `build:` block in the override instead of editing `docker-compose.yml`. Compose merges `build:` onto the base service; `aic rebuild` refreshes the base image, then rebuilds your layer on top.
 
@@ -360,7 +501,13 @@ The sync-safe fix is a project-owned **`.devcontainer/chown-paths`** — one mou
 /home/vscode/.cache/uv
 ```
 
-Like `firewall-allowlist`, this file is opt-in (read only if present), never touched by `aic sync`, and read-only inside the container (an in-container tool can't edit it). The prefix allowlist is a hard security boundary baked into the image — paths outside `/workspace/` and `/home/vscode/.cache/` are refused, so the re-own can't be pointed at sudoers, the hooks, or `~/.gitconfig.local`. Keep tool caches under `~/.cache/` (e.g. `CARGO_HOME=/home/vscode/.cache/cargo` in the override) so they fall inside the allowlist.
+Like `firewall-allowlist`, this file is opt-in, survives sync, and is read-only
+inside the container. The privileged helper accepts only canonical, exact
+Docker named-volume mountpoints under `/workspace/` or
+`/home/vscode/.cache/`; it asks the daemon through a root-only socket for the
+current container's mount metadata and rejects host binds, symlinks, nested
+binds, external/custom drivers, and `local` volumes with bind-capable options.
+Keep tool caches under `~/.cache/` so they fit this boundary.
 
 > Already created the volume root-owned from an earlier run? `aic-chown-volumes` fixes it on the next `aic rebuild`. If it was populated by a partial install, `docker volume rm <name>` once and let it re-init clean.
 
@@ -383,7 +530,10 @@ The base `post-create.py` runs it last, after the AI tools, git config, and volu
 `devcontainer.json` is the only place that auto-installs editor extensions and applies machine-scope settings, but it's **regenerated wholesale on every `aic init`/`aic sync`** — so hand-editing its `customizations.vscode` block doesn't survive (and an in-container agent can't edit anything under `.devcontainer/` at all). Two project-owned files are merged in instead, both opt-in by presence and never touched by sync:
 
 - **`.devcontainer/vscode-extensions`** — one [extension id](https://marketplace.visualstudio.com/) (`publisher.name`) per line, `#` comments allowed. Merged into `customizations.vscode.extensions`, so they auto-install when you reopen in the container.
-- **`.devcontainer/vscode-settings.json`** — a JSON object, merged into `customizations.vscode.settings`.
+- **`.devcontainer/vscode-settings.json`** — a strict JSON object, parsed and
+  re-serialized before merging. Invalid input is warned and skipped, and keys
+  owned by aic are ignored with a warning; put intentional overrides in the repo's
+  `.vscode/settings.json`, whose workspace scope wins.
 
 ```
 # .devcontainer/vscode-extensions
@@ -505,71 +655,156 @@ The pull-mode compose file pins `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` to w
 aic nudges you when those versions drift, so a stale container doesn't go unnoticed:
 
 - **`aic up` / `aic shell` / `aic rebuild`** print a warning (offline, no network) when this project's pinned image tag and your installed `aic` disagree — exactly the state you land in after `npm update -g aicontainer` before you've re-synced. The fix it points at is `aic sync && aic rebuild`. On `aic rebuild` it fires *before* the pull — handy, because `rebuild` re-pulls the currently pinned tag, so you can abort and `aic sync` first instead of re-fetching the stale image. (Build-mode projects have no pinned tag, so they aren't checked.)
-- **VS Code "Reopen / Rebuild in Container"** runs the same check (via the devcontainer's `initializeCommand`, host-side), since that path drives `devcontainer up` directly and never the `aic` CLI. The warning lands in the **Dev Containers output channel** (View → Output → "Dev Containers"), not a notification — so it's there if you go looking, but less in-your-face than the terminal warning above. It's best-effort: if `aic` isn't on the PATH VS Code launched with, the check is silently skipped and never blocks the container from coming up.
+- **VS Code "Reopen / Rebuild in Container"** uses the aic-generated host-side
+  initializer for the same drift check, fail-closed config validation, seed
+  preparation, and legacy-session migration. Output lands in the **Dev
+  Containers output channel**. A missing host CLI stops with an actionable
+  install command because silently skipping it would also skip the security
+  boundary. The direct-bootstrap caveat above still applies to repo-supplied
+  control files.
 - **`aic version` / `aic upgrade`** tell you when a newer `aicontainer` has been published to npm. This check is cached for a day, fails silently when offline, and is skipped in CI.
 
 Set `AIC_NO_UPDATE_CHECK=1` to silence both.
 
-`:vX.Y.Z` tags are immutable once published — they capture the exact image built at release time. CI separately rebuilds and pushes a floating `ghcr.io/stefanoginella/aicontainer:latest` on a weekly schedule and on every template change merged to main, for users who prefer base-layer freshness over reproducibility; that tag isn't referenced by default, but you can opt in by editing `.devcontainer/docker-compose.yml`. In `--build` mode `aic rebuild` also does a no-cache local rebuild of the baked image layers (base OS, Node, semgrep, and the Claude/Codex/OpenCode floor); the post-create refresh above then floats all three CLIs to latest regardless of mode.
+`:vX.Y.Z` tags are immutable once published — they capture the exact image
+built at release time. CI separately rebuilds the floating `:latest` and a
+weekly tag with refreshed base layers and no stale build cache; managed
+projects stay on immutable version tags. If you consciously prefer the floating
+track, use a reviewed `Dockerfile.project` based on `:latest` rather than
+editing the managed Compose file. In `--build` mode `aic rebuild` performs a
+no-cache local build too.
 
-The 2 files (pull mode) or full set (build mode) under `.devcontainer/` are not refreshed by `aic rebuild` on their own — they're created once by `aic init`. If a new template version changes them (e.g. a docker-compose mount), run `aic sync` to re-copy from the installed template into `./.devcontainer/`, then `aic rebuild`. `aic sync` auto-detects pull vs. build mode, preserves the project's `AIC_TOOLS` and `AIC_SHELL` selections (pass `--with` / `--shell` to change them), and leaves project-owned files (`Dockerfile.project`, `firewall-allowlist`, `chown-paths`, `post-create.project.sh`, `docker-compose.override.yml`) untouched — re-wiring an existing [`docker-compose.override.yml`](#per-project-overrides-that-survive-aic-sync) into `dockerComposeFile` so per-project compose tweaks survive the sync.
+The managed files under `.devcontainer/` are not refreshed by `aic rebuild`
+alone. After upgrading, run `aic sync` and review the diff, then rebuild. Sync
+preserves tool/shell selections and a previously consented Docker mode, leaves
+all project-owned files untouched, and switches modes cleanly without stale
+build artifacts.
+
+The same sync migrates old basename-scoped projects to a deterministic Compose
+name derived from the canonical project path. On the next sync/up/VS Code open,
+aic automatically copies the legacy transcript volume only when an existing
+container's exact workspace/project labels and session mount prove ownership,
+with no differently owned container also mounting it; it likewise stops only a
+legacy stack with an exact owned primary and no conflicting owner or unknown
+service (known unlabeled aic sidecars are allowed; arbitrary orphans are never
+removed). If no container remains to disambiguate a historically shared
+basename volume, sync leaves it untouched and the next interactive `aic up`
+asks once whether to import it (default no starts fresh and preserves the old
+volume). A direct VS Code or other non-interactive start stops with that same
+`aic up` hint rather than risking cross-project transcript disclosure.
+Ownership-proven upgrades need no re-login or manual volume command, and two
+checkouts with the same folder name no longer collide. The legacy container-side
+`~/.claude-sessions` layout is likewise migrated to the tool-neutral
+`~/.aic-sessions` volume path.
+
+> **Upgrade friction:** for an ordinary or ownership-proven project the whole
+> migration is still
+> `npm update -g aicontainer && aic sync && aic rebuild`. Existing logins,
+> transcripts, and tool/shell choices carry forward. Older releases had no
+> outside-repository Docker consent record, so their inherited Docker exposure
+> resets once to `none`; only users who need it re-enable it with `aic sync
+> --docker-read` or `aic sync --docker`. An ambiguous historical basename
+> volume adds the other one-time decision; clean generated projects add no
+> prompt.
 
 ## Multi-project model
 
-> **Your transcripts survive.** Session history is a first-class part of the
-> model, not an afterthought. `~/.claude/projects/`, `~/.codex/sessions/`, and
-> OpenCode's session db live in a **per-project named volume**
-> (`<proj>_aic-sessions`), so they survive container recreation (`aic rebuild`,
-> `aic up`) without ever being written back to your host home — the host's
-> `~/.claude/projects/` is *not* mounted. The only thing that clears them is
-> `aic destroy` (which says so before it does). So you get isolation *and*
-> durable decision history.
+> **Your work survives without crossing projects.** Claude/Codex transcripts and
+> prompt history, OpenCode's database/checkpoints, and user-level instruction,
+> skill, command, rule, prompt, and plugin surfaces live in a path-unique
+> **per-project named volume** (`aic-<folder>-<path-hash>_aic-sessions`). They
+> survive `up`/`rebuild`, are never written into the host home, and are removed
+> only by the explicitly confirmed `aic destroy`.
 
-What's shared across all aicontainer projects on your host vs. what's per-project:
-
-| | Scope | Volume |
+| Data | Scope | Storage |
 |---|---|---|
-| `~/.claude`, `~/.codex`, `~/.local/share/opencode`, `~/.config/gh`, `~/.config/npm` (auth + plugins + recent-session metadata), `semgrep` login token | **Global** | `aic-auth-global` (subpath mounts + `SEMGREP_SETTINGS_FILE`) |
-| Shell history (`.zsh_history`) | **Global** | `aic-shell-history` |
-| Claude session JSONLs (`~/.claude/projects/`) | **Per-project** | `<proj>_aic-sessions` |
-| Codex session history (`~/.codex/sessions/`, `history.jsonl`) | **Per-project** | `<proj>_aic-sessions` |
-| OpenCode session db (`OPENCODE_DB`) + storage | **Per-project** | `<proj>_aic-sessions` |
-| Project source code | Bind mount | `${PWD}` |
-| p10k theme, host gitconfig | Bind mount RO | host `~/.p10k.zsh`, host `~/.gitconfig` |
-| Claude / Codex / OpenCode global config (seed) | Bind mount RO | host `~/.claude/settings.json`, `~/.claude/statusline/`, `~/.codex/config.toml`, `~/.config/opencode/opencode.json` |
+| Claude/Codex/OpenCode login state; `gh`, npm and Semgrep login; sandbox signing key | **Global** | Fixed subpaths of `aic-auth-global` |
+| Shell command history entered inside aicontainer | **Global** | `aic-shell-history` (host history is never mounted) |
+| Claude/Codex transcripts and prompt history | **Per-project** | `<path-unique-project>_aic-sessions` |
+| Claude/Codex user config, memory, skills, agents/commands, rules/prompts, plugins | **Per-project** | Whole tool homes below the same sessions volume |
+| OpenCode config/instructions, session db, storage, and snapshots | **Per-project** | Same sessions volume; its two credential files are synchronized globally |
+| Sanitized host preferences | **Per-project, regenerated** | `<path-unique-project>_aic-sanitized-seed`, read-only to the agent |
+| Project source | Host bind | The current canonical project root at `/workspace` |
 
-The Claude/Codex per-project rows are dir-level symlinks pointing out of `aic-auth-global` into `<proj>_aic-sessions`, so atomic-rename writes to files *inside* those directories stay project-scoped. OpenCode keeps its sessions in a sqlite db, which is relocated into the same per-project volume via the `OPENCODE_DB` env var (with its `storage/` and `snapshot/` dirs symlinked there too, so working-tree checkpoints stay project-scoped).
+The unrestricted devcontainer never mounts the global Claude, Codex, or
+OpenCode directories. Instead, each canonical tool home is a symlink into
+`~/.aic-sessions/tool-homes/` in the current project's volume. A dedicated
+networkless, capability-free sidecar is the only service that sees both those
+homes and the three global tool-auth subpaths. It continuously reconciles four
+exact files — Claude `.credentials.json`, Codex `auth.json`, and OpenCode
+`auth.json` / `account.json` — so login, logout, and token refresh propagate
+without sharing any other filename.
 
-Two consequences:
-- Log in once, work on twenty projects.
-- Per-project chat history (`~/.claude/projects/`, `~/.codex/sessions/`, OpenCode's db) is isolated — a compromised AI in project A can't read project B's transcripts. **But** anything else under `~/.claude` / `~/.codex` / `~/.local/share/opencode` — recent-session metadata, plugins, caches, `history.jsonl` — is shared across projects via `aic-auth-global`, alongside the auth tokens. Accept this trade-off knowingly.
+The bridge accepts only owner-matched, single-link, bounded JSON objects,
+copies them atomically as mode `0600`, and ignores unsafe/malformed paths. Its
+initial newer-wins reconciliation completes before the devcontainer starts.
+GitHub/npm/signing/Semgrep use their own fixed global subpath mounts; the broad
+auth-volume root is never exposed.
+
+This preserves the easy part — log in once, work on twenty projects — while
+removing cross-project prompt and transcript bleed. The deliberate remaining
+trade-off is credentials: a compromised session in any project can use the
+shared tokens you logged into inside aicontainer. Prefer least-privilege OAuth
+grants and a fine-grained `gh` PAT. Global shell history is also readable by
+every project; do not type secrets into shell commands.
 
 ### Config seeding from the host
 
-On first container creation, `post-create.py` reads `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.config/opencode/opencode.json` from the read-only seed mounts above and copies an **allowlisted subset** of fields into the container's config. Security-critical fields are then force-overwritten:
+Raw host config is never mounted into the unrestricted devcontainer. Before it
+starts, a fixed root-only service with no network, no workspace, a read-only
+root filesystem, and no auth/session mounts reads exactly four files:
+`~/.gitconfig`, `~/.claude/settings.json`, `~/.codex/config.toml`, and
+`~/.config/opencode/opencode.json`. It emits four root-owned JSON objects into a
+per-project volume; the long-running agent receives that volume read-only.
+
+The sanitizer copies only known preference fields and recursively removes
+literal credential-bearing keys such as `env`, `headers`, `authorization`, API
+keys, tokens, secrets, and passwords. Security-critical behavior is enforced
+separately at root-managed precedence:
 
 | Field | Container always sets |
 |---|---|
 | Claude `permissions.defaultMode` | `bypassPermissions` |
-| Claude `hooks` | the aicontainer PreToolUse hook |
+| Claude hook/policy | `/etc/claude-code/managed-settings.json` |
 | Codex `approval_policy` | `never` |
 | Codex `sandbox_mode` | `danger-full-access` |
 | OpenCode `permission` | `{ "*": "allow" }` |
-| OpenCode `plugin` | the aicontainer guardrail plugin |
+| OpenCode policy/plugin | `/etc/opencode/opencode.json` + the shared guardrail |
 
-Claude's PreToolUse hook is forced into `~/.claude/settings.json`. Codex's isn't seeded into `config.toml` (a hook there is *untrusted* and skipped in autonomous mode) — it's baked as a **managed** hook in `/etc/codex/requirements.toml`, which Codex auto-trusts and the in-container user can't disable. OpenCode's guardrail is forced in as a `plugin` entry pointing at the root-owned `opencode-guardrail.js`, which calls the same shared script.
+Codex's hook lives in `/etc/codex/requirements.toml` with a root-managed hook
+directory; a user hook would be trust-gated and skipped in autonomous mode.
+Claude and OpenCode use their supported system-managed configuration. All three
+dispatch to the same root-owned guardrail script.
 
-Seeded (when present on the host): Claude `env`, `statusLine`, `enabledPlugins`, `mcpServers` / `enabledMcpjsonServers`, `theme`, `model`, `effortLevel`, `editorMode`, `verbose`, `fileCheckpointingEnabled`, `outputStyle`, plus a handful of other preference fields. Codex `model`, `model_reasoning_effort`, `personality`, `[features]`, `[notice]`, `[projects.*]`, `[mcp_servers.*]`. OpenCode `provider`, `model`, `small_model`, `mcp`, `agent`, `instructions`, `theme`, `keybinds`, `formatter`, `lsp`.
+Seeded preferences include Claude model/theme/editor/effort and MCP/plugin
+metadata; Codex model/personality plus `[features]`, `[notice]`, `[projects.*]`,
+and `[mcp_servers.*]`; OpenCode provider/model/MCP/agent/instruction/theme/
+keybind/formatter/LSP definitions; and a fixed non-executable set of Git
+identity/workflow preferences.
 
-**Dropped from the host (never seeded):** Claude `permissions.allow/deny/ask`, Claude `hooks`, Claude `apiKeyHelper` / `awsAuthRefresh` / `awsCredentialExpiration`, Codex top-level `approval_policy` / `sandbox_mode`, Codex `[hooks.*]`, OpenCode `permission` / `plugin` (we force them) **and any inline provider API key** (`provider.*.options.apiKey` and similar — scrubbed recursively). These either defeat the in-container sandbox or carry host-specific auth secrets.
+Dropped fields include Claude permissions/hooks/auth helpers; Codex approval,
+sandbox, and hooks; OpenCode permission/plugin and inline provider secrets; MCP
+literal env/header credentials across all three; and every executable or
+path-bearing Git key (`include`, aliases, credential helpers, hooks paths,
+SSH commands, remotes, pagers/editors, signing-key paths). Git identity and safe
+preferences are validated again before a fixed helper installs them once as
+`root:root 0444`.
 
-**MCPs:** seeded for all three tools. An MCP that references a host-only binary (e.g. `/Applications/Foo.app/...`) won't start in the container — the agent logs the failure and continues. URL-based MCPs (`context7`, `openaiDeveloperDocs`, etc.) and npm-installed MCPs work as on the host. MCP server secrets carried in env/headers ride along with the seed (same accepted trade-off across all three tools). If you want a different MCP set in the container than on the host, edit `~/.claude/settings.json`, `~/.codex/config.toml`, or `~/.config/opencode/opencode.json` inside the container (all writable by the dev user).
+**MCPs:** metadata is seeded for all three tools. Host-only binaries will not
+exist in Linux; URL-based and npm-installed servers generally work. Literal MCP
+env/header credentials are deliberately removed, so authenticate inside the
+sandbox or reference an in-container environment variable. Claude, Codex, and
+OpenCode user config is project-scoped and reconciled from the sanitized seed
+on recreate; root-managed policy remains separate from those writable homes.
 
-**Providers (OpenCode):** custom provider/model definitions in your host `opencode.json` (e.g. a DeepSeek endpoint or a local model list) carry over so they're available as options — but **provider API keys are never forwarded** (the inline `apiKey` is stripped from the seed). Run `opencode auth login` inside the container once; the credential persists across rebuilds in `aic-auth-global`.
+**Providers (OpenCode):** custom provider/model definitions carry over, but
+secret-looking provider keys are stripped recursively. Run `opencode auth
+login` inside once; that credential persists globally.
 
-**Statusline:** if your host `statusLine.command` references a script under `~/.claude/`, the path is rewritten to `/host-seed/claude/...` and the script is run from the RO mount. Scripts that live elsewhere on the host need a custom bind mount added to `.devcontainer/docker-compose.yml`.
-
-**Host paths NOT mounted:** `~/.claude/projects/`, `~/.claude/.credentials.json`, `~/.claude.json`, `~/.codex/sessions/`, `~/.codex/auth.json`, `~/.codex/history.jsonl`, `~/.local/share/opencode/auth.json`. Chat history and auth tokens stay on the host; the container builds its own via `claude /login`, `opencode auth login`, etc. on first run.
+**Host paths not exposed to the agent:** none of the raw config files above,
+host tool history/transcripts/credentials, host statusline scripts, shell rc
+files, `~/.ssh`, or the SSH agent. The container creates its own login state and
+project data in Docker volumes.
 
 ## Commit signing
 
@@ -592,34 +827,79 @@ aic rebuild            # apply — post-create wires the key into the container 
 - `aic signing disable` — keep commits unsigned in the sandbox (silences the notice).
 - `aic signing status` — show the current state.
 
-The key lives only in the `aic-auth-global` volume (never on your host), is shared across all your projects (register once), and survives rebuilds. The choice is applied on the next `aic rebuild`, because the container gitconfig is regenerated and root-locked at create time — there's no live edit (and so no privileged unlock an in-container process could abuse).
+The key lives only in the `aic-auth-global` volume (never on your host), is
+shared across all your projects (register once), and survives rebuilds. The
+choice is applied on the next `aic rebuild`, when
+`/etc/aic/user-config/gitconfig` is validated and created as root-owned 0444 —
+there is no live unlock/update primitive.
 
 > **What this means for "Verified".** The signing key lives where the AI runs, so commits the agent makes will show as **Verified** on GitHub. That's exactly right if your goal is satisfying a branch-protection *"require signed commits"* rule — but it is *not* a statement that a human reviewed the commit. If you want sandbox commits to stay distinguishable and independently revocable, use a distinct signing key (and optionally a distinct committer identity) for it.
 
 ## Threat model
 
 **Sandboxed:**
-- **Filesystem**: host is inaccessible except for the project directory (RW) and a handful of read-only mounts: shell look-and-feel (`~/.gitconfig`, `~/.p10k.zsh`, `~/.zshrc.local`) and the AI-config seeds (`~/.claude/settings.json`, `~/.claude/statusline/`, `~/.codex/config.toml`, `~/.config/opencode/opencode.json`) covered in [Config seeding from the host](#config-seeding-from-the-host).
+- **Filesystem**: the project is the only writable host path. Raw host tool/Git
+  config appears only in the isolated one-shot sanitizer; the agent sees its
+  fixed allowlisted JSON output read-only. Host home, shell startup files,
+  `~/.ssh`, agent sockets, package caches, and tool history are absent.
 - **Process namespace**: container processes don't see host processes.
 - **Runaway limit**: the devcontainer runs with `pids_limit: 4096` so a fork bomb or a stuck agent loop can't exhaust host PIDs. Raise it (or add `mem_limit` / `cpus`) in `docker-compose.override.yml` if a workload needs more.
-- **Docker daemon**: API surface reduced via socket-proxy, and **read-only by default** — `EXEC`, `AUTH`, `SECRETS`, `SWARM`, `SYSTEM`, and now `POST` / `BUILD` are all blocked, so the container can inspect/list but cannot create or build containers on the host daemon. This is the change that makes the proxy an actual host-isolation boundary: with `POST` enabled an in-container agent can `docker run --privileged -v /:/host` and escape, and can spawn sibling containers that bypass the opt-in firewall (they get their own network namespace). Enable write access **per project** with `aic init --docker` (or `aic sync --docker`) only when you need testcontainers / in-container `docker compose` — and treat that project as no more isolated than the host daemon it can now drive.
-- **AI guardrails**: `.devcontainer/`, `.git/config`, `.git/hooks` are mounted **read-only** so the AI cannot rewrite its own configuration. The PreToolUse hook lives at `/etc/aic/hooks/` and is root-owned, not writable by the dev user. The scoped sudoers entry only exposes hardcoded-target wrappers (`aic-chown-volumes`, `aic-lock-gitconfig`, `aic-firewall`) — no bare `chown`, so AI cannot take ownership of `/etc/sudoers.d/` or `/etc/aic/` to escalate.
-- **Cloud metadata / link-local**: egress to `169.254.0.0/16` (which covers the `169.254.169.254` cloud metadata endpoint on AWS/GCP/Azure and ECS task metadata) is dropped on every container create via `sudo aic-firewall block-metadata`, independent of the opt-in allowlist. This closes the highest-severity network path — cloud-credential theft — even on a host where you never enable the full firewall. (Note: a sibling container spawned via opt-in Docker write access is not covered, since it has its own network namespace — another reason to leave Docker read-only.)
-- **Untrusted-repo guard**: before `aic up` / `aic rebuild` bring the stack up, aic scans the project-owned `docker-compose.override.yml` and `Dockerfile.project` — which ride along inside a cloned repo and *are* honored (the override is auto-wired into `dockerComposeFile`) — for host-access grants (`privileged`, `cap_add`, host bind mounts, the Docker socket, a non-aicontainer `FROM`). On a terminal it prints the findings and asks before continuing; the VS Code "Reopen in Container" path surfaces the same warning in the Dev Containers output channel. Silence it with `AIC_NO_OVERRIDE_SCAN=1`. **When reviewing untrusted code, always `aic init --force` (or inspect these two files) rather than trusting whatever `.devcontainer/` the repo shipped.**
+- **Docker daemon**: by default the digest-pinned proxy exposes only ping and
+  version — no container/image/network/volume list, inspect, logs, archive
+  reads, create, or build. `--docker-read` deliberately exposes object read
+  APIs (which can reveal unrelated container metadata, logs, and files);
+  `--docker` adds write/build and therefore permits host escape through a
+  privileged sibling. Both opt-ins require matching consent stored outside the
+  repository and survive sync until `--no-docker` revokes them.
+- **Runtime privilege**: all Linux capabilities are dropped before adding the
+  narrow helper/firewall set; `NET_RAW` stays absent. The raw Docker socket is
+  reachable only below a root-owned `0700` directory and is used by the fixed
+  ownership helper for bounded GET-only mount/volume inspection. The
+  unrestricted user uses the proxy, never that socket.
+- **Control plane**: `.devcontainer/`, `.git/config`, and `.git/hooks` are
+  read-only inside. Managed hooks, tool policy, Git config, and shell startup
+  live under root-owned system paths. Scoped sudo exposes only fixed-purpose
+  wrappers with hardcoded destinations; the volume helper additionally proves
+  each target is an ordinary named volume on the current container.
+- **Cloud metadata / link-local**: every create adds strengthen-only drops for
+  IPv4 link-local (`169.254.0.0/16`), Alibaba metadata
+  (`100.100.100.200`), IPv6 link-local (`fe80::/10`), and AWS IMDSv6
+  (`fd00:ec2::254`). These apply independently of the optional full allowlist.
+- **Untrusted-repo guard**: aic-launched paths reject symlinked control inputs,
+  verify every managed artifact, resolve all Compose layers without trusting a
+  grep, and check services, mounts, builds, capabilities, namespaces, devices,
+  ports, networks/volumes, includes/providers, configs/secrets, and protected
+  path overlays before invoking Dev Containers. The generated initializer
+  repeats this gate before Compose creation. Managed drift requires `aic sync`;
+  an intentional boundary expansion needs `aic trust` or one-run
+  `--allow-unsafe`, and repository edits cannot write either approval.
 
 **Not sandboxed (unless you opt in):**
+- **Direct VS Code bootstrap**: Dev Containers parses the repository's
+  `devcontainer.json` and executes its `initializeCommand` on the host before
+  `aic initialize` can run. aic cannot prevalidate an arbitrary repo-supplied
+  initializer. Generate/review the managed files first; for an untrusted clone,
+  start with `aic init --force`, inspect overrides, and prefer `aic up` for the
+  first launch.
 - **Network**: outbound is otherwise open by default — anything inside the container can reach `api.openai.com`, `api.anthropic.com`, and your LAN (cloud metadata excepted, see above). To restrict the rest, opt in to the [iptables allowlist](#opt-in-network-allowlist) below.
-- **Git identity**: your `~/.gitconfig` is read-only mounted, so the AI can commit and push as you (via `gh auth` or stored credentials). Your signing key is **not** forwarded; if you need signed commits in here, set up a sandbox-only key with [`aic signing`](#commit-signing) — note that this makes agent-authored commits show as Verified.
+- **Git identity**: safe identity/workflow preferences are copied from the host,
+  so the agent can commit as that identity and push with credentials you log
+  into inside. Host credential helpers and signing keys are not forwarded; use
+  [`aic signing`](#commit-signing) for a sandbox-only key.
 - **Host credentials**: nothing is auto-forwarded. The AI only has access to what you explicitly `claude /login`, `codex auth login`, `opencode auth login`, `gh auth login` for inside the container. Note these tokens live in the shared `aic-auth-global` volume, so a compromised session in **any** project can use every token you've logged in with — prefer a fine-grained `gh` PAT.
 
 Don't run this on a network where reaching internal services is a concern — or enable the allowlist below.
 
 ### Hardening the host daemon
 
-The container's isolation is only as strong as the Docker daemon underneath it. Two host-level settings raise the floor, especially if you enable Docker write access for a project:
+The container's isolation is only as strong as the Docker daemon underneath it.
+Two choices raise the floor, especially if you enable Docker write access for a
+project:
 
 - **Rootless Docker** ([docs](https://docs.docker.com/engine/security/rootless/)) or **`userns-remap`** ([docs](https://docs.docker.com/engine/security/userns-remap/)) make container-`root` map to an unprivileged host user, so even a `--privileged`/host-mount escape (the thing opt-in Docker write access would expose) doesn't land as real host root. OrbStack and Colima already run the daemon in a VM, which gives you a similar boundary on macOS.
-- Keep Docker write access **off** (the default) for any project running untrusted code or a prompt-injectable agent; turn it on only where you actually need testcontainers.
+- Keep Docker access at **none** (the default) for untrusted or prompt-injectable
+  work. Opt into reads only when host object visibility is acceptable, and
+  write mode only where testcontainers or host-daemon Compose is essential.
 
 ## Opt-in network allowlist
 
@@ -631,12 +911,20 @@ sudo aic-firewall enable          # apply DROP-default policy with curated allow
 sudo aic-firewall status          # inspect rules + resolved IPs
 ```
 
-The default allowlist covers Anthropic / OpenAI / OpenCode (`opencode.ai`, `models.dev`) / GitHub / npm / PyPI / Docker registries. Per-project extras go in `.devcontainer/firewall-allowlist` (one domain per line, `#` comments allowed). Re-run `sudo aic-firewall enable` after editing.
+The default allowlist covers Anthropic / OpenAI / OpenCode (`opencode.ai`,
+`models.dev`) / GitHub / npm / PyPI / Docker registries. Per-project extras go
+in `.devcontainer/firewall-allowlist` (one validated domain per line, `#`
+comments allowed). Re-run `sudo aic-firewall enable` after editing.
 
 Design notes:
-- The script is **enable-only**. There is no `disable` or `pause` subcommand and the scoped sudoers entry only allows this single script — so an AI that gets shell access can call it, but only to *strengthen* the policy, never to remove it.
+- The script is **enable-only**. Re-enabling builds inactive IPv4/IPv6 rule
+  generations, rejects zero-result or prohibited metadata resolutions, and
+  atomically switches them into use; the prior DROP policy remains active on
+  any failure. Metadata chains are never flushed.
 - To turn the firewall off, `aic rebuild` from the host (this script doesn't survive container recreation).
-- `NET_ADMIN` and `NET_RAW` are granted to the container so the script can manage iptables. The caps are confined to the container's network namespace — they do not affect the host's networking.
+- Only `NET_ADMIN` is needed for the firewall; `NET_RAW` remains dropped. If
+  IPv6 is configured but cannot be filtered, `enable` refuses an
+  IPv6-bypassable policy.
 
 ## FAQ
 
@@ -659,28 +947,17 @@ agent *inside* it. Run both.
 
 **Powerlevel10k glyphs look wrong.** Install the [Meslo Nerd Font](https://github.com/romkatv/powerlevel10k#meslo-nerd-font-patched-for-powerlevel10k) and set it as your terminal font.
 
-**Powerlevel10k prints "Type `p10k configure` to customize" on every shell.** Your host doesn't have a `~/.p10k.zsh` yet. The container bind-mounts that file **read-only**, so configuration has to happen on the host:
+**Powerlevel10k asks to run `p10k configure`.** Shell startup is deliberately
+root-managed and never imports the host's `.p10k.zsh`. The image suppresses the
+interactive setup wizard and uses the bundled theme defaults. For a custom
+prompt, choose Bash/fish or bake a reviewed config into `Dockerfile.project`;
+do not add a writable home rc include.
 
-```bash
-# On the host (outside the container):
-p10k configure        # if you have p10k installed on the host
-# or, install p10k briefly to generate the config:
-brew install powerlevel10k && p10k configure
-```
-
-After `~/.p10k.zsh` exists on the host, the next `aic shell` picks it up automatically. Running `p10k configure` *inside* the container won't work — the mount is read-only by design (so AI can't rewrite your shell).
-
-**Claude Code pre-fills `source /workspace/.venv/bin/activate` in the prompt on startup.** Harmless — Claude spots a project `.venv/` that isn't active and *suggests* (never runs) activating it. It shows up because aicontainer deliberately keeps `VIRTUAL_ENV` unset, so `uv` always resolves the project environment cleanly. To suppress it, mark the venv active for interactive shells from your host `~/.zshrc.local` — bind-mounted **read-only**, so it survives rebuilds/syncs and an in-container tool can't edit it:
-
-```bash
-# On the host, in ~/.zshrc.local (sourced on every `aic shell`):
-if [[ -d /workspace/.venv ]]; then
-  export VIRTUAL_ENV=/workspace/.venv
-  export PATH="/workspace/.venv/bin:$PATH"
-fi
-```
-
-Setting the vars directly — rather than `source`-ing `/workspace/.venv/bin/activate` — is deliberate: it gives Claude the signal it checks for without executing a script out of the tool-writable workspace on every shell start. The `[[ -d … ]]` guard keeps it a no-op in projects with no root `.venv` (the file is shared across all your projects on this host). zsh only — bash/fish have no host `.local` include.
+**Claude Code pre-fills `source /workspace/.venv/bin/activate`.** Harmless —
+Claude spotted a project venv and suggested (but did not run) activation. If
+you want to suppress the suggestion without sourcing a tool-writable script on
+every shell start, set `VIRTUAL_ENV: /workspace/.venv` in the project-owned
+Compose override. This stays project-scoped and survives sync.
 
 If instead the same line is being *typed and run* into the terminal (clobbering a `claude`/`opencode` you just launched), that's the VS Code Python extension, not Claude — see [Recipe: Stop VS Code auto-activating a `.venv` in the terminal](#recipe-stop-vs-code-auto-activating-a-venv-in-the-terminal).
 
@@ -725,13 +1002,28 @@ npm version patch         # or: minor / major. Promotes the changelog, bumps,
 git push --follow-tags    # pushes both the commit and the tag
 ```
 
-`release.yml` then fires on the tag and ships, in one atomic flow:
+`release.yml` then fires on the tag and completes a restartable release flow:
 - `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` (immutable)
-- `ghcr.io/stefanoginella/aicontainer:latest` (floats forward)
 - `aicontainer@X.Y.Z` on npm with provenance attestation
 - a GitHub Release for the tag, with notes pulled from `CHANGELOG.md`
 
-A guard step rejects the run if the `v*` tag doesn't match `package.json`'s `version` — so `npm version` is the only sane way to mint a release tag.
+All releases are globally serialized and never cancelled mid-publish. The
+GHCR-writing jobs in the release and security-refresh workflows also share one
+non-cancelling registry lock, while their workflow-level scheduling remains
+independent. This closes the check-then-publish race around mutable tags.
+
+A rerun verifies an existing npm tarball's integrity and accepts an existing
+GHCR version only when its index annotations match the release commit, version,
+and channel. A legacy unannotated version is preserved only when the matching
+immutable npm tarball exists, and is never promoted to `:latest`; otherwise CI
+fails rather than guessing. Missing sides can be published independently. npm
+`latest` never moves backward (pre-releases use `next`; recovery runs use a
+version-specific tag). GHCR `:latest` is promoted from the already-published
+immutable manifest only when this version is npm latest and doing so would not
+replace a newer security-refresh image.
+
+Guard steps reject a tag whose commit is not on the default branch, whose name
+doesn't match `package.json`, or whose changelog section is missing.
 
 `CHANGELOG.md` is **hand-maintained** ([Keep a Changelog](https://keepachangelog.com/) format) — you write the prose; nothing is auto-generated from commits. Add notes under `## [Unreleased]` as you work. At release time `npm version` does the mechanical promotion for you: a `version` lifecycle script (`scripts/promote-changelog.mjs`) relabels `## [Unreleased]` to `## [X.Y.Z] - <date>`, opens a fresh empty `[Unreleased]`, and fixes the compare links — all from notes you authored. A `preversion` check aborts the bump if `[Unreleased]` is empty, so you can't release nothing. The GitHub Release notes are the resulting `## [X.Y.Z]` section, pulled verbatim, and `release.yml` greps for that section before any publish as a backstop. The `.githooks/pre-push` hook enforces the same check locally; enable it once per clone with `git config core.hooksPath .githooks`.
 
@@ -739,12 +1031,15 @@ A guard step rejects the run if the `v*` tag doesn't match `package.json`'s `ver
 
 |              | What triggers it                                  | What ships                                              |
 | ---          | ---                                               | ---                                                     |
-| Feature PR   | merge to `main`, touches `template/**`            | `:latest` + weekly tag refresh. Nothing on npm.         |
-| Feature PR   | merge to `main`, only touches `aic`/README        | Nothing.                                                |
-| Release      | `npm version <bump> && git push --follow-tags`    | `:vX.Y.Z` (immutable) + `:latest` + npm publish + GitHub Release. |
-| Weekly cron  | Mondays 06:00 UTC                                 | `:latest` + `:weekly-YYYY-VV` refresh. No npm activity. |
+| Runtime/CLI PR | merge to `main`, touches template, CLI, tests, package/scripts | Validate + refresh `:latest` / weekly tag. Nothing on npm. |
+| Docs-only PR | merge to `main`                                   | Nothing published.                                      |
+| Release      | `npm version <bump> && git push --follow-tags`    | Immutable `:vX.Y.Z`, npm, GitHub Release; conservative `:latest` promotion. |
+| Weekly cron  | Mondays 06:00 UTC                                 | Pulled/no-cache `:latest` + `:weekly-YYYY-VV`; no npm.  |
 
-Because `aic init` pins users to `:v{installed-aic-version}`, **only a release reaches pinned users**. Template-only merges to `main` refresh `:latest` (an opt-in track), not anyone's pinned image. Lean toward small, frequent patch releases when you fix something users should pick up — there is no "hidden" template change for pinned users.
+Because `aic init` pins users to `:v{installed-aic-version}`, **only a release
+reaches pinned users**. Runtime/CLI merges refresh the floating security track,
+not anyone's version pin. Lean toward small, frequent patch releases when a fix
+should reach ordinary users.
 
 ### Picking the bump
 

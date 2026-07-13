@@ -1,7 +1,7 @@
 {
   "name": "aicontainer",
   "version": "0.5.0",
-  "description": "Sandboxed devcontainer for running Claude Code and Codex in bypass / auto-approve mode.",
+  "description": "Sandboxed devcontainer for running Claude Code, Codex, and OpenCode in bypass / auto-approve mode.",
   "scripts": {
     "preversion": "node scripts/promote-changelog.mjs --check",
     "version": "node scripts/promote-changelog.mjs && git add CHANGELOG.md"
@@ -13,6 +13,11 @@
   "files": [
     "aic",
     "template/",
+    "!template/**/__pycache__/**",
+    "!template/**/*.py[cod]",
+    "!template/**/.DS_Store",
+    "!template/**/Thumbs.db",
+    "template/.gitignore",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"
@@ -34,7 +39,9 @@
     "devcontainer",
     "claude-code",
     "codex",
+    "opencode",
     "ai",
+    "ai-agent",
     "sandbox",
     "docker",
     "vibecoding",

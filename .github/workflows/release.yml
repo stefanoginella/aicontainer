@@ -21,20 +21,24 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
-# Serialize releases of the same tag but NEVER cancel one mid-flight: a kill
-# between the GHCR push and `npm publish` could leave a partial release. Distinct
-# tags use distinct groups, so different versions don't block each other.
+# Serialize every release globally and NEVER cancel one mid-flight: two versions
+# publishing concurrently can race npm's `latest` dist-tag and GHCR's `:latest`.
+# A kill between the GHCR push and `npm publish` could also leave a partial
+# release; `queue: max` keeps later releases waiting instead of replacing a
+# pending one, and the publish job below is deliberately restartable.
 concurrency:
-  group: release-${{ github.ref }}
+  group: aicontainer-release
   cancel-in-progress: false
+  queue: max
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - name: Build multi-arch (no push, validates build)
@@ -52,11 +56,84 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Static test - registry publishing stays serialized and fail-closed
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          workflows = [
+              Path(".github/workflows/rebuild.yml"),
+              Path(".github/workflows/release.yml"),
+          ]
+          headers = [path.read_text().split("\njobs:\n", 1)[0] for path in workflows]
+          assert "group: aicontainer-registry-publish" not in headers[0]
+          assert "group: aicontainer-registry-publish" not in headers[1]
+          assert "group: rebuild-" in headers[0]
+          assert "group: aicontainer-release" in headers[1]
+          for path in workflows:
+              text = path.read_text()
+              match = re.search(
+                  r"(?ms)^  publish:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)", text
+              )
+              assert match, f"{path}: publish job missing"
+              publish = match.group(1)
+              lock = re.search(
+                  r"(?m)^    concurrency:\n"
+                  r"((?:^      [^\n]*\n)+)", publish
+              )
+              assert lock, f"{path}: publish concurrency missing"
+              lock_text = lock.group(1)
+              assert "group: aicontainer-registry-publish" in lock_text, path
+              assert "cancel-in-progress: false" in lock_text, path
+              assert "queue: max" in lock_text, path
+
+          release = workflows[1].read_text()
+          publish = re.search(
+              r"(?ms)^  publish:\n(.*?)(?=^  github-release:\n)", release
+          ).group(1)
+          assert publish.index("id: npm_version") < publish.index("id: ghcr_version")
+          for required in (
+              'imagetools inspect "$image" --raw',
+              'org.opencontainers.image.revision',
+              'org.opencontainers.image.version',
+              'io.aicontainer.channel',
+              'GITHUB_SHA',
+              'NPM_VERSION_EXISTS',
+              'GHCR_VERSION_IDENTITY',
+              'identity=verified',
+              'identity=legacy',
+              'Refusing partial recovery',
+              'unverified legacy tag; leaving :latest unchanged',
+          ):
+              assert required in publish, f"release.yml: missing {required}"
+          print("OK: shared registry lock and immutable-tag identity gate present")
+          PY
+      - name: Host/helper security regression tests
+        run: |
+          set -euo pipefail
+          for test in tests/*.sh; do
+            bash "$test"
+          done
+          for test in tests/*.py; do
+            PYTHONDONTWRITEBYTECODE=1 python3 -I "$test"
+          done
       - name: Install devcontainer CLI
         run: npm install -g @devcontainers/cli@latest
       - name: Stage a throwaway project (exercises `aic init --build`)
         run: |
-          mkdir -p /tmp/proj
+          mkdir -p /tmp/proj/.devcontainer "$HOME/.local/bin"
+          ln -sf "$GITHUB_WORKSPACE/aic" "$HOME/.local/bin/aic"
+          cat > /tmp/proj/.devcontainer/docker-compose.override.yml <<'YAML'
+          services:
+            devcontainer:
+              volumes:
+                - aic-smoke-venv:/workspace/.venv-smoke
+          volumes:
+            aic-smoke-venv:
+          YAML
           cd /tmp/proj && git init -q
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build
       - name: Bring up the devcontainer
@@ -94,33 +171,37 @@ jobs:
           # refresh_ai_tools() runs `claude update` / `codex update` /
           # `opencode upgrade` on every container create. `codex update` re-runs
           # the official installer, which must NOT fail trying to edit the
-          # login-shell rc files (root-locked at runtime by aic-lock-gitconfig) —
+          # managed shell startup files (root-owned and immutable in the image) —
           # it skips that because ~/.local/bin is already on PATH. opencode was
           # installed with --no-modify-path so `opencode upgrade` never touches
           # them. A regression would silently fall back to the baked version
           # (refresh is fail-soft), so assert all three updaters exit 0 here.
           devcontainer exec --workspace-folder . bash -lc '
             set -e
-            [ "$(stat -c %U:%a "$HOME/.zshrc")" = "root:444" ] || { echo "precondition: .zshrc not root-locked"; exit 1; }
+            [ "$(stat -c %U:%a /etc/aic/shell/zsh/.zshrc)" = "root:444" ] || { echo "precondition: managed .zshrc not root-locked"; exit 1; }
             claude update
             codex update
             opencode upgrade
             echo "OK: claude + codex + opencode self-update cleanly with rc files locked"
           '
-      - name: Smoke test - socket-proxy reachable, EXEC + write blocked by default
+      - name: Smoke test - socket-proxy exposes only ping/version by default
         working-directory: /tmp/proj
         run: |
+          grep -qF 'tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476' .devcontainer/docker-compose.yml \
+            || { echo "FAIL: socket-proxy image is not digest-pinned"; exit 1; }
           devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/_ping
+          devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/version >/dev/null
           set +e
+          read_out=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
+            http://socket-proxy:2375/containers/json)
           out=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
             -X POST http://socket-proxy:2375/exec/none/start)
           set -e
+          [ "$read_out" = "403" ] || { echo "expected 403 from socket-proxy /containers/json (Docker reads should be off by default), got $read_out"; exit 1; }
           [ "$out" = "403" ] || { echo "expected 403 from socket-proxy /exec, got $out"; exit 1; }
-          # Docker WRITE access is opt-in: the default (this project is a plain
-          # `aic init --build`) ships the socket-proxy with POST/BUILD=0, so
-          # creating a container on the host daemon is refused. This is what stops
-          # `docker run --privileged -v /:/host` host escape by default; a
-          # regression to POST:1 would let it through.
+          # Docker read and write access are separate opt-ins. A plain init has
+          # both off; in particular POST/BUILD=0 stops a host escape via
+          # `docker run --privileged -v /:/host`.
           set +e
           out=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
             -X POST http://socket-proxy:2375/containers/create)
@@ -129,25 +210,56 @@ jobs:
           set -e
           [ "$out" = "403" ]  || { echo "expected 403 from socket-proxy /containers/create (POST should be off by default), got $out"; exit 1; }
           [ "$out2" = "403" ] || { echo "expected 403 from socket-proxy /build (BUILD should be off by default), got $out2"; exit 1; }
-          echo "OK: socket-proxy is read-only by default (EXEC/POST/BUILD all 403)"
+          echo "OK: only ping/version are exposed by default (reads/EXEC/POST/BUILD all blocked)"
 
       - name: Smoke test - cloud metadata / link-local egress is blocked
         working-directory: /tmp/proj
         run: |
           # post-create runs `sudo aic-firewall block-metadata` on every create,
-          # dropping egress to 169.254.0.0/16 (cloud metadata + link-local)
-          # independent of the opt-in allowlist — closing the cloud-credential-
-          # theft path (169.254.169.254). Re-run it (idempotent) and assert the
-          # DROP rule is present via the scoped `aic-firewall status`. block-metadata
-          # is strengthen-only, so like `enable` it can't be abused to widen policy.
+          # dropping IPv4/IPv6 link-local plus the Alibaba and AWS IMDSv6
+          # endpoints independently of the opt-in allowlist. Re-run it
+          # (idempotent) and inspect the scoped `aic-firewall status` output.
+          # block-metadata is strengthen-only, so like `enable` it can't widen
+          # policy. It fails when IPv6 is configured but cannot be filtered;
+          # only hosts without configured IPv6 legitimately omit IPv6 rules.
           devcontainer exec --workspace-folder . bash -lc '
             set -e
             sudo -n /usr/local/bin/aic-firewall block-metadata
             st=$(sudo -n /usr/local/bin/aic-firewall status)
             echo "$st"
-            echo "$st" | grep -q "AIC_METADATA" || { echo "FAIL: OUTPUT does not jump to AIC_METADATA"; exit 1; }
-            echo "$st" | grep -q "169.254.0.0/16" || { echo "FAIL: metadata/link-local DROP rule missing"; exit 1; }
-            echo "OK: 169.254.0.0/16 egress is dropped"
+
+            status_section() {
+              local heading=$1 line inside=0
+              while IFS= read -r line; do
+                if [ "$line" = "$heading" ]; then
+                  inside=1
+                  continue
+                fi
+                case "$line" in
+                  "## "*) inside=0 ;;
+                esac
+                [ "$inside" -eq 0 ] || printf "%s\n" "$line"
+              done <<< "$st"
+            }
+            v4_output=$(status_section "## iptables OUTPUT chain")
+            v4_metadata=$(status_section "## iptables AIC_METADATA chain (always-on metadata/link-local block)")
+            printf "%s\n" "$v4_output" | grep -q "AIC_METADATA" || { echo "FAIL: IPv4 OUTPUT does not jump to AIC_METADATA"; exit 1; }
+            printf "%s\n" "$v4_metadata" | grep -q "169.254.0.0/16" || { echo "FAIL: IPv4 link-local DROP rule missing"; exit 1; }
+            printf "%s\n" "$v4_metadata" | grep -q "100.100.100.200" || { echo "FAIL: Alibaba metadata DROP rule missing"; exit 1; }
+
+            if printf "%s\n" "$st" | grep -q "^## ip6tables AIC_METADATA chain$"; then
+              v6_output=$(status_section "## ip6tables OUTPUT chain")
+              v6_metadata=$(status_section "## ip6tables AIC_METADATA chain")
+              printf "%s\n" "$v6_output" | grep -q "AIC_METADATA" || { echo "FAIL: IPv6 OUTPUT does not jump to AIC_METADATA"; exit 1; }
+              printf "%s\n" "$v6_metadata" | grep -q "fe80::/10" || { echo "FAIL: IPv6 link-local DROP rule missing"; exit 1; }
+              printf "%s\n" "$v6_metadata" | grep -q "fd00:ec2::254" || { echo "FAIL: AWS IMDSv6 DROP rule missing"; exit 1; }
+              echo "OK: IPv4 and IPv6 metadata/link-local egress is dropped"
+            elif ip -o -6 addr show up 2>/dev/null | grep -vE "^[0-9]+: lo " | grep -q .; then
+              echo "FAIL: IPv6 is configured but its metadata filter is absent"
+              exit 1
+            else
+              echo "OK: IPv4 metadata/link-local egress is dropped; IPv6 is not configured"
+            fi
           '
       - name: Smoke test - npm quarantine window is sane (npx-based MCPs installable)
         working-directory: /tmp/proj
@@ -227,32 +339,45 @@ jobs:
           # host-side edit) must still be refused fail-closed without touching
           # the target. We write it host-side; the live RO bind mount reflects
           # it inside the container.
-          trap 'rm -rf .devcontainer/chown-paths .venv-smoke' EXIT
-          printf '/home/vscode/.gitconfig.local\n' > .devcontainer/chown-paths
+          trap 'rm -f .devcontainer/chown-paths' EXIT
+          printf '/etc/aic/user-config/gitconfig\n' > .devcontainer/chown-paths
           devcontainer exec --workspace-folder . bash -lc '
             sudo -n /usr/local/bin/aic-chown-volumes && { echo "FAIL: accepted out-of-allowlist path"; exit 1; }
-            owner=$(stat -c "%U" /home/vscode/.gitconfig.local)
-            [ "$owner" = "root" ] || { echo "FAIL: gitconfig.local now owned by $owner"; exit 1; }
-            echo "OK: forbidden chown-paths entry refused; gitconfig.local still root-owned"
+            owner=$(stat -c "%U" /etc/aic/user-config/gitconfig)
+            [ "$owner" = "root" ] || { echo "FAIL: managed gitconfig now owned by $owner"; exit 1; }
+            echo "OK: forbidden chown-paths entry refused; managed gitconfig still root-owned"
           '
           printf '/workspace/.venv-smoke\n' > .devcontainer/chown-paths
           devcontainer exec --workspace-folder . bash -lc '
-            mkdir -p /workspace/.venv-smoke
             sudo -n /usr/local/bin/aic-chown-volumes || { echo "FAIL: rejected a valid /workspace path"; exit 1; }
-            echo "OK: valid /workspace chown-paths entry accepted"
+            mkdir -p /workspace/.venv-smoke/nested
+            touch /workspace/.venv-smoke/writable
+            echo "OK: exact standard named-volume mount accepted and made writable"
+          '
+          printf '/workspace/.venv-smoke/nested\n' > .devcontainer/chown-paths
+          devcontainer exec --workspace-folder . bash -lc '
+            sudo -n /usr/local/bin/aic-chown-volumes && { echo "FAIL: accepted a nested path below a named-volume mount"; exit 1; }
+            echo "OK: nested path below a named-volume mount refused"
+          '
+          printf '/workspace/.devcontainer\n' > .devcontainer/chown-paths
+          devcontainer exec --workspace-folder . bash -lc '
+            sudo -n /usr/local/bin/aic-chown-volumes && { echo "FAIL: accepted a host bind mount"; exit 1; }
+            echo "OK: allowed-prefix host bind mount refused"
           '
 
       - name: Smoke test - self-protection files are root-owned 0444
         working-directory: /tmp/proj
         run: |
-          # gitconfig.local + the baked login-shell rc files are all root-locked
-          # by aic-lock-gitconfig so a tool session can't capture git creds or
-          # plant a payload that runs on the next `aic shell`.
+          # Git config and every managed shell startup file live behind
+          # root-owned directories and are root:root 0444. Home-level startup
+          # files remain writable for compatibility, but the managed launch
+          # paths must ignore them so an agent cannot plant next-shell code.
           devcontainer exec --workspace-folder . bash -lc '
-            for f in /home/vscode/.gitconfig.local \
-                     /home/vscode/.zshrc \
-                     /home/vscode/.bashrc \
-                     /home/vscode/.config/fish/config.fish; do
+            set -euo pipefail
+            for f in /etc/aic/user-config/gitconfig \
+                     /etc/aic/shell/zsh/.zshrc \
+                     /etc/aic/shell/bashrc \
+                     /etc/fish/conf.d/aic.fish; do
               [ -e "$f" ] || { echo "FAIL: $f missing (should be locked)"; exit 1; }
               perms=$(stat -c "%U %a" "$f")
               echo "$f perms: $perms"
@@ -261,7 +386,18 @@ jobs:
                 echo "FAIL: vscode can still write to $f"; exit 1
               fi
             done
-            echo "OK: gitconfig.local + shell rc files are locked"
+            mkdir -p "$HOME/.config/fish"
+            printf "touch /tmp/aic-home-zsh-ran\n" > "$HOME/.zshrc"
+            printf "touch /tmp/aic-home-bash-ran\n" > "$HOME/.bash_profile"
+            printf "touch /tmp/aic-home-fish-ran\n" > "$HOME/.config/fish/config.fish"
+            zsh -lic true
+            bash --noprofile --rcfile /etc/aic/shell/bashrc -ic true
+            fish --no-config -C "source /etc/fish/conf.d/aic.fish" -lc true
+            for marker in /tmp/aic-home-zsh-ran /tmp/aic-home-bash-ran /tmp/aic-home-fish-ran; do
+              [ ! -e "$marker" ] || { echo "FAIL: planted home startup file executed ($marker)"; exit 1; }
+            done
+            rm -f "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.config/fish/config.fish"
+            echo "OK: managed git/shell config is locked and home startup replacements are ignored"
           '
 
       - name: Smoke test - project post-create hook runs (vscode, /workspace, non-fatal, clean VIRTUAL_ENV)
@@ -273,10 +409,8 @@ jobs:
           # exercise run_project_hook (mirrors how the chown-paths test re-runs
           # the wrapper). The hook exits non-zero on purpose: post-create must
           # warn-and-continue (exit 0), never propagate the failure. It also
-          # records VIRTUAL_ENV: postCreateCommand is `uv run --no-project`,
-          # which activates an ephemeral env for post-create itself; that must
-          # NOT leak into the hook (else a project `uv sync` warns it doesn't
-          # match .venv), so run_project_hook strips it before running the hook.
+          # records VIRTUAL_ENV: post-create uses system Python and defensively
+          # strips any launcher environment before handing off to the project.
           trap 'rm -f .devcontainer/post-create.project.sh .aic-hook-evidence' EXIT
           cat > .devcontainer/post-create.project.sh <<'SH'
           #!/usr/bin/env bash
@@ -286,7 +420,7 @@ jobs:
           SH
           devcontainer exec --workspace-folder . bash -lc '
             rm -f /workspace/.aic-hook-evidence
-            uv run --no-project /opt/post-create.py || { echo "FAIL: post-create propagated the hook non-zero exit"; exit 1; }
+            /usr/bin/python3 /opt/post-create.py || { echo "FAIL: post-create propagated the hook non-zero exit"; exit 1; }
             [ -f /workspace/.aic-hook-evidence ] || { echo "FAIL: project hook did not run"; exit 1; }
             grep -qx "user=vscode"    /workspace/.aic-hook-evidence || { echo "FAIL: hook not run as vscode"; cat /workspace/.aic-hook-evidence; exit 1; }
             grep -qx "pwd=/workspace" /workspace/.aic-hook-evidence || { echo "FAIL: hook cwd not /workspace"; cat /workspace/.aic-hook-evidence; exit 1; }
@@ -301,8 +435,8 @@ jobs:
           # files (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, both auto-loaded every
           # session) so an agent does not waste tokens trying to "fix" the
           # by-design read-only .git/config / .git/hooks (writes fail EBUSY).
-          # Assert it lands after create, and that re-running post-create is
-          # idempotent: the marker-delimited upsert must not duplicate the block.
+          # Assert it lands after create, and that re-running post-create resets
+          # the managed file idempotently without duplicating the block.
           devcontainer exec --workspace-folder . bash -lc '
             set -e
             begin="<!-- BEGIN aicontainer sandbox notes (managed) -->"
@@ -311,21 +445,198 @@ jobs:
               grep -qF "$begin" "$f" || { echo "FAIL: $f missing managed marker"; exit 1; }
               grep -qF "Device or resource busy" "$f" || { echo "FAIL: $f missing EBUSY guidance"; exit 1; }
             done
-            uv run --no-project /opt/post-create.py
+            /usr/bin/python3 /opt/post-create.py
             for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
               n=$(grep -cF "$begin" "$f")
               [ "$n" = "1" ] || { echo "FAIL: $f has $n note blocks after re-run (want 1)"; exit 1; }
             done
-            echo "OK: sandbox note in CLAUDE.md + AGENTS.md; upsert idempotent"
+            echo "OK: managed sandbox note in CLAUDE.md + AGENTS.md; reset is idempotent"
           '
+
+      - name: Smoke test - prompt/code persistence is project-isolated
+        working-directory: /tmp/proj
+        run: |
+          marker=AIC_PROJECT_A_INJECTION
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            marker=AIC_PROJECT_A_INJECTION
+            printf "%s\n" "$marker" > "$HOME/.claude/CLAUDE.md"
+            printf "{\"model\":\"%s\"}\n" "$marker" > "$HOME/.claude/settings.json"
+            mkdir -p "$HOME/.claude/skills/aic-project-a"
+            printf "%s\n" "$marker" > "$HOME/.claude/skills/aic-project-a/SKILL.md"
+            printf "%s\n" "$marker" > "$HOME/.codex/AGENTS.md"
+            printf "model = \"%s\"\n" "$marker" > "$HOME/.codex/config.toml"
+            mkdir -p "$HOME/.codex/plugins/aic-project-a"
+            printf "%s\n" "$marker" > "$HOME/.codex/plugins/aic-project-a/probe"
+          '
+          devcontainer up --workspace-folder . --remove-existing-container
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            marker=AIC_PROJECT_A_INJECTION
+            for mapping in \
+              "$HOME/.claude:$HOME/.aic-sessions/tool-homes/claude" \
+              "$HOME/.codex:$HOME/.aic-sessions/tool-homes/codex" \
+              "$HOME/.config/opencode:$HOME/.aic-sessions/tool-homes/opencode-config" \
+              "$HOME/.local/share/opencode:$HOME/.aic-sessions/tool-homes/opencode-data"; do
+              link=${mapping%%:*}
+              target=${mapping#*:}
+              [ -L "$link" ] || { echo "FAIL: canonical tool home is not a symlink: $link"; exit 1; }
+              [ "$(readlink -f "$link")" = "$target" ] \
+                || { echo "FAIL: $link does not resolve to $target"; exit 1; }
+            done
+            for private_dir in \
+              "$HOME/.aic-sessions" \
+              "$HOME/.aic-sessions/tool-homes/claude" \
+              "$HOME/.aic-sessions/tool-homes/codex" \
+              "$HOME/.aic-sessions/tool-homes/opencode-config" \
+              "$HOME/.aic-sessions/tool-homes/opencode-data"; do
+              [ "$(stat -c %a "$private_dir")" = 700 ] \
+                || { echo "FAIL: private tool-home directory is not mode 0700: $private_dir"; exit 1; }
+            done
+            ! grep -Fq "$marker" "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
+                                "$HOME/.codex/AGENTS.md" "$HOME/.codex/config.toml"
+            grep -Fq "$marker" "$HOME/.claude/skills/aic-project-a/SKILL.md"
+            grep -Fq "$marker" "$HOME/.codex/plugins/aic-project-a/probe"
+            for child in "$HOME/.config/aic-auth"/*; do
+              case "$(basename "$child")" in signing|semgrep) ;; *) echo "FAIL: broad auth-root child exposed: $child"; exit 1 ;; esac
+            done
+            echo "OK: managed memory/config reset on recreate; project-local skills/plugins persist only here"
+          '
+          mkdir -p /tmp/proj-b
+          git -C /tmp/proj-b init -q
+          (cd /tmp/proj-b && AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build)
+          devcontainer up --workspace-folder /tmp/proj-b
+          devcontainer exec --workspace-folder /tmp/proj-b bash -lc '
+            set -euo pipefail
+            marker=AIC_PROJECT_A_INJECTION
+            for path in "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
+                        "$HOME/.claude/skills" "$HOME/.claude/agents" \
+                        "$HOME/.claude/commands" "$HOME/.claude/plugins" \
+                        "$HOME/.codex/AGENTS.md" "$HOME/.codex/config.toml" \
+                        "$HOME/.codex/skills" "$HOME/.codex/rules" \
+                        "$HOME/.codex/prompts" "$HOME/.codex/plugins"; do
+              [ -e "$path" ] || { echo "FAIL: isolated prompt/code surface missing: $path"; exit 1; }
+              ! grep -R -Fq "$marker" "$path"
+            done
+            echo "OK: project A prompt/code injection is absent from project B"
+          '
+
+          # A login tool normally writes a temp file and atomically renames it.
+          # Simulate that in project A, then prove only the exact credential
+          # JSON reaches project B (with mode 0600), never settings/plugins.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            atomic_login() {
+              local destination=$1 payload=$2 temp="${1}.tmp"
+              printf "%s\n" "$payload" > "$temp"
+              chmod 600 "$temp"
+              mv -f "$temp" "$destination"
+            }
+            atomic_login "$HOME/.claude/.credentials.json" \
+              "{\"aic_auth_sync\":\"claude-smoke\"}"
+            atomic_login "$HOME/.codex/auth.json" \
+              "{\"aic_auth_sync\":\"codex-smoke\"}"
+            atomic_login "$HOME/.local/share/opencode/auth.json" \
+              "{\"aic_auth_sync\":\"opencode-auth-smoke\"}"
+            atomic_login "$HOME/.local/share/opencode/account.json" \
+              "{\"aic_auth_sync\":\"opencode-account-smoke\"}"
+          '
+          devcontainer exec --workspace-folder /tmp/proj-b bash -lc '
+            set -euo pipefail
+            wait_for_auth() {
+              local path=$1 expected_digest=$2 actual_digest
+              for _ in $(seq 1 30); do
+                if [ -f "$path" ] \
+                  && [ "$(stat -c %a "$path")" = 600 ]; then
+                  actual_digest=$(sha256sum "$path" | awk "{print \$1}")
+                  [ "$actual_digest" = "$expected_digest" ] && return 0
+                fi
+                sleep 1
+              done
+              echo "FAIL: credential did not synchronize safely: $path" >&2
+              return 1
+            }
+            wait_for_auth "$HOME/.claude/.credentials.json" \
+              514800cf3e74a800dc093b66bfb61e34054c34d292a3b96d7862980df307a264
+            wait_for_auth "$HOME/.codex/auth.json" \
+              b9954fe3bbe0f88eaeba2be8863dd22be60b69c688fafbbc3623200463edd32c
+            wait_for_auth "$HOME/.local/share/opencode/auth.json" \
+              225ae61218074d03262901bc5c0e73ede6978b99e6453c3b9ccf26117420864f
+            wait_for_auth "$HOME/.local/share/opencode/account.json" \
+              86efbd793af74336046205a631e6c3c7c59e46bd4d28c15ea5adae2a2f37c0bb
+
+            atomic_login() {
+              local destination=$1 payload=$2 temp="${1}.tmp"
+              printf "%s\n" "$payload" > "$temp"
+              chmod 600 "$temp"
+              mv -f "$temp" "$destination"
+            }
+            atomic_login "$HOME/.local/share/opencode/auth.json" \
+              "{\"aic_auth_sync\":\"opencode-auth-return\"}"
+            atomic_login "$HOME/.local/share/opencode/account.json" \
+              "{\"aic_auth_sync\":\"opencode-account-return\"}"
+            echo "OK: exact Claude/Codex/OpenCode credential files arrived with mode 0600"
+          '
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            wait_for_auth() {
+              local path=$1 expected_digest=$2 actual_digest
+              for _ in $(seq 1 30); do
+                if [ -f "$path" ] \
+                  && [ "$(stat -c %a "$path")" = 600 ]; then
+                  actual_digest=$(sha256sum "$path" | awk "{print \$1}")
+                  [ "$actual_digest" = "$expected_digest" ] && return 0
+                fi
+                sleep 1
+              done
+              echo "FAIL: credential did not round-trip safely: $path" >&2
+              return 1
+            }
+            wait_for_auth "$HOME/.local/share/opencode/auth.json" \
+              0e2de306b5141389bf9f0a6dc46ab4484f05e5198b5703ef74262e388f9a211c
+            wait_for_auth "$HOME/.local/share/opencode/account.json" \
+              bc63c0d43b23e2405525c73263880e5a1c461bc10ba8746656dcb212bd2937a2
+            echo "OK: OpenCode auth.json/account.json round-trip exactly without logging payloads"
+          '
+
+          for workspace in /tmp/proj /tmp/proj-b; do
+            project_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
+              "$workspace/.devcontainer/docker-compose.yml")
+            expected_user=$(sed -nE 's/^AIC_RUNTIME_USER=([0-9]+:[0-9]+)$/\1/p' \
+              "$workspace/.devcontainer/.env")
+            [ -n "$expected_user" ] \
+              || { echo "FAIL: managed runtime UID:GID missing for $workspace"; exit 1; }
+            sync_id=$(docker ps -q \
+              --filter "label=com.docker.compose.project=$project_name" \
+              --filter "label=com.docker.compose.service=aic-auth-sync")
+            [ -n "$sync_id" ] || { echo "FAIL: auth-sync container missing for $workspace"; exit 1; }
+            docker inspect "$sync_id" | jq -e --arg user "$expected_user" '
+              .[0]
+              | .Config.User == $user
+                and .HostConfig.NetworkMode == "none"
+                and .HostConfig.ReadonlyRootfs == true
+                and ((.HostConfig.CapDrop // []) | map(ascii_upcase) | index("ALL") != null)
+                and ((.HostConfig.CapAdd // []) | length == 0)
+                and ((.HostConfig.SecurityOpt // [])
+                  | any(. == "no-new-privileges:true" or . == "no-new-privileges"))
+                and .HostConfig.PidsLimit == 32
+                and .State.Health.Status == "healthy"
+            ' >/dev/null || { echo "FAIL: auth-sync hardening mismatch for $workspace"; exit 1; }
+          done
+          forbidden=$(docker exec "$sync_id" find /auth-global -mindepth 2 \
+            \( -name settings.json -o -name config.toml -o -name CLAUDE.md \
+               -o -name AGENTS.md -o -name skills -o -name plugins \) -print -quit)
+          [ -z "$forbidden" ] \
+            || { echo "FAIL: project config/prompt/plugin reached global auth: $forbidden"; exit 1; }
+          echo "OK: auth-sync is networkless, read-only, capability-free, healthy, and credential-only"
 
       - name: Smoke test - missing git identity is flagged loudly at create time
         working-directory: /tmp/proj
         run: |
-          # The sandbox has no identity of its own — ~/.gitconfig.local [include]s
-          # the RO-mounted host ~/.gitconfig. A broken/empty host gitconfig leaves
+          # The sandbox has no identity of its own — its root-managed config
+          # contains only the allowlisted host seed. An empty host gitconfig leaves
           # no identity in-container, and it can't be fixed from inside
-          # (~/.gitconfig.local is root-locked; /workspace/.git/config is RO), so
+          # (/etc/aic/user-config/gitconfig is root-locked; .git/config is RO), so
           # post-create must surface it loudly at create time. The runner starts
           # with no global identity (the signing test below sets it); unset
           # defensively, recreate, and assert post-create warned + identity is
@@ -348,7 +659,7 @@ jobs:
         run: |
           # The host signing key is never forwarded, so signing here only works
           # via a sandbox-only key in aic-auth-global that post-create wires into
-          # ~/.gitconfig.local on (re)create. Stage a key the way `aic signing
+          # /etc/aic/user-config/gitconfig on (re)create. Stage a key the way `aic signing
           # auto` does, give the mounted host gitconfig a committer identity (so
           # post-create writes allowed_signers and verification can pass),
           # recreate, then assert signing is wired and a commit verifies.
@@ -364,11 +675,12 @@ jobs:
           devcontainer exec --workspace-folder . bash -lc '
             set -euo pipefail
             key="$HOME/.config/aic-auth/signing/id_ed25519"
-            grep -qx "    gpgsign = true" ~/.gitconfig.local || { echo "FAIL: gpgsign not enabled"; cat ~/.gitconfig.local; exit 1; }
-            grep -qF "signingkey = $key" ~/.gitconfig.local || { echo "FAIL: signingkey not wired into ~/.gitconfig.local"; cat ~/.gitconfig.local; exit 1; }
-            # ~/.gitconfig.local must STILL be root-locked after adding signing.
-            perms=$(stat -c "%U %a" ~/.gitconfig.local)
-            [ "$perms" = "root 444" ] || { echo "FAIL: gitconfig.local not root-locked ($perms)"; exit 1; }
+            managed=/etc/aic/user-config/gitconfig
+            grep -qx "    gpgsign = true" "$managed" || { echo "FAIL: gpgsign not enabled"; cat "$managed"; exit 1; }
+            grep -qF "signingkey = $key" "$managed" || { echo "FAIL: signingkey not wired into managed gitconfig"; cat "$managed"; exit 1; }
+            # The managed config must STILL be root-locked after adding signing.
+            perms=$(stat -c "%U %a" "$managed")
+            [ "$perms" = "root 444" ] || { echo "FAIL: managed gitconfig not root-locked ($perms)"; exit 1; }
             cd /workspace
             git commit --allow-empty -m "signed commit" >/dev/null
             # %G? : G=good+verified, U=good signature (principal unverified),
@@ -383,7 +695,7 @@ jobs:
               U) echo "OK: commit signed (U: good signature, principal not in allowed_signers)" ;;
               *) echo "FAIL: expected a signature (G or U), got $v"; git log -1 --show-signature; exit 1 ;;
             esac
-            echo "OK: sandbox signing key wired; gitconfig.local still root-locked; commit signed"
+            echo "OK: sandbox signing key wired; managed gitconfig still root-locked; commit signed"
           '
 
       - name: CLI test - aic sync warns on / bumps a stale Dockerfile.project base
@@ -436,13 +748,14 @@ jobs:
           diff -u "$tmp/dc-before" "$dc" || { echo "FAIL: merge not idempotent"; exit 1; }
           echo "OK: vscode-extensions/settings merged, invalid id rejected, deduped, idempotent"
 
-      - name: CLI test - aic check-drift warns on drift; wired into initializeCommand
+      - name: CLI test - drift warning works; trusted initialize is wired
         run: |
           # Host-only (no container). The pinned-vs-CLI drift warning must also
           # reach VS Code "Reopen/Rebuild in Container", which drives
-          # `devcontainer up` directly and never the aic CLI: the template's
-          # initializeCommand calls `aic check-drift`. Assert the command warns
-          # on a mismatch (and only then), honors the opt-out, and is wired in.
+          # `devcontainer up` directly and never `aic up`: the template's
+          # initializeCommand calls the fail-closed `aic initialize`. Assert the
+          # reusable drift probe warns only on mismatch, honors the opt-out, and
+          # the full trusted initializer (validation + migration) is wired in.
           set -euo pipefail
           tmp="$(mktemp -d)"; cd "$tmp"; git init -q
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
@@ -456,40 +769,58 @@ jobs:
           # AIC_NO_UPDATE_CHECK silences it; exit stays 0 either way.
           out="$(AIC_NO_UPDATE_CHECK=1 AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
           [ -z "$out" ] || { echo "FAIL: AIC_NO_UPDATE_CHECK did not silence check-drift: $out"; exit 1; }
-          # The generated devcontainer.json must wire check-drift into initializeCommand.
-          grep -q 'aic check-drift' .devcontainer/devcontainer.json || { echo "FAIL: initializeCommand missing check-drift wiring"; exit 1; }
-          echo "OK: check-drift warns only on drift, honors opt-out, and is wired into initializeCommand"
+          grep -Fq 'exec \"$aic_bin\" initialize' .devcontainer/devcontainer.json || { echo "FAIL: initializeCommand missing trusted aic initialize wiring"; exit 1; }
+          echo "OK: drift warning is precise and VS Code uses the fail-closed initializer"
 
-      - name: CLI test - Docker socket write access is opt-in (POST/BUILD off by default)
+      - name: CLI test - Docker API read and write access are separate opt-ins
         run: |
-          # Host-only (no container). The socket-proxy ships READ-ONLY
-          # (POST/BUILD=0) so an in-container agent can't `docker run --privileged
-          # -v /:/host` to escape the sandbox; `--docker` opts in. The choice lives
-          # in the generated compose file and a plain `aic sync` must preserve it.
-          # Also assert pids_limit is set (runaway-agent fork-bomb backstop).
+          # Host-only (no container). Default exposes only ping/version;
+          # --docker-read enables Docker metadata, and --docker additionally
+          # enables writes. Each explicit mode must survive a plain sync.
           set -euo pipefail
           tmp="$(mktemp -d)"; cd "$tmp"; git init -q
           dc=.devcontainer/docker-compose.yml
+          read_keys=(CONTAINERS EVENTS IMAGES INFO NETWORKS VOLUMES)
+          assert_toggle() {
+            local key=$1 value=$2
+            grep -qE "^[[:space:]]*${key}:[[:space:]]*${value}[[:space:]]*$" "$dc" \
+              || { echo "FAIL: expected ${key}: ${value}"; grep -nE "${key}|POST|BUILD" "$dc"; exit 1; }
+          }
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
-          grep -qE '^[[:space:]]*POST:[[:space:]]*0[[:space:]]*$'  "$dc" || { echo "FAIL: default POST is not 0"; grep -nE 'POST|BUILD' "$dc"; exit 1; }
-          grep -qE '^[[:space:]]*BUILD:[[:space:]]*0[[:space:]]*$' "$dc" || { echo "FAIL: default BUILD is not 0"; exit 1; }
+          for key in "${read_keys[@]}"; do assert_toggle "$key" 0; done
+          assert_toggle VERSION 1
+          assert_toggle PING 1
+          assert_toggle POST 0
+          assert_toggle BUILD 0
           grep -qE '^[[:space:]]*pids_limit:[[:space:]]*[0-9]+'    "$dc" || { echo "FAIL: pids_limit missing"; exit 1; }
-          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --force --docker >/dev/null
-          grep -qE '^[[:space:]]*POST:[[:space:]]*1[[:space:]]*$'  "$dc" || { echo "FAIL: --docker did not enable POST"; exit 1; }
-          grep -qE '^[[:space:]]*BUILD:[[:space:]]*1[[:space:]]*$' "$dc" || { echo "FAIL: --docker did not enable BUILD"; exit 1; }
+
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --docker-read >/dev/null
+          for key in "${read_keys[@]}"; do assert_toggle "$key" 1; done
+          assert_toggle POST 0
+          assert_toggle BUILD 0
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync >/dev/null
-          grep -qE '^[[:space:]]*POST:[[:space:]]*1[[:space:]]*$'  "$dc" || { echo "FAIL: plain sync did not preserve --docker"; exit 1; }
+          assert_toggle CONTAINERS 1
+
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --docker >/dev/null
+          for key in "${read_keys[@]}"; do assert_toggle "$key" 1; done
+          assert_toggle POST 1
+          assert_toggle BUILD 1
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync >/dev/null
+          assert_toggle POST 1
+
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --no-docker >/dev/null
-          grep -qE '^[[:space:]]*POST:[[:space:]]*0[[:space:]]*$'  "$dc" || { echo "FAIL: --no-docker did not disable POST"; exit 1; }
-          echo "OK: Docker write off by default; --docker enables + persists across sync; --no-docker reverts; pids_limit set"
+          for key in "${read_keys[@]}"; do assert_toggle "$key" 0; done
+          assert_toggle POST 0
+          assert_toggle BUILD 0
+          echo "OK: Docker none/read/write modes are explicit, sync-stable, and default to none"
 
       - name: CLI test - project override scan flags host-access grants before up
         run: |
           # Host-only (no container). Project-owned docker-compose.override.yml /
           # Dockerfile.project ride along in an untrusted repo and ARE honored on
           # `aic up` (the override is auto-wired into dockerComposeFile). The pre-up
-          # scan — surfaced host-side (print-only) via `aic check-drift`, the same
-          # entry point the VS Code initializeCommand calls — must flag privileged,
+          # scan — surfaced host-side by both `aic check-drift` and VS Code's
+          # `aic initialize` structural gate — must flag privileged,
           # cap_add, host mounts, the Docker socket, and a non-aicontainer base,
           # stay silent on a clean project, and honor the opt-out.
           set -euo pipefail
@@ -514,6 +845,15 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: [build, smoke]
+    # rebuild.yml mutates the same GHCR repository. This cross-workflow lock
+    # covers the immutable-tag check/build and the final :latest promotion,
+    # closing the check-then-push race with security-refresh publishes.
+    concurrency:
+      group: aicontainer-registry-publish
+      cancel-in-progress: false
+      queue: max
+    outputs:
+      is_npm_latest: ${{ steps.npm_latest.outputs.is_latest }}
     permissions:
       contents: read
       packages: write
@@ -522,6 +862,9 @@ jobs:
       OWNER: ${{ github.repository_owner }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: Reject non-tag refs
         env:
@@ -531,6 +874,17 @@ jobs:
             refs/tags/v*) ;;
             *) echo "release.yml must run against a v* tag ref, got: $REF"; exit 1 ;;
           esac
+
+      - name: Verify release commit is on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/${DEFAULT_BRANCH}"; then
+            echo "Release tag commit is not on ${DEFAULT_BRANCH}; refusing a version that security refreshes could later roll back." >&2
+            exit 1
+          fi
 
       - name: Derive version from tag
         id: ver
@@ -564,6 +918,51 @@ jobs:
             exit 1
           fi
 
+      # Check npm before GHCR so an old, unannotated image tag can be treated
+      # as a complete historical release only when its immutable npm tarball
+      # independently proves that this exact tag was already published.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Check immutable npm version
+        id: npm_version
+        env:
+          TAG_VERSION: ${{ steps.ver.outputs.v }}
+        run: |
+          set -euo pipefail
+          package=$(node -p "require('./package.json').name")
+          local_json=$(npm pack --json --dry-run)
+          local_integrity=$(printf '%s' "$local_json" \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)[0].integrity))')
+
+          err=$(mktemp)
+          remote_json=
+          if remote_json=$(npm view "${package}@${TAG_VERSION}" dist.integrity --json 2>"$err"); then
+            remote_integrity=$(printf '%s' "$remote_json" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)))')
+            if [ -z "$remote_integrity" ]; then
+              echo "Registry returned no integrity for existing ${package}@${TAG_VERSION}." >&2
+              exit 1
+            fi
+            if [ "$remote_integrity" != "$local_integrity" ]; then
+              echo "${package}@${TAG_VERSION} exists but its immutable tarball does not match this tag." >&2
+              echo "published: $remote_integrity" >&2
+              echo "local:     $local_integrity" >&2
+              exit 1
+            fi
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${package}@${TAG_VERSION} already exists with matching integrity; preserving it."
+          elif { printf '%s\n' "$remote_json"; cat "$err"; } | grep -Eqi 'E404|404 Not Found'; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unable to determine whether ${package}@${TAG_VERSION} exists; refusing to publish blindly." >&2
+            printf '%s\n' "$remote_json" >&2
+            cat "$err" >&2
+            exit 1
+          fi
+
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - name: Log in to GHCR
@@ -573,28 +972,235 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push to GHCR
+      - name: Check immutable GHCR version tag
+        id: ghcr_version
+        env:
+          TAG_VERSION: ${{ steps.ver.outputs.v }}
+          NPM_VERSION_EXISTS: ${{ steps.npm_version.outputs.exists }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${OWNER}/aicontainer:v${TAG_VERSION}"
+          err=$(mktemp)
+          raw=$(mktemp)
+          if docker buildx imagetools inspect "$image" --raw >"$raw" 2>"$err"; then
+            revision=$(jq -r '.annotations["org.opencontainers.image.revision"] // empty' "$raw")
+            version=$(jq -r '.annotations["org.opencontainers.image.version"] // empty' "$raw")
+            channel=$(jq -r '.annotations["io.aicontainer.channel"] // empty' "$raw")
+
+            if [ "$revision" = "$GITHUB_SHA" ] \
+              && [ "$version" = "v${TAG_VERSION}" ] \
+              && [ "$channel" = release ]; then
+              identity=verified
+              echo "$image already exists with matching release identity; preserving the immutable tag."
+            elif [ -z "$revision" ] && [ -z "$version" ] && [ -z "$channel" ]; then
+              identity=legacy
+              if [ "$NPM_VERSION_EXISTS" != true ]; then
+                echo "$image is an unverified legacy tag and npm ${TAG_VERSION} is absent." >&2
+                echo "Refusing partial recovery: the image cannot be tied to this release commit." >&2
+                exit 1
+              fi
+              echo "$image has no release identity annotations, but the matching immutable npm version exists; preserving this legacy tag."
+            else
+              echo "$image exists but its immutable release identity does not match this tag." >&2
+              printf 'expected revision: %q\n' "$GITHUB_SHA" >&2
+              printf 'actual revision:   %q\n' "${revision:-<missing>}" >&2
+              printf 'expected version:  %q\n' "v${TAG_VERSION}" >&2
+              printf 'actual version:    %q\n' "${version:-<missing>}" >&2
+              printf 'expected channel:  %q\n' release >&2
+              printf 'actual channel:    %q\n' "${channel:-<missing>}" >&2
+              exit 1
+            fi
+            {
+              echo "exists=true"
+              echo "identity=$identity"
+            } >> "$GITHUB_OUTPUT"
+          elif grep -Eqi 'manifest unknown|not found|name unknown' "$err"; then
+            {
+              echo "exists=false"
+              echo "identity=new"
+              echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "Unable to determine whether $image exists; refusing to risk overwriting it." >&2
+            cat "$err" >&2
+            exit 1
+          fi
+
+      - name: Build and push immutable GHCR version
+        if: steps.ghcr_version.outputs.exists == 'false'
         uses: docker/build-push-action@v7
         with:
           context: template
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ env.OWNER }}/aicontainer:v${{ steps.ver.outputs.v }}
-            ghcr.io/${{ env.OWNER }}/aicontainer:latest
+          tags: ghcr.io/${{ env.OWNER }}/aicontainer:v${{ steps.ver.outputs.v }}
+          annotations: |
+            index:org.opencontainers.image.created=${{ steps.ghcr_version.outputs.created }}
+            index:org.opencontainers.image.revision=${{ github.sha }}
+            index:org.opencontainers.image.version=v${{ steps.ver.outputs.v }}
+            index:io.aicontainer.channel=release
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-      - name: Publish to npm
+      - name: Choose npm dist-tag
+        if: steps.npm_version.outputs.exists == 'false'
+        id: npm_tag
+        env:
+          TAG_VERSION: ${{ steps.ver.outputs.v }}
+        run: |
+          set -euo pipefail
+          package=$(node -p "require('./package.json').name")
+          err=$(mktemp)
+          if current_json=$(npm view "$package" dist-tags.latest --json 2>"$err"); then
+            current=$(printf '%s' "$current_json" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)||""))')
+          elif { printf '%s\n' "$current_json"; cat "$err"; } | grep -Eqi 'E404|404 Not Found'; then
+            current=
+          else
+            echo "Unable to read npm's current latest dist-tag; refusing to publish blindly." >&2
+            printf '%s\n' "$current_json" >&2
+            cat "$err" >&2
+            exit 1
+          fi
+
+          # Never let recovery of an older tag move npm's `latest` backward.
+          # Pre-releases use `next`; older stable releases get a version-specific
+          # recovery tag, while a newer stable release becomes `latest` normally.
+          version_without_build=${TAG_VERSION%%+*}
+          if [[ "$version_without_build" == *-* ]]; then
+            tag=next
+          elif [ -z "$current" ] || node - "$TAG_VERSION" "$current" <<'NODE'
+          const [candidate, current] = process.argv.slice(2);
+          const parse = (value) => {
+            const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(value);
+            if (!match) throw new Error(`invalid semver: ${value}`);
+            return { core: match.slice(1, 4).map(Number), pre: match[4]?.split('.') ?? [] };
+          };
+          const compare = (a, b) => {
+            for (let i = 0; i < 3; i++) if (a.core[i] !== b.core[i]) return a.core[i] - b.core[i];
+            if (!a.pre.length || !b.pre.length) return Number(!a.pre.length) - Number(!b.pre.length);
+            for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i++) {
+              if (a.pre[i] === undefined) return -1;
+              if (b.pre[i] === undefined) return 1;
+              if (a.pre[i] === b.pre[i]) continue;
+              const an = /^\d+$/.test(a.pre[i]);
+              const bn = /^\d+$/.test(b.pre[i]);
+              if (an && bn) return Number(a.pre[i]) - Number(b.pre[i]);
+              if (an !== bn) return an ? -1 : 1;
+              return a.pre[i] < b.pre[i] ? -1 : 1;
+            }
+            return 0;
+          };
+          process.exit(compare(parse(candidate), parse(current)) > 0 ? 0 : 1);
+          NODE
+          then
+            tag=latest
+          else
+            tag="recovery-${TAG_VERSION//+/-}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing ${package}@${TAG_VERSION} with npm dist-tag '$tag' (current latest: ${current:-none})."
+
+      - name: Publish missing version to npm
+        if: steps.npm_version.outputs.exists == 'false'
         # Auth via npm OIDC Trusted Publishers (configured at npmjs.com).
         # The job already has `id-token: write`; npm CLI exchanges the GitHub
         # OIDC token for a short-lived publish token at runtime, so no
         # NODE_AUTH_TOKEN env var is needed.
-        run: npm publish --access public --provenance
+        env:
+          NPM_TAG: ${{ steps.npm_tag.outputs.tag }}
+        run: npm publish --access public --provenance --tag "$NPM_TAG"
+
+      - name: Promote immutable GHCR version when it is npm latest
+        id: npm_latest
+        env:
+          TAG_VERSION: ${{ steps.ver.outputs.v }}
+          GHCR_VERSION_IDENTITY: ${{ steps.ghcr_version.outputs.identity }}
+        run: |
+          set -euo pipefail
+          package=$(node -p "require('./package.json').name")
+          npm_latest=$(npm view "$package" dist-tags.latest --json \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)||""))')
+          if [ "$npm_latest" != "$TAG_VERSION" ]; then
+            echo "is_latest=false" >> "$GITHUB_OUTPUT"
+            echo "npm latest is $npm_latest; leaving GHCR :latest unchanged."
+            exit 0
+          fi
+          echo "is_latest=true" >> "$GITHUB_OUTPUT"
+
+          # A matching historical npm tarball lets an unannotated GHCR tag be
+          # preserved for an idempotent rerun, but it does not prove the image
+          # itself came from this commit. Never expand that legacy tag's reach
+          # by newly assigning the floating :latest alias.
+          if [ "$GHCR_VERSION_IDENTITY" = legacy ]; then
+            echo "GHCR v${TAG_VERSION} is an unverified legacy tag; leaving :latest unchanged."
+            exit 0
+          fi
+
+          version_image="ghcr.io/${OWNER}/aicontainer:v${TAG_VERSION}"
+          latest_image="ghcr.io/${OWNER}/aicontainer:latest"
+          version_digest=$(docker buildx imagetools inspect "$version_image" \
+            --format '{{json .Manifest}}' | jq -r .digest)
+          if latest_manifest=$(docker buildx imagetools inspect "$latest_image" \
+              --format '{{json .Manifest}}' 2>/dev/null); then
+            latest_digest=$(printf '%s' "$latest_manifest" | jq -r .digest)
+            if [ "$latest_digest" = "$version_digest" ]; then
+              echo "GHCR :latest already points at immutable v${TAG_VERSION}."
+              exit 0
+            fi
+
+            image_created() {
+              local image=$1 raw annotated fallback repository digest created newest
+              raw=$(docker buildx imagetools inspect "$image" --raw)
+              annotated=$(printf '%s' "$raw" \
+                | jq -r '.annotations["org.opencontainers.image.created"] // empty')
+              if [ -n "$annotated" ]; then
+                printf '%s\n' "$annotated"
+                return
+              fi
+              fallback=$(docker buildx imagetools inspect "$image" \
+                --format '{{json .Image}}' 2>/dev/null \
+                | jq -r '.created // empty' || true)
+              if [ -n "$fallback" ]; then
+                printf '%s\n' "$fallback"
+                return
+              fi
+
+              # Older multi-platform tags predate index annotations. Resolve a
+              # real platform manifest and read its image config as a fallback.
+              repository=${image%:*}
+              newest=
+              while read -r digest; do
+                [ -n "$digest" ] || continue
+                created=$(docker buildx imagetools inspect "${repository}@${digest}" \
+                  --format '{{json .Image}}' 2>/dev/null \
+                  | jq -r '.created // empty' || true)
+                if [ -n "$created" ] && { [ -z "$newest" ] || [[ "$created" > "$newest" ]]; }; then
+                  newest=$created
+                fi
+              done < <(printf '%s' "$raw" | jq -r \
+                '.manifests[]? | select(.platform.os != "unknown") | .digest')
+              printf '%s\n' "$newest"
+            }
+
+            version_created=$(image_created "$version_image")
+            latest_created=$(image_created "$latest_image")
+            if [ -z "$version_created" ] || [ -z "$latest_created" ]; then
+              echo "Cannot prove GHCR :latest is older than v${TAG_VERSION}; leaving it unchanged."
+              echo "version created: ${version_created:-unknown}; latest created: ${latest_created:-unknown}"
+              exit 0
+            fi
+            version_epoch=$(date -u -d "$version_created" +%s)
+            latest_epoch=$(date -u -d "$latest_created" +%s)
+            if [ "$latest_epoch" -gt "$version_epoch" ]; then
+              echo "GHCR :latest is a newer security-refresh image; leaving it unchanged."
+              exit 0
+            fi
+          fi
+
+          # Copy the already-published immutable manifest; never rebuild or
+          # push directly to both tags, which could make them differ on rerun.
+          docker buildx imagetools create --tag "$latest_image" "$version_image"
 
   # Create the GitHub Release only after GHCR + npm succeed, so a Release never
   # points at a failed publish. Notes are the tag's section from the hand-
@@ -609,9 +1215,12 @@ jobs:
       contents: write
     env:
       REF_NAME: ${{ github.ref_name }}
+      IS_NPM_LATEST: ${{ needs.publish.outputs.is_npm_latest }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Extract this version's CHANGELOG section
         run: |
           ver="${REF_NAME#v}"
@@ -636,10 +1245,14 @@ jobs:
             echo "Release $REF_NAME already exists; skipping."
             exit 0
           fi
+          latest=--latest=false
+          if [ "$IS_NPM_LATEST" = "true" ]; then
+            latest=--latest
+          fi
           if [ "$found" = "1" ]; then
             gh release create "$REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --title "$REF_NAME" --verify-tag --latest --notes-file RELEASE_NOTES.md
+              --title "$REF_NAME" --verify-tag "$latest" --notes-file RELEASE_NOTES.md
           else
             gh release create "$REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --title "$REF_NAME" --verify-tag --latest --generate-notes
+              --title "$REF_NAME" --verify-tag "$latest" --generate-notes
           fi

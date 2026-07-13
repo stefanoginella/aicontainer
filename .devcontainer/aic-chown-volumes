@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # =============================================================================
 # aic-chown-volumes — re-own aicontainer's persistent volume mount points
 # =============================================================================
@@ -9,70 +9,249 @@
 #   1. The hardcoded list below — aic's own auth/session/history volumes.
 #   2. Optional project-declared mountpoints, one path per line in
 #      /workspace/.devcontainer/chown-paths (see README "Persisting a named
-#      volume"). Only paths under /workspace/ or /home/vscode/.cache/ are
-#      honored.
+#      volume"). Only exact Docker named-volume mountpoints under /workspace/
+#      or /home/vscode/.cache/ are honored.
 #
 # Targets are NEVER read from this script's arguments. The scoped sudoers entry
 # lets vscode *invoke* the script, but because the policy lives in hardcoded
-# paths + a read-only, PreToolUse-blocked file (not argv), running
+# paths + a read-only, PreToolUse-blocked regular file (not argv), running
 # `sudo aic-chown-volumes /etc/sudoers.d` cannot redirect the chown. Combined
-# with -h (never dereference a final-component symlink) and the prefix
-# allowlist below — which excludes /etc, /etc/aic/hooks, and
-# ~/.gitconfig.local — the NOPASSWD grant cannot be turned into a privilege
-# escalation.
+# with exact-mountpoint validation, canonical-path checks, and -h (never
+# dereference a symlink while recursing), the NOPASSWD grant cannot be turned
+# into a privilege escalation or a host bind-mount chown.
 #
 # Replaces the previous `NOPASSWD: /usr/bin/chown` sudoers entry, which let
 # any in-container process chown arbitrary paths and escalate to root.
 # =============================================================================
 set -euo pipefail
+readonly PATH=/usr/sbin:/usr/bin:/sbin:/bin
+readonly LC_ALL=C
+readonly HOME=/root
+export PATH LC_ALL HOME
+unset CDPATH ENV BASH_ENV XTABLES_LIBDIR RES_OPTIONS LOCALDOMAIN HOSTALIASES
+umask 077
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo "aic-chown-volumes: must run via sudo" >&2
-  exit 1
-fi
+DOCKER_INSPECT_JSON=""
+DOCKER_SOCKET="/run/aic-host/docker.sock"
+DOCKER_SOCKET_VALIDATED=0
+VALIDATED_VOLUMES=" "
 
-chown_safe() {
-  # -h: act on a symlink itself, never its referent. -R without -H/-L is -P
-  # under GNU coreutils, so recursion does not traverse symlinks — a symlink
-  # planted in a persisted volume cannot redirect chown to /etc/sudoers.d etc.
-  chown -h -R vscode:vscode "$1"
+validate_docker_socket() {
+  [ "$DOCKER_SOCKET_VALIDATED" -eq 0 ] || return 0
+  local directory=/run/aic-host directory_real socket_real directory_stat
+  directory_real=$(realpath -e -- "$directory" 2>/dev/null || true)
+  socket_real=$(realpath -e -- "$DOCKER_SOCKET" 2>/dev/null || true)
+  directory_stat=$(stat -c '%u:%g:%a' -- "$directory" 2>/dev/null || true)
+  if [ "$directory_real" != "$directory" ] || [ ! -d "$directory" ] ||
+     [ -L "$directory" ] || [ "$directory_stat" != "0:0:700" ]; then
+    echo "aic-chown-volumes: refusing unsafe root-only Docker socket directory" >&2
+    return 1
+  fi
+  if [ "$socket_real" != "$DOCKER_SOCKET" ] || [ ! -S "$DOCKER_SOCKET" ] ||
+     [ -L "$DOCKER_SOCKET" ]; then
+    echo "aic-chown-volumes: refusing unsafe Docker socket mount" >&2
+    return 1
+  fi
+  DOCKER_SOCKET_VALIDATED=1
 }
 
-for d in /home/vscode/.shell-history \
-         /home/vscode/.config/aic-auth \
-         /home/vscode/.claude-sessions \
-         /home/vscode/.claude \
-         /home/vscode/.codex \
-         /home/vscode/.local/share/opencode \
-         /home/vscode/.config/gh \
-         /home/vscode/.config/npm; do
-  [ -d "$d" ] && chown_safe "$d"
-done
+current_container_id() {
+  local value mount_root
+  # A project may set a friendly Compose hostname. Docker still bind-mounts
+  # /etc/hostname from its per-container metadata directory, whose mount root
+  # contains the immutable 64-hex container ID.
+  mount_root=$(awk '$5 == "/etc/hostname" {print $4; exit}' /proc/self/mountinfo)
+  if [[ "$mount_root" =~ ([0-9a-f]{64}) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  IFS= read -r value < /etc/hostname
+  if [[ "$value" =~ ^[0-9a-f]{12,64}$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  echo "aic-chown-volumes: cannot determine this container's Docker id" >&2
+  return 1
+}
 
-# Project-declared volume mountpoints. Opt-in: read only if the project
-# created the file, mirroring firewall-allowlist. The prefix allowlist is the
-# security boundary — anything outside /workspace/ and /home/vscode/.cache/
-# (sudoers, /etc/aic/hooks, ~/.gitconfig.local, the rest of $HOME) is refused,
-# fail-closed, even though the file is itself read-only inside the container.
-EXTRA_FILE="/workspace/.devcontainer/chown-paths"
-if [ -f "$EXTRA_FILE" ]; then
-  while IFS= read -r line || [ -n "$line" ]; do
-    p="${line%%#*}"                              # strip trailing comment
-    p="${p#"${p%%[![:space:]]*}"}"               # ltrim
-    p="${p%"${p##*[![:space:]]}"}"               # rtrim
-    [ -n "$p" ] || continue
-    case "/$p/" in
-      */../*)
-        echo "aic-chown-volumes: refusing path with a '..' component: $p" >&2
-        exit 1 ;;
-    esac
-    case "$p" in
-      /workspace/?*|/home/vscode/.cache/?*)
-        [ -e "$p" ] && chown_safe "$p" ;;
-      *)
-        echo "aic-chown-volumes: refusing out-of-allowlist path: $p" >&2
-        echo "  (only /workspace/* and /home/vscode/.cache/* are allowed)" >&2
-        exit 1 ;;
-    esac
-  done < "$EXTRA_FILE"
+load_docker_inspect() {
+  [ -z "$DOCKER_INSPECT_JSON" ] || return 0
+  local container_id
+  validate_docker_socket
+  container_id=$(current_container_id)
+  DOCKER_INSPECT_JSON=$(
+    curl --disable --fail --silent --show-error --request GET --proto '=http' \
+      --connect-timeout 1 --max-time 3 --noproxy '*' \
+      --unix-socket "$DOCKER_SOCKET" \
+      "http://localhost/containers/$container_id/json"
+  ) || {
+    echo "aic-chown-volumes: cannot inspect this container's Docker mounts" >&2
+    return 1
+  }
+  if ! jq -e 'type == "object" and (.Mounts | type == "array")' \
+       >/dev/null <<<"$DOCKER_INSPECT_JSON"; then
+    echo "aic-chown-volumes: Docker returned invalid mount metadata" >&2
+    return 1
+  fi
+}
+
+inspect_has_named_volume_mount() {
+  local inspect_json="$1" path="$2"
+  jq -e --arg path "$path" \
+    '([.Mounts[]? | select(.Destination == $path)] as $exact
+     | ($exact | length) == 1 and $exact[0].Type == "volume")
+     and ([.Mounts[]? | select(
+       (.Destination | startswith($path + "/")) and .Type != "volume"
+     )] | length == 0)' \
+    >/dev/null <<<"$inspect_json"
+}
+
+validate_standard_named_volume() {
+  local name="$1" volume_json
+  case "$VALIDATED_VOLUMES" in
+    *" $name "*) return 0 ;;
+  esac
+  if ! [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+    echo "aic-chown-volumes: refusing invalid Docker volume name" >&2
+    return 1
+  fi
+  volume_json=$(
+    curl --disable --fail --silent --show-error --request GET --proto '=http' \
+      --connect-timeout 1 --max-time 3 --noproxy '*' \
+      --unix-socket "$DOCKER_SOCKET" \
+      "http://localhost/volumes/$name"
+  ) || {
+    echo "aic-chown-volumes: cannot inspect Docker volume: $name" >&2
+    return 1
+  }
+  # A local-driver volume with driver options can be a disguised host bind
+  # (`type=none,o=bind,device=/host/path`). Only ordinary option-free local
+  # volumes have the ownership-isolated semantics this helper promises.
+  if ! jq -e '.Driver == "local" and ((.Options // {}) | length == 0)' \
+       >/dev/null <<<"$volume_json"; then
+    echo "aic-chown-volumes: refusing nonstandard/bind-capable Docker volume: $name" >&2
+    return 1
+  fi
+  VALIDATED_VOLUMES+="$name "
+}
+
+is_docker_named_volume_mount() {
+  local path="$1" name
+  local -a names=()
+  load_docker_inspect
+  inspect_has_named_volume_mount "$DOCKER_INSPECT_JSON" "$path" || return 1
+  mapfile -t names < <(
+    jq -r --arg path "$path" \
+      '.Mounts[]? | select(
+        .Destination == $path or (.Destination | startswith($path + "/"))
+      ) | .Name // empty' <<<"$DOCKER_INSPECT_JSON" | sort -u
+  )
+  [ "${#names[@]}" -gt 0 ] || return 1
+  for name in "${names[@]}"; do
+    validate_standard_named_volume "$name" || return 1
+  done
+}
+
+chown_safe() {
+  local path="$1" canonical encoded mount_root
+
+  # realpath -e resolves every component. Requiring its result to be byte-for-
+  # byte identical to the requested absolute path rejects final and ancestor
+  # symlinks, dot components, duplicate separators, and missing targets before
+  # the privileged recursive operation.
+  canonical=$(realpath -e -- "$path") || {
+    echo "aic-chown-volumes: refusing missing/unresolvable path: $path" >&2
+    return 1
+  }
+  if [ "$canonical" != "$path" ] || [ ! -d "$path" ] || [ -L "$path" ]; then
+    echo "aic-chown-volumes: refusing non-canonical or non-directory path: $path" >&2
+    return 1
+  fi
+
+  # A project path must be the mountpoint itself, not merely a directory below
+  # /workspace. This makes the final component immovable (a mounted directory
+  # cannot be swapped for a symlink during the check/chown interval).
+  # /proc/self/mountinfo encodes whitespace and backslashes in field 5.
+  encoded=${path//\\/\\134}
+  encoded=${encoded//$'\t'/\\011}
+  encoded=${encoded//$'\n'/\\012}
+  encoded=${encoded// /\\040}
+  mount_root=$(MOUNT_TARGET="$encoded" \
+    awk '$5 == ENVIRON["MOUNT_TARGET"] { print $4; exit }' /proc/self/mountinfo)
+  if [ -z "$mount_root" ]; then
+    echo "aic-chown-volumes: refusing path that is not an exact mountpoint: $path" >&2
+    return 1
+  fi
+
+  # Ask Docker for the authoritative mount type instead of guessing from its
+  # daemon data-root path (which differs across rootful, rootless, Docker
+  # Desktop, and OrbStack). This rejects host binds even when their source path
+  # happens to look like Docker's volume storage.
+  if ! is_docker_named_volume_mount "$path"; then
+    echo "aic-chown-volumes: refusing mountpoint that is not a Docker named volume: $path" >&2
+    return 1
+  fi
+
+  # -h: act on a symlink itself, never its referent. -R without -H/-L is -P
+  # under GNU coreutils, so recursion cannot follow a symlink planted inside
+  # the mounted volume.
+  chown -h -R -- vscode:vscode "$path"
+}
+
+main() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "aic-chown-volumes: must run via sudo" >&2
+    exit 1
+  fi
+
+  local d
+  for d in /home/vscode/.shell-history \
+           /home/vscode/.config/aic-auth/signing \
+           /home/vscode/.config/aic-auth/semgrep \
+           /home/vscode/.aic-sessions \
+           /home/vscode/.config/gh \
+           /home/vscode/.config/npm; do
+    [ -e "$d" ] || [ -L "$d" ] || continue
+    chown_safe "$d"
+  done
+
+  # Project-declared volume mountpoints. Opt-in: read only if the project
+  # created the file, mirroring firewall-allowlist. The prefix allowlist is the
+  # security boundary — anything outside /workspace/ and /home/vscode/.cache/
+  # (sudoers, /etc/aic/hooks, /etc/aic/user-config, the rest of $HOME) is refused.
+  # Exact named-volume validation additionally prevents chowning an allowed-prefix
+  # host bind mount. The declaration file itself must be a canonical regular file.
+  local extra_file="/workspace/.devcontainer/chown-paths"
+  local extra_real line p
+  if [ -e "$extra_file" ] || [ -L "$extra_file" ]; then
+    extra_real=$(realpath -e -- "$extra_file" 2>/dev/null || true)
+    if [ "$extra_real" != "$extra_file" ] || [ ! -f "$extra_file" ] || [ -L "$extra_file" ]; then
+      echo "aic-chown-volumes: refusing non-regular or symlinked declaration file: $extra_file" >&2
+      exit 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+      p="${line%%#*}"                              # strip trailing comment
+      p="${p#"${p%%[![:space:]]*}"}"               # ltrim
+      p="${p%"${p##*[![:space:]]}"}"               # rtrim
+      [ -n "$p" ] || continue
+      case "/$p/" in
+        */../*)
+          echo "aic-chown-volumes: refusing path with a '..' component: $p" >&2
+          exit 1 ;;
+      esac
+      case "$p" in
+        /workspace/?*|/home/vscode/.cache/?*)
+          [ -e "$p" ] || [ -L "$p" ] || continue
+          chown_safe "$p" ;;
+        *)
+          echo "aic-chown-volumes: refusing out-of-allowlist path: $p" >&2
+          echo "  (only /workspace/* and /home/vscode/.cache/* are allowed)" >&2
+          exit 1 ;;
+      esac
+    done < "$extra_file"
+  fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
