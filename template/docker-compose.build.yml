@@ -68,7 +68,10 @@ services:
       - ../.git/hooks:/workspace/.git/hooks:ro
       # Reserved helper-only socket path. /run/aic-host is root:root 0700 in the
       # image, so vscode cannot traverse/open this mount.
-      - ${AIC_DOCKER_SOCKET:-/var/run/docker.sock}:/run/aic-host/docker.sock:ro
+      - type: bind
+        source: ${AIC_DOCKER_SOCKET:-/var/run/docker.sock}
+        target: /run/aic-host/docker.sock
+        read_only: true
 
       # The long-running unrestricted user sees only fixed allowlisted JSON
       # emitted by the root-only, networkless sanitizer service below — never
@@ -197,7 +200,10 @@ services:
       # 0.4.x writes the rendered haproxy.cfg to /tmp/haproxy.cfg on startup.
       - /tmp
     volumes:
-      - ${AIC_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
+      - type: bind
+        source: ${AIC_DOCKER_SOCKET:-/var/run/docker.sock}
+        target: /var/run/docker.sock
+        read_only: true
       # haproxy 3.x in 0.4.x loads /var/lib/haproxy/server-state on startup;
       # an anonymous volume seeds it from the image (the file is pre-touched
       # in the Dockerfile) while keeping the path writable.

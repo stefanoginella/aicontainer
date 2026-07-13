@@ -121,6 +121,16 @@ version=$(node -p 'require(process.argv[1]).version' "$ROOT/package.json")
 [ "$(grep -c 'ghcr.io/stefanoginella/aicontainer:latest' \
     "$ROOT/template/docker-compose.pull.yml")" = "5" ] \
   || fail "pull template latest placeholders drifted from the CLI pin rewrite"
+# Compose 2.38.x cannot inspect an uninterpolated ${VAR:-default} inside short
+# source:target:mode mount syntax. Keep the two managed socket binds long-form
+# so raw host-interpolation validation works on supported Linux runners.
+for compose in "$ROOT/template/docker-compose.pull.yml" \
+  "$ROOT/template/docker-compose.build.yml"; do
+  [ "$(grep -Fc 'source: ${AIC_DOCKER_SOCKET:-/var/run/docker.sock}' "$compose")" = "2" ] \
+    || fail "managed Docker socket mounts are not both long-form"
+  grep -Fq '${AIC_DOCKER_SOCKET:-/var/run/docker.sock}:' "$compose" \
+    && fail "managed Docker socket mount regressed to Compose-2.38-incompatible short syntax"
+done
 grep -Fqx 'x-aic-runtime-user: &aic-runtime-user "${AIC_RUNTIME_USER:-1000:1000}"' \
   "$TMP/one/api/.devcontainer/docker-compose.yml" \
   || fail "generated Compose embedded a host-specific runtime identity"
@@ -262,7 +272,7 @@ YAML
 (cd "$TMP/precreate-exec" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
 out=$(cd "$TMP/precreate-exec" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
 echo "$out" | grep -q 'changes managed command' \
-  || fail "devcontainer command could execute before post-create hardening"
+  || { printf '%s\n' "$out" >&2; fail "devcontainer command could execute before post-create hardening"; }
 echo "$out" | grep -q 'writable bind exposes protected project control paths' \
   || fail "nested .devcontainer bind escaped writable-control detection"
 

@@ -298,6 +298,12 @@ host token. Compose's escaped `$${VAR}` and ordinary literal values must remain
 frictionless. Diagnostics may name the variable but must never print its
 resolved value.
 
+Keep both managed `AIC_DOCKER_SOCKET` mounts in long Compose syntax. Compose
+2.38.x supports `--no-interpolate` but misparses the `:-` default and mount
+separators when that expression appears in short `source:target:ro` syntax;
+the long form preserves raw interpolation inspection on supported Linux CI
+runners without changing the resolved bind.
+
 Compose environment outranks both devcontainer `containerEnv` and image `ENV`.
 Changes to the managed keys plus `HOME`, `PATH`, shell startup variables,
 tool-home/XDG paths, `GIT_CONFIG_*`, `LD_*`, and Docker endpoint/config variables
