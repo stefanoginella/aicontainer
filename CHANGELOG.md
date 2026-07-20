@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`aic signing status` no longer reports "unsigned" when a key exists.** The
+  host-side probe now keeps `DAC_READ_SEARCH`, so it can read the vscode-owned
+  `0700` signing directory instead of always reporting no key; the boot
+  "commits unsigned" warning is fixed the same way (aic).
+
 ## [0.6.0] - 2026-07-13
 
 ### Added

@@ -1042,4 +1042,27 @@ grep -q '<volume> <inspect>.*<aic-auth-global>' "$log" \
   || fail "initialize did not inspect the physical auth volume"
 grep -q '<run>' "$log" && fail "root helper ran after unsafe volume detection"
 
+# `aic signing` creates the signing/ dir as vscode (0700, owned by the runtime
+# UID) inside the container. The host-side signing_state probe runs busybox as
+# root, so it must keep DAC_READ_SEARCH: without it root cannot traverse that
+# 0700 tree, `test -f` on the key fails, and every `aic signing status` / boot
+# check would falsely report an unsigned "no key" state even when signing is
+# configured and working. Assert the read-only inspect keeps exactly that
+# capability and gains no write bypass.
+new_project "$TMP/signing-status"
+: > "$log"
+(cd "$TMP/signing-status" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
+  AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+  AIC_HOME="$ROOT" "$ROOT/aic" signing status >/dev/null 2>&1)
+signing_probe=$(grep -F '<aic-auth-global:/v:ro>' "$log" || true)
+[ -n "$signing_probe" ] \
+  || fail "signing status did not run the read-only aic-auth-global probe"
+case "$signing_probe" in
+  *'<--cap-add> <DAC_READ_SEARCH>'*) ;;
+  *) fail "signing_state probe dropped DAC_READ_SEARCH; 0700 signing dir reads as no key" ;;
+esac
+case "$signing_probe" in
+  *DAC_OVERRIDE*) fail "signing_state read-only probe must not gain a write bypass" ;;
+esac
+
 echo "OK: host CLI symlink, merge, provenance, naming, and fail-closed checks passed"

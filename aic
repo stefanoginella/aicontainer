@@ -2354,7 +2354,14 @@ signing_state () {
     printf "mode= key=0"
     return
   fi
-  docker run --rm --network none --read-only --cap-drop ALL \
+  # DAC_READ_SEARCH is load-bearing: `aic signing` creates signing/ as vscode
+  # (0700, owned by the runtime UID), so a plain root probe with all caps
+  # dropped cannot traverse it and would always report key=0 — a false
+  # "unsigned" even when signing works. This read-only bypass (no write bypass,
+  # weaker than DAC_OVERRIDE) lets the probe stat the key; the :ro mount,
+  # dropped network, and no-new-privileges keep it locked down. Mirrors
+  # aic-chown-volumes, which keeps DAC_READ_SEARCH for the same 0700-tree reason.
+  docker run --rm --network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH \
     --security-opt no-new-privileges:true -v aic-auth-global:/v:ro \
     busybox@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d sh -c \
     'printf "mode=%s key=%s" "$(cat /v/signing/mode 2>/dev/null)" "$(test -f /v/signing/id_ed25519 && echo 1 || echo 0)"' \
