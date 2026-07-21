@@ -28,6 +28,13 @@ Read these files to infer the profile. Presence is the signal; versions refine i
 | `@playwright/test` / `cypress` / `puppeteer` in deps | Browser e2e → `Dockerfile.project` (baked Chromium); README has the Playwright recipe |
 | `.md` design docs (ARCHITECTURE, PRD, TECH-STACK, DESIGN, specs, `docs/`, `_bmad-output`, `.specstral`, `.specify/`) | Authoritative when code is sparse/greenfield — a spec naming the stack is a real signal |
 
+When the entire manifest glob comes back **empty** (greenfield / pre-first-commit
+repos — e.g. a repo holding only `.git` and `.specstral/`), the design-doc row
+above stops being a supplement and becomes the *primary* signal: a ratified spec
+(`.specstral/architecture.md`, an ADR, a pinned TECH-STACK) can carry the full
+version-pinned stack. Read it before falling back to asking the user; only ask
+when even the docs are silent.
+
 Output of this step: **language(s) + package manager(s) + runtime versions +
 services + test tooling + GUI/mobile/native/hardware flags.**
 
@@ -115,3 +122,69 @@ README's "Stop VS Code auto-activating a `.venv`" recipe is the source.
 | Anything with browser e2e | `Dockerfile.project` (Playwright/Chromium recipe) + `build:` block in the override |
 | Go service | named volume for build cache; `post-create.project.sh` (`go install gopls`); `golang.go` |
 | Rust crate | named volume for `target`/cargo (+ `chown-paths`); `rust-analyzer` + `rust-lang.rust-analyzer` |
+
+## 5. post-create.project.sh: sandbox constraints and recipes
+
+`post-create.project.sh` runs unprivileged as `vscode`, cwd `/workspace`, on every
+create. Three sandbox realities trip up otherwise-normal bootstrap scripts —
+encode them so the first boot is clean instead of logging `❌`.
+
+### Guard bootstrap on the manifest actually existing
+
+Greenfield / spec-driven repos are frequently sandboxed *before* the first
+manifest exists. An unconditional `uv sync` / `npm ci` hard-fails there. Guard it:
+
+```sh
+if [ -f pyproject.toml ]; then uv sync; else echo "post-create: no pyproject.toml yet — skipping uv sync"; fi
+```
+
+### `.git/hooks` is read-only — never run a hook installer unconditionally
+
+aicontainer bind-mounts the host's hooks read-only
+(`../.git/hooks:/workspace/.git/hooks:ro`) so a sandboxed agent can't rewrite
+hooks that then execute on the *host*. Every hook manager's `install` verb
+rewrites `.git/hooks/*`, so it fails in-container:
+
+```
+Error: could not replace the hook: remove /workspace/.git/hooks/pre-commit: read-only file system
+```
+
+This hits `lefthook install`, `husky install`, `pre-commit install`, and
+`simple-git-hooks`. The **host** owns hook installation; the container only needs
+the hook *binary* on `PATH` so the host-written shim runs. Gate the install on
+writability and split the cases — don't use `cmd && install || echo`, which prints
+"not on PATH" even when the *install* is what failed:
+
+```sh
+if ! command -v lefthook >/dev/null 2>&1; then
+  echo "post-create: lefthook not on PATH — skipping"
+elif [ -w .git/hooks ]; then
+  lefthook install || echo "post-create: 'lefthook install' failed"
+else
+  echo "post-create: .git/hooks is read-only (sandbox self-protection) — skipping install"
+fi
+```
+
+(A truly fresh clone whose *host* never ran `lefthook install` has no hook at all,
+and the container can't create one through the RO mount. The durable fix is
+declaring the tool in the project toolchain + a CI install step, not the sandbox.)
+
+### `npm i -g` can't install postinstall-binary tools
+
+The sandbox sets `NPM_CONFIG_IGNORE_SCRIPTS` (supply-chain hardening), which
+suppresses postinstall scripts. Tools that *download a binary* in a postinstall
+(lefthook, gitleaks, …) therefore install **nothing** via `npm i -g`. Fetch the
+pinned static release binary into `~/.local/bin` (no sudo, survives rebuild) —
+watch the per-project arch strings, they differ:
+
+```sh
+# lefthook assets use x86_64 / arm64; gitleaks uses x64 / arm64
+arch=$(uname -m)  # -> x86_64 | aarch64
+curl -fsSL -o ~/.local/bin/lefthook \
+  "https://github.com/evilmartians/lefthook/releases/download/v2.1.10/lefthook_2.1.10_Linux_${arch}"
+chmod +x ~/.local/bin/lefthook
+```
+
+Pure-JS language servers (`pyright`, `typescript-language-server`) ship their
+code rather than fetching a binary, so `npm i -g` is still correct for the LSP
+table above. Add `--no-audit` to quiet a cosmetic `--global` + `--audit` warning.

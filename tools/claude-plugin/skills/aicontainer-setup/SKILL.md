@@ -81,7 +81,10 @@ Before anything, confirm the ground is solid:
    Still read the README (Step 1) and re-detect/confirm the stack (Steps 2–3),
    then follow "Update mode" below instead of the greenfield Step 5. (If no
    `.devcontainer/` exists, it's a fresh setup — continue straight through
-   Steps 1–9.)
+   Steps 1–9.) A missing `.devcontainer/` still isn't proof of a clean slate: a
+   repo set up under an older aic can leave a stale legacy Docker volume/stack
+   that `aic up` migrates automatically (`aic: migrating legacy session
+   transcripts …`). That's expected, not an error — don't treat it as a failure.
 
 ## Update mode — auditing an existing setup
 
@@ -235,7 +238,23 @@ Step 1; rationale and the LSP-by-language table: `references/stack-and-suitabili
   editor extensions and is the LSP piece people miss (Python → `npm i -g pyright`,
   giving `pyright-langserver`; TS → `npm i -g typescript typescript-language-server`;
   others in the references table); (2) project bootstrap (`uv sync`, `npm ci`,
-  `lefthook install`, `pre-commit install`, DB seed).
+  DB seed). Three sandbox constraints shape this script — get them wrong and the
+  first boot logs a scary `❌` (full recipes: "post-create constraints" in the
+  references):
+  - **Guard bootstrap on the manifest existing.** Greenfield repos often have no
+    `pyproject.toml` / `package.json` yet, so wrap the step
+    (`if [ -f pyproject.toml ]; then uv sync; fi`) or it hard-fails on first create.
+  - **Never run a git-hook installer unconditionally.** `.git/hooks` is
+    bind-mounted **read-only** (sandbox self-protection), so `lefthook install` /
+    `husky install` / `pre-commit install` all fail with `read-only file system`.
+    The *host* owns hook installation; the container only needs the hook *binary*
+    on `PATH` so the host-written shim runs. Gate any install on `[ -w .git/hooks ]`.
+  - **`npm i -g` can't install postinstall-binary tools.** The sandbox sets
+    `NPM_CONFIG_IGNORE_SCRIPTS`, so tools that fetch a binary in a postinstall
+    (lefthook, gitleaks, …) install *nothing*. Fetch the pinned static release
+    binary into `~/.local/bin` instead. (Pure-JS LSP servers like `pyright` ship
+    their code and are unaffected; add `--no-audit` to real `npm i -g` calls to
+    quiet a cosmetic global+audit warning.)
 - **`firewall-allowlist`** — only if the user wants the stricter opt-in network
   allowlist (reviewing untrusted code, corporate LAN). Off by default; mention it,
   don't impose it.
@@ -318,6 +337,11 @@ reporting success.
      whatever the stack needs).
    - `aic preflight` to confirm the trust boundary (firewall mode, mounts)
      matches the plan.
+   `aic run` proves the **agent** LSP (binary on `PATH`), volumes, and services —
+   but **not** the editor side: `vscode-extensions` / `vscode-settings.json` only
+   take effect in a VS Code Dev Containers session, so don't report editor
+   IntelliSense as "verified." That's the expected limit of a headless boot check,
+   not a gap.
 5. **Leave it running or tear it down?** Ask the user — `aic down` stops the
    container (volumes persist) if they're not about to start working; leave it
    up if they are.
