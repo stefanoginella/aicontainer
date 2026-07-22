@@ -36,7 +36,7 @@ that silently gets wiped or breaks `aic sync`.
 - **All customization lives in project-owned files** that `aic sync` never
   touches: `Dockerfile.project`, `docker-compose.override.yml`, `chown-paths`,
   `post-create.project.sh`, `vscode-extensions`, `vscode-settings.json`,
-  `firewall-allowlist`. These are opt-in by presence.
+  `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`. These are opt-in by presence.
 - **Show the plan, then apply.** Detect and confirm first, present the full plan,
   get a yes, then write files and run `aic init` / `aic sync`. **Confirm before
   `aic up`** — it pulls or builds a multi-gigabyte image and can take minutes —
@@ -98,9 +98,11 @@ stack profile (Steps 2–3) first, then:
 1. **Inventory what's already there.** List which project-owned files exist and
    **read their contents**: `Dockerfile.project`, `docker-compose.override.yml`,
    `chown-paths`, `post-create.project.sh`, `vscode-extensions`,
-   `vscode-settings.json`, `firewall-allowlist`. Also note the current
-   `AIC_TOOLS` / `AIC_SHELL` in `devcontainer.json` (the only managed values that
-   survive `aic sync`). This is your baseline — what's already covered.
+   `vscode-settings.json`, `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`. Also
+   note the current `AIC_TOOLS` / `AIC_SHELL` in `devcontainer.json` (the only
+   managed values that survive `aic sync`), and whether a host-global overlay
+   already exists at `~/.config/aicontainer/{rc,p10k}.zsh`. This is your
+   baseline — what's already covered.
 2. **Compute the delta against the refreshed stack — look for three things:**
    - **Missing coverage** — a stack fact with no matching personalization: a new
      language with no LSP server in `post-create.project.sh` and no editor
@@ -258,12 +260,72 @@ Step 1; rationale and the LSP-by-language table: `references/stack-and-suitabili
 - **`firewall-allowlist`** — only if the user wants the stricter opt-in network
   allowlist (reviewing untrusted code, corporate LAN). Off by default; mention it,
   don't impose it.
+- **`shell-rc.zsh` / `p10k.zsh` (personal shell overlay)** — the user's own zsh
+  prompt/aliases inside the sandbox (zsh only); two independent slots, opt-in by
+  presence. Two sources, project winning: the project-owned
+  `.devcontainer/{shell-rc.zsh,p10k.zsh}` (per-project), or the host-global seed
+  `~/.config/aicontainer/{rc,p10k}.zsh` (every project on the machine). It is
+  **code, not data** — it crosses into the sandbox **verbatim** (it can't be
+  sanitized) and the in-container agent can read it, so **no secrets, ever**. The
+  host's real `~/.zshrc` / `~/.p10k.zsh` are **never** auto-forwarded. If the user
+  wants their prompt in the sandbox, don't hand-wave it — use the offer in
+  "Personal shell overlay — offer to draft a safe version" below.
 
 **LSP is a first-class concern** (the user cares about it). Make explicit that
 there are *two* LSP surfaces: the **editor's** IntelliSense (extensions +
 settings) and the **agent's** LSP tool (a language-server binary on `PATH`,
 installed from `post-create.project.sh`). A project usually wants both. See the
 references table for the binary + extension per language.
+
+### Personal shell overlay — offer to draft a safe version (optional)
+
+Most users who want "my shell inside the sandbox" have a host `~/.p10k.zsh` /
+`~/.zshrc` and reasonably expect them to appear. They don't: aicontainer never
+auto-forwards host dotfiles — they routinely hold secrets and host-specific
+breakage, and this sandbox runs an untrusted agent that can read whatever is
+mounted. The overlay reads only the aic-namespaced seed or the project files
+(see the overlay bullet above). So *offer to bridge that gap*: **draft** the
+overlay from their host dotfiles — an assisted, reviewed draft, never a silent
+transform.
+
+This is safe to do here because *you* run on the **host**, as the user's
+permissioned session — a different trust context from the sandboxed
+bypass-permissions agent the threat model targets, and you can already read
+these files. The trust anchor holds **only if the user stays the approver**: you
+move them from author to reviewer, you don't remove them. Do not auto-place a
+drafted file.
+
+When the user opts in:
+
+1. **Read the host files** (`~/.p10k.zsh`, `~/.zshrc`) host-side.
+2. **`p10k.zsh` — near-verbatim.** Almost always `p10k configure` output:
+   declarative `typeset -g POWERLEVEL9K_*`, no secrets. Copy it, but **scan** for
+   the unusual — custom segment functions that shell out, hardcoded host paths,
+   anything secret-shaped — and flag those.
+3. **`rc.zsh` — whitelist-extract, don't blacklist-strip.** Pull only
+   clearly-safe categories (aliases, simple functions, `setopt`, keybindings,
+   prompt tweaks). Leave everything else behind: `export *_KEY/_TOKEN/_SECRET=…`,
+   `source`d secret/env files, plugin managers and `eval "$(tool init)"` for
+   tools not in the sandbox, aliases to host-only binaries. **When in doubt,
+   leave it out.**
+4. **Be honest about the two distinct risks when you present it.** You are
+   *reliable* at avoiding breakage ("this sources oh-my-zsh at a host path —
+   dropped"); you *assist but cannot certify* secret removal. Never say "I
+   sanitized your config" — say "here's a lean draft; review it and confirm there
+   are no secrets."
+5. **Show a kept / dropped-with-reason summary** per file and fold the candidates
+   into the Step 6 plan. Require an explicit yes — this is content pulled from the
+   user's private files, so it gets its own focused look, not a blanket approval.
+6. **On approval, write** to `~/.config/aicontainer/` (host-global — one prompt
+   for every project) or `.devcontainer/` (this project only), as the user
+   prefers. **Mind the filename asymmetry:** the host seed is `rc.zsh` /
+   `p10k.zsh`; the project files are `shell-rc.zsh` / `p10k.zsh`. It takes effect
+   on the next `aic rebuild` (zsh sources it *after* the managed baseline, so a
+   personal prompt wins).
+
+If the user declines, or you can't confidently produce a clean draft, fall back
+to the manual path: they create `~/.config/aicontainer/p10k.zsh` (and optionally
+`rc.zsh`) by hand — no secrets — then `aic rebuild`.
 
 ## Step 6 — Present the plan
 
