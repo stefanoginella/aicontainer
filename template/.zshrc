@@ -22,5 +22,11 @@ setopt SHARE_HISTORY
 export PATH="$FNM_DIR:$PATH"
 eval "$(fnm env --use-on-cd)"
 
-# Host shell startup code is deliberately not forwarded into the sandbox. This
-# managed baseline lives under /etc/aic/shell in the built image.
+# Personal-config overlay (opt-in). These files are installed root-owned 0444 by
+# aic-lock-user-config from the trusted human's config — a project-owned
+# .devcontainer/{p10k.zsh,shell-rc.zsh} or the host ~/.config/aicontainer/. They
+# are sourced LAST so a personal prompt/aliases win over the managed baseline;
+# an in-container agent cannot tamper with them. Raw host shell code is never
+# auto-forwarded.
+[[ ! -r /etc/aic/user-config/shell/p10k.zsh ]] || source /etc/aic/user-config/shell/p10k.zsh
+[[ ! -r /etc/aic/user-config/shell/rc.zsh ]] || source /etc/aic/user-config/shell/rc.zsh

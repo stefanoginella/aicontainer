@@ -37,7 +37,7 @@ per-project customization belongs.
 | `Dockerfile` *(build mode only)* | The sandbox image definition. |
 | `post-create.py` *(build mode only)* | Container-creation setup. |
 | `hooks/` *(build mode only)* | Shared guardrail hooks (Claude + Codex + OpenCode). |
-| `aic-firewall`, `aic-chown-volumes`, `aic-lock-gitconfig` *(build mode only)* | Privileged helper scripts. |
+| `aic-firewall`, `aic-chown-volumes`, `aic-lock-user-config` *(build mode only)* | Privileged helper scripts. |
 | `.zshrc` *(build mode only)* | Baked login-shell rc. |
 
 In **pull mode** only `devcontainer.json`, `docker-compose.yml`, `.gitignore`,
@@ -72,6 +72,8 @@ covered by persistent trust and always need that per-run flag.
 | `post-create.project.sh` | Commands to run on every container create (`lefthook install`, `npm ci`, …) | *Project-specific post-create steps* |
 | `vscode-extensions` | VS Code editor extensions to auto-install (one `publisher.name` id per line) | *Project-specific VS Code extensions & settings* |
 | `vscode-settings.json` | VS Code editor settings (a JSON object) | *Project-specific VS Code extensions & settings* |
+| `shell-rc.zsh` | Personal zsh startup (aliases, functions, prompt) sourced after the managed baseline | *Personal shell config* |
+| `p10k.zsh` | Personal powerlevel10k prompt config (`p10k configure` output) | *Personal shell config* |
 
 Full docs: <https://github.com/stefanoginella/aicontainer#readme>
 

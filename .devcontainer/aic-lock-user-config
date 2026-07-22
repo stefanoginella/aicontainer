@@ -1,10 +1,33 @@
 #!/usr/bin/python3 -I
-"""Install a generated Git config behind a root-owned directory boundary.
+"""Install trusted user configuration behind a root-owned directory boundary.
 
-This helper is called through a scoped NOPASSWD sudoers entry. Both paths are
-hardcoded (never argv). The unprivileged post-create process writes the staging
-file; this helper validates and opens it without following symlinks, then
-creates the final root-owned file exactly once using descriptor-relative APIs.
+This helper is called through a scoped NOPASSWD sudoers entry. It installs a
+FIXED table of targets; every staging and destination path is hardcoded here
+and never taken from argv. The unprivileged post-create process writes the
+staging files; this helper validates each one and, without following symlinks,
+atomically creates the final root-owned file exactly once using
+descriptor-relative APIs.
+
+Targets fall into two classes:
+
+  * Validated config (``gitconfig``). Parsed against a fixed key/value
+    allowlist before install; REQUIRED, so its absence is an error. This is the
+    former ``aic-lock-gitconfig`` behavior, unchanged.
+
+  * Verbatim personal shell (``shell/rc.zsh``, ``shell/p10k.zsh``). Arbitrary
+    zsh that cannot be meaningfully allowlisted, so it is installed WITHOUT
+    content validation; OPTIONAL, installed only when its staging file exists.
+    Safe despite the missing content check because:
+      1. the bytes originate from the trusted human's own config (a project
+         file a human placed under ``.devcontainer/`` or the host ``$HOME``),
+         staged by trusted post-create *before* any agent session runs;
+      2. ``root:root 0444`` plus create-once means an agent cannot tamper with
+         the installed file afterward, preserving the "shell startup is
+         root-managed" guarantee; and
+      3. root only OWNS the file — its contents still execute as the
+         unprivileged ``vscode`` user when sourced, so they grant no privilege
+         the agent does not already have.
+    See AGENTS.md, "personal config overlay".
 """
 
 from __future__ import annotations
@@ -15,13 +38,10 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import NoReturn
+from typing import Callable, NoReturn, Optional
 
 
-SOURCE = Path("/home/vscode/.aic-gitconfig.staging")
-DEST_DIR = Path("/etc/aic/user-config")
-DEST_NAME = "gitconfig"
-MAX_CONFIG_BYTES = 1024 * 1024
+MAX_FILE_BYTES = 1024 * 1024
 
 # Keep this fixed-key contract aligned with post-create.py's GIT_SEED_KEYS and
 # setup_gitconfig(). None of these seed keys execute commands, load paths, alter
@@ -78,8 +98,28 @@ REQUIRED_LAST_VALUES = {
 
 
 def fail(message: str) -> NoReturn:
-    print(f"aic-lock-gitconfig: {message}", file=sys.stderr)
+    print(f"aic-lock-user-config: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+class Target:
+    """One hardcoded (staging -> destination) install with an optional validator."""
+
+    __slots__ = ("staging", "dest_dir", "dest_name", "required", "validator")
+
+    def __init__(
+        self,
+        staging: Path,
+        dest_dir: Path,
+        dest_name: str,
+        required: bool,
+        validator: Optional[Callable[[int], None]],
+    ) -> None:
+        self.staging = staging
+        self.dest_dir = dest_dir
+        self.dest_name = dest_name
+        self.required = required
+        self.validator = validator
 
 
 def exact_realpath(path: Path, description: str) -> None:
@@ -91,26 +131,35 @@ def exact_realpath(path: Path, description: str) -> None:
         fail(f"refusing symlinked {description}: {path}")
 
 
-def open_validated_source(vscode_uid: int) -> tuple[int, os.stat_result]:
-    exact_realpath(SOURCE.parent, "staging parent")
+def open_validated_source(
+    target: Target, vscode_uid: int
+) -> Optional[tuple[int, os.stat_result]]:
+    """Open a target's staging file with no-follow/inode checks.
+
+    Returns ``None`` when an OPTIONAL target has no staging file (that source
+    was simply not provided). A REQUIRED target's absence is fatal.
+    """
+    exact_realpath(target.staging.parent, "staging parent")
     try:
-        before = SOURCE.lstat()
+        before = target.staging.lstat()
     except FileNotFoundError:
-        fail(f"staging file is missing: {SOURCE}")
+        if target.required:
+            fail(f"staging file is missing: {target.staging}")
+        return None
     if not stat.S_ISREG(before.st_mode):
-        fail(f"refusing symlink or non-regular staging file: {SOURCE}")
+        fail(f"refusing symlink or non-regular staging file: {target.staging}")
     if before.st_uid != vscode_uid:
-        fail(f"staging file is not owned by vscode: {SOURCE}")
+        fail(f"staging file is not owned by vscode: {target.staging}")
     if before.st_nlink != 1:
-        fail(f"staging file must not be hard-linked: {SOURCE}")
-    if before.st_size > MAX_CONFIG_BYTES:
-        fail(f"staging file exceeds {MAX_CONFIG_BYTES} bytes: {SOURCE}")
+        fail(f"staging file must not be hard-linked: {target.staging}")
+    if before.st_size > MAX_FILE_BYTES:
+        fail(f"staging file exceeds {MAX_FILE_BYTES} bytes: {target.staging}")
 
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(SOURCE, flags)
+        fd = os.open(target.staging, flags)
     except OSError as error:
-        fail(f"cannot safely open staging file {SOURCE}: {error}")
+        fail(f"cannot safely open staging file {target.staging}: {error}")
 
     opened = os.fstat(fd)
     opened_path = os.path.realpath(f"/proc/self/fd/{fd}")
@@ -118,16 +167,16 @@ def open_validated_source(vscode_uid: int) -> tuple[int, os.stat_result]:
         not stat.S_ISREG(opened.st_mode)
         or opened.st_uid != vscode_uid
         or opened.st_nlink != 1
-        or opened.st_size > MAX_CONFIG_BYTES
+        or opened.st_size > MAX_FILE_BYTES
         or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
-        or opened_path != str(SOURCE)
+        or opened_path != str(target.staging)
     ):
         os.close(fd)
-        fail(f"staging file changed or escaped its hardcoded path: {SOURCE}")
+        fail(f"staging file changed or escaped its hardcoded path: {target.staging}")
     return fd, opened
 
 
-def validate_config_contents(source_fd: int) -> None:
+def validate_gitconfig_contents(source_fd: int) -> None:
     """Reject config keys that could execute code or cross trust boundaries."""
     env = {
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -177,43 +226,79 @@ def validate_config_contents(source_fd: int) -> None:
             fail(f"staging config is missing aic's required value for: {key}")
 
 
-def validate_destination_directory() -> int:
-    exact_realpath(DEST_DIR, "destination directory")
+# The fixed install table. gitconfig keeps its allowlist validator and stays
+# required; the personal shell files are optional and installed verbatim (see
+# the module docstring for why the missing content check is safe). Staging
+# paths MUST match post-create.py's GITCONFIG_STAGING / SHELL_RC_STAGING /
+# P10K_STAGING; destination directories MUST already exist root-owned (created
+# in template/Dockerfile).
+TARGETS = (
+    Target(
+        Path("/home/vscode/.aic-gitconfig.staging"),
+        Path("/etc/aic/user-config"),
+        "gitconfig",
+        required=True,
+        validator=validate_gitconfig_contents,
+    ),
+    Target(
+        Path("/home/vscode/.aic-shell-rc.staging"),
+        Path("/etc/aic/user-config/shell"),
+        "rc.zsh",
+        required=False,
+        validator=None,
+    ),
+    Target(
+        Path("/home/vscode/.aic-p10k.staging"),
+        Path("/etc/aic/user-config/shell"),
+        "p10k.zsh",
+        required=False,
+        validator=None,
+    ),
+)
+
+
+def validate_destination_directory(dest_dir: Path) -> int:
+    exact_realpath(dest_dir, "destination directory")
     try:
-        info = DEST_DIR.lstat()
+        info = dest_dir.lstat()
     except FileNotFoundError:
-        fail(f"destination directory is missing: {DEST_DIR}")
+        fail(f"destination directory is missing: {dest_dir}")
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0:
-        fail(f"destination directory must be root-owned: {DEST_DIR}")
+        fail(f"destination directory must be root-owned: {dest_dir}")
     if stat.S_IMODE(info.st_mode) & 0o022:
-        fail(f"destination directory must not be group/world writable: {DEST_DIR}")
+        fail(f"destination directory must not be group/world writable: {dest_dir}")
 
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        directory_fd = os.open(DEST_DIR, flags)
+        directory_fd = os.open(dest_dir, flags)
     except OSError as error:
-        fail(f"cannot safely open destination directory {DEST_DIR}: {error}")
+        fail(f"cannot safely open destination directory {dest_dir}: {error}")
     opened = os.fstat(directory_fd)
     if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
         os.close(directory_fd)
-        fail(f"destination directory changed while opening: {DEST_DIR}")
+        fail(f"destination directory changed while opening: {dest_dir}")
     return directory_fd
 
 
 def copy_to_locked_destination(
-    source_fd: int, source_opened: os.stat_result, directory_fd: int
+    source_fd: int,
+    source_opened: os.stat_result,
+    directory_fd: int,
+    dest_dir: Path,
+    dest_name: str,
 ) -> None:
-    # Never overwrite an installed config. This makes subsequent sudo helper
+    dest_display = dest_dir / dest_name
+    # Never overwrite an installed file. This makes subsequent sudo helper
     # invocations unable to replace the trusted post-create result with content
     # written later by an agent in the same container.
     try:
-        os.stat(DEST_NAME, dir_fd=directory_fd, follow_symlinks=False)
+        os.stat(dest_name, dir_fd=directory_fd, follow_symlinks=False)
     except FileNotFoundError:
         pass
     else:
-        fail(f"destination already exists; refusing to replace: {DEST_DIR / DEST_NAME}")
+        fail(f"destination already exists; refusing to replace: {dest_display}")
 
-    temp_name = f".gitconfig.tmp.{os.getpid()}"
+    temp_name = f".{dest_name}.tmp.{os.getpid()}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         temp_fd = os.open(temp_name, flags, 0o400, dir_fd=directory_fd)
@@ -229,8 +314,8 @@ def copy_to_locked_destination(
             if not chunk:
                 break
             copied += len(chunk)
-            if copied > MAX_CONFIG_BYTES:
-                fail(f"staging file grew beyond {MAX_CONFIG_BYTES} bytes")
+            if copied > MAX_FILE_BYTES:
+                fail(f"staging file grew beyond {MAX_FILE_BYTES} bytes")
             view = memoryview(chunk)
             while view:
                 written = os.write(temp_fd, view)
@@ -250,7 +335,7 @@ def copy_to_locked_destination(
             source_opened.st_mtime_ns,
             source_opened.st_ctime_ns,
         ):
-            fail(f"staging file changed while being copied: {SOURCE}")
+            fail(f"staging file changed while being copied: {dest_display}")
 
         os.fchown(temp_fd, 0, 0)
         os.fchmod(temp_fd, 0o444)
@@ -263,7 +348,7 @@ def copy_to_locked_destination(
         # never overwrite a destination that the first invocation installed.
         os.link(
             temp_name,
-            DEST_NAME,
+            dest_name,
             src_dir_fd=directory_fd,
             dst_dir_fd=directory_fd,
             follow_symlinks=False,
@@ -272,7 +357,7 @@ def copy_to_locked_destination(
         os.unlink(temp_name, dir_fd=directory_fd)
         os.fsync(directory_fd)
 
-        final = os.stat(DEST_NAME, dir_fd=directory_fd, follow_symlinks=False)
+        final = os.stat(dest_name, dir_fd=directory_fd, follow_symlinks=False)
         if (
             not stat.S_ISREG(final.st_mode)
             or final.st_uid != 0
@@ -281,9 +366,9 @@ def copy_to_locked_destination(
             or (final.st_dev, final.st_ino) != (locked.st_dev, locked.st_ino)
             or final.st_nlink != 1
         ):
-            fail(f"installed destination failed owner/mode/inode checks: {DEST_DIR / DEST_NAME}")
+            fail(f"installed destination failed owner/mode/inode checks: {dest_display}")
     except FileExistsError:
-        fail(f"destination already exists; refusing to replace: {DEST_DIR / DEST_NAME}")
+        fail(f"destination already exists; refusing to replace: {dest_display}")
     finally:
         os.close(temp_fd)
         if not linked:
@@ -291,6 +376,25 @@ def copy_to_locked_destination(
                 os.unlink(temp_name, dir_fd=directory_fd)
             except FileNotFoundError:
                 pass
+
+
+def install_target(target: Target, vscode_uid: int) -> None:
+    opened = open_validated_source(target, vscode_uid)
+    if opened is None:
+        return
+    source_fd, source_stat = opened
+    try:
+        if target.validator is not None:
+            target.validator(source_fd)
+        directory_fd = validate_destination_directory(target.dest_dir)
+        try:
+            copy_to_locked_destination(
+                source_fd, source_stat, directory_fd, target.dest_dir, target.dest_name
+            )
+        finally:
+            os.close(directory_fd)
+    finally:
+        os.close(source_fd)
 
 
 def main() -> None:
@@ -301,16 +405,8 @@ def main() -> None:
     except KeyError:
         fail("vscode user does not exist")
 
-    source_fd, opened = open_validated_source(vscode_uid)
-    try:
-        validate_config_contents(source_fd)
-        directory_fd = validate_destination_directory()
-        try:
-            copy_to_locked_destination(source_fd, opened, directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        os.close(source_fd)
+    for target in TARGETS:
+        install_target(target, vscode_uid)
 
 
 if __name__ == "__main__":

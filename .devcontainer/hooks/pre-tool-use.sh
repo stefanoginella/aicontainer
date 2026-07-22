@@ -21,7 +21,7 @@
 #   3. Self-protection paths: block writes to /etc/aic/, /workspace/.devcontainer/,
 #      and the login-shell rc files (~/.zshrc, ~/.bashrc, fish config + their
 #      .local includes). /etc/aic and the RO .devcontainer mount are enforced by
-#      the filesystem; the baked rc files are root-locked by aic-lock-gitconfig
+#      the filesystem; the baked rc files are root-locked by aic-lock-user-config
 #      (post-create), so this hook is the clearer-error / belt-and-suspenders
 #      layer (and the only guard for the user-writable .local includes).
 # =============================================================================
@@ -107,7 +107,7 @@ is_protected_path() {
   case "$1" in
     /etc/aic/*|/workspace/.devcontainer/*) return 0 ;;
     # Login-shell rc files executed on `aic shell`, and their opt-in .local
-    # includes. The baked rc files are root-locked too (aic-lock-gitconfig); the
+    # includes. The baked rc files are root-locked too (aic-lock-user-config); the
     # .local includes stay user-writable, so this is their only guard.
     /home/vscode/.zshrc|/home/vscode/.zshrc.local) return 0 ;;
     /home/vscode/.bashrc|/home/vscode/.bashrc.local) return 0 ;;

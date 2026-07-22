@@ -191,7 +191,7 @@ compose_has_project_name () {
 # control inputs. Never follow a repository-provided symlink at this boundary:
 # `aic init --force` / `aic sync` run as the host user, so following one could
 # overwrite or read an arbitrary host file outside the repository.
-AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-gitconfig .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json"
+AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh"
 
 validate_devcontainer_paths () {
   local require_dir="${1:-optional}" path name linked
@@ -925,7 +925,8 @@ apply_template () {
       # old Dockerfile behind makes the next plain `aic sync` auto-detect build
       # mode and silently flip the project back.
       rm -f "$dst/Dockerfile" "$dst/post-create.py" "$dst/aic-firewall" \
-        "$dst/aic-chown-volumes" "$dst/aic-lock-gitconfig" "$dst/.zshrc"
+        "$dst/aic-chown-volumes" "$dst/aic-lock-user-config" \
+        "$dst/aic-lock-gitconfig" "$dst/.zshrc"
       rm -rf "$dst/hooks"
       ;;
     build)
@@ -934,7 +935,7 @@ apply_template () {
       atomic_copy_file "$src/post-create.py"     "$dst/post-create.py"
       atomic_copy_file "$src/aic-firewall"       "$dst/aic-firewall"
       atomic_copy_file "$src/aic-chown-volumes"  "$dst/aic-chown-volumes"
-      atomic_copy_file "$src/aic-lock-gitconfig" "$dst/aic-lock-gitconfig"
+      atomic_copy_file "$src/aic-lock-user-config" "$dst/aic-lock-user-config"
       atomic_copy_file "$src/.zshrc"             "$dst/.zshrc"
       atomic_copy_hooks "$src/hooks"              "$dst/hooks"
       ;;
@@ -1178,9 +1179,12 @@ cmd_sync () {
       ;;
   esac
   echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
-  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, post-create.project.sh, docker-compose.override.yml, vscode-extensions, vscode-settings.json) are untouched"
+  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, post-create.project.sh, docker-compose.override.yml, vscode-extensions, vscode-settings.json, shell-rc.zsh, p10k.zsh) are untouched"
   if [ -f .devcontainer/docker-compose.override.yml ]; then
     echo "aic: wired docker-compose.override.yml into dockerComposeFile"
+  fi
+  if [ -f .devcontainer/shell-rc.zsh ] || [ -f .devcontainer/p10k.zsh ]; then
+    echo "aic: personal shell overlay present (shell-rc.zsh / p10k.zsh): installed root-owned on next 'aic rebuild' and sourced by zsh"
   fi
   if [ -f .devcontainer/vscode-extensions ]; then
     local extcount; extcount="$(grep -cvE '^[[:space:]]*(#|$)' .devcontainer/vscode-extensions 2>/dev/null)" || extcount=0
@@ -1386,7 +1390,7 @@ validate_managed_build_files () {
     fi
   done
   [ -f .devcontainer/Dockerfile ] || return 0
-  for name in Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-gitconfig .zshrc; do
+  for name in Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-user-config .zshrc; do
     if [ ! -f "$TEMPLATE_DIR/$name" ] || ! cmp -s "$TEMPLATE_DIR/$name" ".devcontainer/$name"; then
       printf 'MANAGED\t.devcontainer/%s differs from the managed build template; run aic sync\n' "$name" >> "$out"
     fi
@@ -2726,7 +2730,11 @@ migrate_legacy_session_volume () {
 prepare_host_seed_paths () {
   local dir file
   [ -n "${HOME:-}" ] || die "HOME is not set; cannot prepare host configuration seeds"
-  for dir in "$HOME/.claude" "$HOME/.codex" "$HOME/.config" "$HOME/.config/opencode"; do
+  # ~/.config/aicontainer is the opt-in personal-shell-overlay seed dir, mounted
+  # read-only into the sanitizer. Ensure it exists so the bind source is a
+  # user-owned directory (not a root-owned dir Docker would create); it stays
+  # empty until the user drops rc.zsh / p10k.zsh in it (opt-in by presence).
+  for dir in "$HOME/.claude" "$HOME/.codex" "$HOME/.config" "$HOME/.config/opencode" "$HOME/.config/aicontainer"; do
     if [ -e "$dir" ] || [ -L "$dir" ]; then
       [ -d "$dir" ] || die "host seed parent exists but is not a directory: $dir"
     else
@@ -3548,7 +3556,8 @@ Usage:
                        Project-owned files (Dockerfile.project, firewall-
                        allowlist, chown-paths, post-create.project.sh,
                        docker-compose.override.yml, vscode-extensions,
-                       vscode-settings.json) are untouched; an existing
+                       vscode-settings.json, shell-rc.zsh, p10k.zsh) are
+                       untouched; an existing
                        docker-compose.override.yml is auto-wired into
                        dockerComposeFile, and vscode-extensions /
                        vscode-settings.json are merged into the editor

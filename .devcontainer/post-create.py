@@ -56,11 +56,30 @@ HOST_SEED_OPENCODE = HOST_SEED / "opencode.json"
 HOST_SEED_GIT = HOST_SEED / "git.json"
 
 # post-create writes the dynamic config as vscode to this fixed staging path;
-# aic-lock-gitconfig validates and atomically installs it into the root-owned
+# aic-lock-user-config validates and atomically installs it into the root-owned
 # destination without granting a general-purpose privileged copy primitive.
 GITCONFIG_STAGING = HOME / ".aic-gitconfig.staging"
 GITCONFIG_MANAGED = Path("/etc/aic/user-config/gitconfig")
 GITIGNORE_MANAGED = Path("/etc/aic/gitignore")
+
+# Personal-config overlay (opt-in). A project-owned .devcontainer/{shell-rc,p10k}
+# or the host ~/.config/aicontainer/{rc,p10k} — routed verbatim through the
+# sanitizer — is staged here (vscode) and installed root-owned 0444 by
+# aic-lock-user-config into the managed shell dir, then sourced by the baked
+# .zshrc AFTER the managed baseline. It is code, not data: it cannot be
+# allowlist-sanitized, so it is copied verbatim from the trusted human's config.
+# See AGENTS.md, "personal config overlay". The project file wins over the host
+# seed; each MUST match aic-lock-user-config's TARGETS staging paths.
+SHELL_MANAGED_DIR = Path("/etc/aic/user-config/shell")
+SHELL_RC_MANAGED = SHELL_MANAGED_DIR / "rc.zsh"
+P10K_MANAGED = SHELL_MANAGED_DIR / "p10k.zsh"
+SHELL_RC_STAGING = HOME / ".aic-shell-rc.staging"
+P10K_STAGING = HOME / ".aic-p10k.staging"
+PROJECT_SHELL_RC = Path("/workspace/.devcontainer/shell-rc.zsh")
+PROJECT_P10K = Path("/workspace/.devcontainer/p10k.zsh")
+HOST_SEED_SHELL_RC = HOST_SEED / "shell-rc.zsh"
+HOST_SEED_P10K = HOST_SEED / "p10k.zsh"
+MAX_PERSONAL_SHELL_BYTES = 1024 * 1024
 
 # Sandbox commit-signing material, provisioned by `aic signing` and persisted
 # in the aic-auth-global volume (so the pubkey is registered on GitHub once and
@@ -596,10 +615,48 @@ def _write_sanitized_seed(name: str, value: dict) -> None:
             pass
 
 
+def _copy_verbatim_seed(name: str, raw_src: Path) -> None:
+    """Copy one opt-in personal shell file verbatim into the sanitized volume.
+
+    Unlike the four JSON seeds, personal shell config is code and CANNOT be
+    allowlist-sanitized, so it is copied byte-for-byte from the trusted human's
+    input. This is not a security downgrade of the sanitizer: the file lands
+    root-owned 0444 (an in-container agent cannot tamper with it) and its
+    contents still execute only as the unprivileged `vscode` user when sourced.
+    Absent/oversized/non-regular inputs are simply skipped (opt-in by presence).
+    """
+    try:
+        if raw_src.is_symlink() or not raw_src.is_file():
+            return
+        data = raw_src.read_bytes()
+    except OSError as e:
+        log(f"sanitizer: skipping personal {name} ({e})")
+        return
+    if not data or len(data) > MAX_PERSONAL_SHELL_BYTES:
+        if len(data) > MAX_PERSONAL_SHELL_BYTES:
+            log(f"sanitizer: personal {name} exceeds {MAX_PERSONAL_SHELL_BYTES} bytes; skipping")
+        return
+    SANITIZED_HOST_SEED.mkdir(parents=True, exist_ok=True)
+    os.chmod(SANITIZED_HOST_SEED, 0o700)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{name}.", dir=SANITIZED_HOST_SEED)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        tmp.chmod(0o444)
+        os.replace(tmp, SANITIZED_HOST_SEED / name)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def sanitize_seeds() -> int:
-    """One-shot Compose service entry point. It alone sees raw host inputs;
-    the long-running devcontainer receives only these four root-owned JSON
-    products through a read-only volume."""
+    """One-shot Compose service entry point. It alone sees raw host inputs; the
+    long-running devcontainer receives only root-owned products through a
+    read-only volume: four allowlisted JSON seeds plus, when present, the opt-in
+    personal shell overlay copied verbatim (see _copy_verbatim_seed)."""
     if os.geteuid() != 0:
         log("sanitizer: must run as root")
         return 1
@@ -611,6 +668,10 @@ def sanitize_seeds() -> int:
     }
     for name, value in outputs.items():
         _write_sanitized_seed(name, value)
+    # Opt-in personal shell overlay from the host ~/.config/aicontainer/ dir.
+    aic_config = RAW_HOST_SEED / "aic-config"
+    _copy_verbatim_seed("shell-rc.zsh", aic_config / "rc.zsh")
+    _copy_verbatim_seed("p10k.zsh", aic_config / "p10k.zsh")
     os.chmod(SANITIZED_HOST_SEED, 0o555)
     log("sanitizer: wrote fixed allowlisted seeds")
     return 0
@@ -1202,17 +1263,91 @@ def block_metadata() -> None:
         log(f"warning: metadata egress block skipped ({e}); continuing")
 
 
-def lock_config() -> None:
-    """Install the fixed staging file at the hardcoded root-owned gitconfig
-    target through the narrow aic-lock-gitconfig helper. The helper deliberately
-    lacks DAC_OVERRIDE, so the unprivileged owner removes its own staging file
-    only after the atomic install succeeds."""
+def _stage_personal_shell_file(
+    project_src: Path, seed_src: Path, staging: Path, managed: Path, label: str
+) -> None:
+    """Stage the winning personal-overlay source for the root-owned install.
+
+    The project-owned .devcontainer/ file beats the host ~/.config/aicontainer/
+    seed. Verbatim copy — the content is code and can't be allowlist-checked; the
+    trust chain is (1) it comes from the human's config, staged before any agent
+    session runs, and (2) aic-lock-user-config installs it root-owned 0444 so an
+    agent can't tamper with it, while it still executes only as vscode when
+    sourced.
+    """
+    if managed.is_file():
+        # Already installed in this container; a rebuild starts from a fresh
+        # image and re-stages. Mirrors setup_gitconfig's re-run guard.
+        return
+
+    # Clear any stale staging file (leftover from a prior run).
+    if staging.is_symlink() or staging.exists():
+        if staging.is_dir():
+            log(f"warning: refusing non-file {label} staging path {staging}")
+            return
+        staging.unlink()
+
+    src = None
+    for candidate in (project_src, seed_src):
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+        except OSError:
+            continue
+        src = candidate
+        break
+    if src is None:
+        return
+
     try:
-        subprocess.run(["sudo", "/usr/local/bin/aic-lock-gitconfig"], check=True)
-        GITCONFIG_STAGING.unlink()
-        log(f"installed root-owned git config at {GITCONFIG_MANAGED}")
+        data = src.read_bytes()
+    except OSError as e:
+        log(f"warning: could not read personal {label} source {src}: {e}")
+        return
+    if len(data) > MAX_PERSONAL_SHELL_BYTES:
+        log(f"warning: personal {label} {src} exceeds {MAX_PERSONAL_SHELL_BYTES} bytes; skipping")
+        return
+
+    staging.touch(mode=0o600)
+    staging.write_bytes(data)
+    # World-readable so the fixed sudo helper (which lacks broad DAC_OVERRIDE)
+    # can read it; its inode/owner/link checks still prevent path substitution.
+    staging.chmod(0o644)
+    log(f"staged personal {label} from {src} for root-owned install")
+
+
+def setup_personal_shell() -> None:
+    """Stage the opt-in personal shell overlay (rc.zsh + p10k.zsh) for install.
+
+    zsh only: p10k and the overlay `source` lines live in the managed .zshrc, so
+    bash/fish users keep the managed baseline unchanged. Both slots are optional
+    and independent — a project may ship only a p10k.zsh, only a shell-rc.zsh, or
+    both, and likewise for the host seed.
+    """
+    _stage_personal_shell_file(
+        PROJECT_SHELL_RC, HOST_SEED_SHELL_RC, SHELL_RC_STAGING, SHELL_RC_MANAGED, "shell rc"
+    )
+    _stage_personal_shell_file(
+        PROJECT_P10K, HOST_SEED_P10K, P10K_STAGING, P10K_MANAGED, "p10k config"
+    )
+
+
+def lock_config() -> None:
+    """Install every staged fixed-target config through the narrow
+    aic-lock-user-config helper (validated gitconfig plus the optional verbatim
+    personal shell overlay). The helper deliberately lacks DAC_OVERRIDE, so the
+    unprivileged owner removes its own staging files after the atomic install."""
+    try:
+        subprocess.run(["sudo", "/usr/local/bin/aic-lock-user-config"], check=True)
+        log(f"installed root-owned user config under {GITCONFIG_MANAGED.parent}")
     except (OSError, subprocess.CalledProcessError) as e:
-        log(f"warning: aic-lock-gitconfig failed: {e}")
+        log(f"warning: aic-lock-user-config failed: {e}")
+    finally:
+        for staging in (GITCONFIG_STAGING, SHELL_RC_STAGING, P10K_STAGING):
+            try:
+                staging.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def verify_git_identity() -> None:
@@ -1432,6 +1567,7 @@ def main() -> None:
     # SEMGREP_SETTINGS_FILE (devcontainer.json), inside the same persistent
     # volume — no leaf-file symlink to be clobbered by its atomic-rename writes.
     setup_gitconfig()
+    setup_personal_shell()
     lock_config()
     verify_socket_proxy()
     run_project_hook()

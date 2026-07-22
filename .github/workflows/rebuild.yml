@@ -145,11 +145,39 @@ jobs:
           volumes:
             aic-smoke-venv:
           YAML
+          # Opt-in personal shell overlay: post-create installs these root-owned
+          # 0444 and the baked .zshrc sources them after the managed baseline.
+          printf '# aic smoke overlay rc\nexport AIC_SMOKE_RC=1\ntouch /tmp/aic-smoke-rc-sourced\n' \
+            > /tmp/proj/.devcontainer/shell-rc.zsh
+          printf '# aic smoke overlay p10k\ntouch /tmp/aic-smoke-p10k-sourced\n' \
+            > /tmp/proj/.devcontainer/p10k.zsh
           cd /tmp/proj && git init -q
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build --force
       - name: Bring up the devcontainer
         working-directory: /tmp/proj
         run: devcontainer up --workspace-folder .
+      - name: Smoke test - personal shell overlay installs root-locked and is sourced
+        working-directory: /tmp/proj
+        run: |
+          # The opt-in project-owned .devcontainer/{shell-rc,p10k}.zsh seeded at
+          # setup land root-owned 0444 under /etc/aic/user-config/shell, are
+          # sourced by the managed .zshrc AFTER the baseline, and are tamper-proof.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            for f in /etc/aic/user-config/shell/rc.zsh /etc/aic/user-config/shell/p10k.zsh; do
+              [ -e "$f" ] || { echo "FAIL: $f missing"; exit 1; }
+              perms=$(stat -c "%U %a" "$f")
+              [ "$perms" = "root 444" ] || { echo "FAIL: $f expected root 444, got $perms"; exit 1; }
+              if echo x >> "$f" 2>/dev/null; then echo "FAIL: vscode can write $f"; exit 1; fi
+            done
+            grep -q "aic smoke overlay rc" /etc/aic/user-config/shell/rc.zsh \
+              || { echo "FAIL: overlay rc not installed verbatim"; exit 1; }
+            rm -f /tmp/aic-smoke-rc-sourced /tmp/aic-smoke-p10k-sourced
+            zsh -lic true
+            [ -e /tmp/aic-smoke-rc-sourced ] && [ -e /tmp/aic-smoke-p10k-sourced ] \
+              || { echo "FAIL: overlay not sourced by login zsh"; exit 1; }
+            echo "OK: personal shell overlay is root-locked, verbatim, and sourced after baseline"
+          '
       - name: Smoke test - AI CLIs resolve (Codex is standalone, not npm)
         working-directory: /tmp/proj
         run: |

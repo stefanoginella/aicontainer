@@ -329,7 +329,7 @@ npm install -g <node-cli>
 These are **wiped on `aic destroy` or `aic rebuild`**. Fine for exploration; not for things your project depends on.
 
 > Note: `sudo` inside the container is scoped to three fixed-purpose wrappers
-> (`aic-chown-volumes`, `aic-lock-gitconfig`, `aic-firewall`) — bare
+> (`aic-chown-volumes`, `aic-lock-user-config`, `aic-firewall`) — bare
 > `apt-get`, `chown`, etc. are denied. To install apt packages, use a reviewed
 > project Dockerfile (below) and `aic rebuild`.
 
@@ -524,6 +524,34 @@ lefthook install
 ```
 
 The base `post-create.py` runs it last, after the AI tools, git config, and volume ownership are all wired up, so your steps see a fully configured environment. Like `firewall-allowlist` and `chown-paths`, it's opt-in (run only if present), never touched by `aic sync`, and read-only inside the container — the [PreToolUse hook](#threat-model) blocks an in-container tool from editing anything under `.devcontainer/`, so the script stays host-only-editable. It's invoked via `bash <file>` (no executable bit needed), runs with no privilege the in-container agent doesn't already have, and a non-zero exit is logged as a warning during `aic up` without failing container creation — its output streams through so you can see what happened.
+
+### Personal shell config
+
+Want your familiar zsh prompt and aliases inside the sandbox? The container's `~/.zshrc` is deliberately root-managed (so an in-container agent can't tamper with shell startup), so you don't edit it directly — you drop an **overlay** that's installed root-owned and **sourced last**, so your prompt/aliases win over the managed baseline (history, `fnm`, `PATH` still run first). zsh only.
+
+Two files, both opt-in by presence, both never touched by `aic sync`:
+
+- **`.devcontainer/shell-rc.zsh`** — personal zsh startup: aliases, functions, exports, prompt tweaks.
+- **`.devcontainer/p10k.zsh`** — a [powerlevel10k](https://github.com/romkatv/powerlevel10k) config (the output of `p10k configure`).
+
+```zsh
+# .devcontainer/shell-rc.zsh
+alias gs='git status'
+alias ll='ls -lah'
+export EDITOR=nvim
+```
+
+Prefer your **host** config instead of committing one per repo? Copy it into the aic-owned seed dir once and every project picks it up:
+
+```bash
+mkdir -p ~/.config/aicontainer
+cp ~/.p10k.zsh ~/.config/aicontainer/p10k.zsh     # your host p10k prompt
+cp ~/.zsh_aliases ~/.config/aicontainer/rc.zsh    # or any personal rc snippet
+```
+
+The host seed is read **read-only** by the seed sanitizer and copied verbatim; a project-owned `.devcontainer/` file wins over it when both exist. Run `aic sync` (host-side) then `aic rebuild`.
+
+> ⚠️ **These files are copied verbatim — they can't be sanitized like the JSON configs.** They're shell *code*, executed inside a sandbox an autonomous agent can read. **Don't put secrets in them** (no tokens, no `export API_KEY=…`). Keep them to prompt/alias cosmetics. They run only as the unprivileged `vscode` user and, once installed, are root-locked so the agent can't modify them.
 
 ### Project-specific VS Code extensions & settings
 

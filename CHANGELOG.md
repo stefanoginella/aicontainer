@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Bring your own zsh prompt and aliases into the sandbox.** New opt-in
+  project-owned `.devcontainer/shell-rc.zsh` and `p10k.zsh` (or a host
+  `~/.config/aicontainer/{rc,p10k}.zsh` seed) are installed root-owned and
+  sourced after the managed baseline, so a personal prompt wins while shell
+  startup stays root-managed. Copied verbatim — keep secrets out of them.
+
+### Changed
+
+- **The gitconfig installer now covers the personal shell overlay too.** The
+  `aic-lock-gitconfig` privileged helper is renamed `aic-lock-user-config` and
+  installs a fixed table of root-owned config files (the validated gitconfig
+  plus the optional verbatim shell overlay); the sudoers grant is renamed to
+  match.
+
 ## [0.6.1] - 2026-07-20
 
 ### Fixed

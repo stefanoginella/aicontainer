@@ -537,6 +537,37 @@ new_project "$TMP/mode"
 (cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
 [ ! -e "$TMP/mode/.devcontainer/Dockerfile" ] || fail "plain sync flipped back to build mode"
 
+# Personal shell overlay (opt-in): project-owned shell-rc.zsh / p10k.zsh are
+# never rewritten by sync, the host-seed sanitizer conduit is wired, the files
+# are control-boundary paths (no symlinks), and build mode ships the renamed
+# root-owned installer while a build->pull switch keeps the project-owned files.
+new_project "$TMP/overlay"
+printf 'alias ll="ls -la"\n' > "$TMP/overlay/.devcontainer/shell-rc.zsh"
+printf 'typeset -g POWERLEVEL9K_MODE=nerdfont-complete\n' > "$TMP/overlay/.devcontainer/p10k.zsh"
+(cd "$TMP/overlay" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+grep -q 'alias ll=' "$TMP/overlay/.devcontainer/shell-rc.zsh" \
+  || fail "sync clobbered project-owned shell-rc.zsh"
+grep -q 'POWERLEVEL9K_MODE' "$TMP/overlay/.devcontainer/p10k.zsh" \
+  || fail "sync clobbered project-owned p10k.zsh"
+grep -q '/raw-host-seed/aic-config:ro' "$TMP/overlay/.devcontainer/docker-compose.yml" \
+  || fail "sanitizer is missing the personal-overlay host-seed mount"
+rm "$TMP/overlay/.devcontainer/shell-rc.zsh"
+ln -s /etc/passwd "$TMP/overlay/.devcontainer/shell-rc.zsh"
+if (cd "$TMP/overlay" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1); then
+  fail "sync accepted a symlinked project-owned shell-rc.zsh"
+fi
+rm "$TMP/overlay/.devcontainer/shell-rc.zsh"
+(cd "$TMP/overlay" && AIC_HOME="$ROOT" "$ROOT/aic" sync --build >/dev/null)
+[ -f "$TMP/overlay/.devcontainer/aic-lock-user-config" ] \
+  || fail "build sync did not install aic-lock-user-config"
+[ ! -e "$TMP/overlay/.devcontainer/aic-lock-gitconfig" ] \
+  || fail "build sync installed the old aic-lock-gitconfig name"
+(cd "$TMP/overlay" && AIC_HOME="$ROOT" "$ROOT/aic" sync --pull >/dev/null)
+[ ! -e "$TMP/overlay/.devcontainer/aic-lock-user-config" ] \
+  || fail "pull sync left the build-mode installer behind"
+[ -f "$TMP/overlay/.devcontainer/p10k.zsh" ] \
+  || fail "pull sync removed the project-owned p10k.zsh"
+
 # Resolved-Compose validation inspects every service and aliases, not raw YAML
 # patterns only. Non-interactive startup must fail before devcontainer/Docker up.
 new_project "$TMP/unsafe"

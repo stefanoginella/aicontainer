@@ -123,8 +123,10 @@ ENV DEVCONTAINER=true
 ENV SHELL=/bin/zsh
 ENV EDITOR=nano
 ENV VISUAL=nano
-# The host p10k config is intentionally not sourced inside the sandbox. Avoid
-# an interactive first-shell wizard while keeping the managed theme defaults.
+# Host shell config is never auto-forwarded; only an explicit, opt-in personal
+# overlay installed root-owned at /etc/aic/user-config/shell is sourced (see the
+# personal-config overlay). Disable the interactive first-shell wizard while
+# keeping the managed theme defaults when no overlay p10k config is present.
 ENV POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true
 
 WORKDIR /workspace
@@ -132,21 +134,22 @@ WORKDIR /workspace
 # Scoped sudoers: every entry is a wrapper with hardcoded targets, so the
 # grant cannot be turned into arbitrary chown / file write. aic-firewall is
 # strengthen-only; aic-chown-volumes validates exact named-volume mountpoints;
-# aic-lock-gitconfig installs one fixed config. A bare `chown` here would let AI
-# `chown vscode /etc/sudoers.d/vscode` and escalate to root.
-RUN echo 'vscode ALL=(ALL) NOPASSWD: /usr/local/bin/aic-chown-volumes, /usr/local/bin/aic-lock-gitconfig, /usr/local/bin/aic-firewall' > /etc/sudoers.d/vscode \
+# aic-lock-user-config installs a fixed table of root-owned config files (the
+# validated gitconfig plus optional verbatim personal shell). A bare `chown`
+# here would let AI `chown vscode /etc/sudoers.d/vscode` and escalate to root.
+RUN echo 'vscode ALL=(ALL) NOPASSWD: /usr/local/bin/aic-chown-volumes, /usr/local/bin/aic-lock-user-config, /usr/local/bin/aic-firewall' > /etc/sudoers.d/vscode \
     && chmod 0440 /etc/sudoers.d/vscode
 
 # Privileged helper scripts. All root-owned and only callable via the scoped
 # sudoers entry above. aic-firewall is enable-only; aic-chown-volumes and
-# aic-lock-gitconfig operate on hardcoded paths.
-COPY aic-firewall aic-chown-volumes aic-lock-gitconfig /usr/local/bin/
+# aic-lock-user-config operate on hardcoded paths.
+COPY aic-firewall aic-chown-volumes aic-lock-user-config /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/aic-firewall \
                 /usr/local/bin/aic-chown-volumes \
-                /usr/local/bin/aic-lock-gitconfig \
+                /usr/local/bin/aic-lock-user-config \
     && chown root:root /usr/local/bin/aic-firewall \
                        /usr/local/bin/aic-chown-volumes \
-                       /usr/local/bin/aic-lock-gitconfig
+                       /usr/local/bin/aic-lock-user-config
 
 # ---------------------------------------------------------------------------
 # Hooks: root-owned, not writable by vscode (self-defense)
@@ -301,6 +304,8 @@ RUN sh -c "$(curl -fsSL https://github.com/deluan/zsh-in-docker/releases/downloa
       -a 'setopt SHARE_HISTORY' \
       -a 'export PATH="$FNM_DIR:$PATH"' \
       -a 'eval "$(fnm env --use-on-cd)"' \
+      -a '[[ ! -r /etc/aic/user-config/shell/p10k.zsh ]] || source /etc/aic/user-config/shell/p10k.zsh' \
+      -a '[[ ! -r /etc/aic/user-config/shell/rc.zsh ]] || source /etc/aic/user-config/shell/rc.zsh' \
       -x
 
 # Keep a root-owned reference copy alongside the generated managed startup file.
@@ -311,12 +316,14 @@ COPY .zshrc /etc/aic/shell/zshrc.reference
 # AIC_SHELL=bash|fish via `aic init`. Bash gets persistent history (shared
 # volume with zsh) and fnm on PATH; fish gets fnm on PATH. Managed startup
 # files live under root-owned system directories, not replaceable files in a
-# vscode-owned $HOME. Host rc/p10k code is deliberately never sourced.
+# vscode-owned $HOME. Raw host rc/p10k code is never auto-forwarded; only the
+# opt-in personal overlay (root-owned /etc/aic/user-config/shell, zsh only) is
+# sourced after this managed baseline.
 # ---------------------------------------------------------------------------
 USER root
 
 RUN install -d -o root -g root -m 0755 \
-      /etc/aic/shell/zsh /etc/aic/shell /etc/aic/user-config \
+      /etc/aic/shell/zsh /etc/aic/shell /etc/aic/user-config /etc/aic/user-config/shell \
     && mv /home/vscode/.zshrc /etc/aic/shell/zsh/.zshrc \
     && cp /home/vscode/.bashrc /etc/aic/shell/bashrc \
     && rm -f /home/vscode/.bashrc \
@@ -363,7 +370,7 @@ GITIGNORE_EOF
 RUN chown -R root:root /etc/aic/shell /etc/aic/user-config \
                        /etc/profile.d/aic-bash.sh /etc/fish/conf.d/aic.fish \
                        /etc/aic/gitignore \
-    && chmod 0755 /etc/aic/shell /etc/aic/shell/zsh /etc/aic/user-config \
+    && chmod 0755 /etc/aic/shell /etc/aic/shell/zsh /etc/aic/user-config /etc/aic/user-config/shell \
     && chmod 0444 /etc/aic/shell/zsh/.zshrc /etc/aic/shell/zshrc.reference \
                   /etc/aic/shell/bashrc /etc/profile.d/aic-bash.sh \
                   /etc/fish/conf.d/aic.fish /etc/aic/gitignore

@@ -185,6 +185,10 @@ services:
       - ${HOME}/.claude/settings.json:/raw-host-seed/claude-settings.json:ro
       - ${HOME}/.codex/config.toml:/raw-host-seed/codex-config.toml:ro
       - ${HOME}/.config/opencode/opencode.json:/raw-host-seed/opencode.json:ro
+      # Opt-in personal shell overlay: rc.zsh / p10k.zsh here are copied verbatim
+      # into the sanitized volume (they are code, not allowlist-sanitizable) and
+      # installed root-owned. Absent/empty -> nothing seeded (opt-in by presence).
+      - ${HOME}/.config/aicontainer:/raw-host-seed/aic-config:ro
       - aic-sanitized-seed:/sanitized-host-seed
 
   socket-proxy:

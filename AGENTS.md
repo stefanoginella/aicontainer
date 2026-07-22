@@ -19,7 +19,7 @@ it.
 - `template/` — copied into a project's `.devcontainer/` by `aic init`/`aic
   sync`; the source of truth for what lands in user repos.
   - `Dockerfile`, `post-create.py`, `hooks/`, `aic-firewall`,
-    `aic-chown-volumes`, `aic-lock-gitconfig`, `.zshrc`, `.gitignore`
+    `aic-chown-volumes`, `aic-lock-user-config`, `.zshrc`, `.gitignore`
   - `hooks/`: the shared guardrail `pre-tool-use.sh` plus
     `opencode-guardrail.js`, the thin OpenCode adapter — all copied root-owned
     to `/etc/aic/hooks/` and enforced for Claude, Codex, and OpenCode.
@@ -211,16 +211,22 @@ and template copies.
 ## Host seeds, tool homes, and reusable auth
 
 The unrestricted container must never see raw host Git/tool config. The
-`aic-seed-sanitizer` one-shot is the only service with the four fixed raw
-mounts (`~/.gitconfig`, Claude settings, Codex config, OpenCode config). It runs
-as root solely for foreign-UID `0600` reads, with no network/workspace/auth/
-sessions, read-only rootfs, `no-new-privileges`, `cap_drop: ALL` plus only
-`DAC_OVERRIDE`, a small PID limit, and fixed system-Python command. It writes
-four root-owned allowlisted JSON objects into the per-project sanitized volume,
-which the main container mounts RO. Sanitization recursively removes literal
+`aic-seed-sanitizer` one-shot is the only service with fixed raw mounts: the
+four config inputs (`~/.gitconfig`, Claude settings, Codex config, OpenCode
+config) plus the opt-in personal-overlay dir `~/.config/aicontainer` (see
+"Personal config overlay"). It runs as root solely for foreign-UID `0600`
+reads, with no network/workspace/auth/sessions, read-only rootfs,
+`no-new-privileges`, `cap_drop: ALL` plus only `DAC_OVERRIDE`, a small PID
+limit, and fixed system-Python command. It writes four root-owned allowlisted
+JSON objects into the per-project sanitized volume, which the main container
+mounts RO. Sanitization recursively removes literal
 env/header/auth/key/token/secret/password fields. Git uses a fixed safe-key
-list and `/usr/bin/git --no-includes`. Do not mount a raw input into main or
-make sanitizer failure soft.
+list and `/usr/bin/git --no-includes`. The personal overlay is the one
+exception to JSON sanitization: `rc.zsh`/`p10k.zsh` are **code**, copied
+verbatim (bounded, root-owned `0444`) into that same volume — never
+field-stripped, never merged into main's config, and only ever *sourced*
+(never executed by the sanitizer). Do not mount a raw input into main, add a
+non-JSON output beyond that overlay, or make sanitizer failure soft.
 
 All Claude/Codex/OpenCode config, memory, skills/plugins, prompt history, and
 sessions live in one path-unique `aic-sessions` volume below
@@ -272,9 +278,9 @@ wholesale on every `init`/`sync`; only `AIC_TOOLS`/`AIC_SHELL` survive
 Users must not hand-edit those two files — per-project tweaks go in the
 project-owned files `apply_template()` never touches: `Dockerfile.project`,
 `firewall-allowlist`, `chown-paths`, `post-create.project.sh`,
-`docker-compose.override.yml`, `vscode-extensions`, `vscode-settings.json`.
-All share one contract: **opt-in by file presence, survive sync, read-only
-inside the container.**
+`docker-compose.override.yml`, `vscode-extensions`, `vscode-settings.json`,
+`shell-rc.zsh`, `p10k.zsh`. All share one contract: **opt-in by file presence,
+survive sync, read-only inside the container.**
 
 **`docker-compose.override.yml`** — sync-safe home for anything that would
 otherwise live in `containerEnv` or the compose service (env, `extra_hosts`,
@@ -385,6 +391,38 @@ JSONC trailing comma is tolerated). Load-bearing, don't undo:
 
 Guarded by the "aic sync merges project-owned vscode-extensions /
 vscode-settings.json" test.
+
+**Personal config overlay** (`shell-rc.zsh`, `p10k.zsh`) — lets the trusted
+human bring a familiar zsh prompt/aliases into the sandbox. Two sources feed
+one overlay, project file winning: a project-owned `.devcontainer/shell-rc.zsh`
+/ `.devcontainer/p10k.zsh`, and the opt-in host seed `~/.config/aicontainer/{rc,
+p10k}.zsh` routed **verbatim** through `aic-seed-sanitizer` (the only place a
+raw host file is allowed; never mounted into main). `setup_personal_shell()`
+stages the winner; `aic-lock-user-config` installs it `root:root 0444` under
+`/etc/aic/user-config/shell/`; the baked `.zshrc` sources `p10k.zsh` then
+`rc.zsh` **after** the managed baseline, so a personal prompt wins while the
+managed history/fnm/PATH setup still runs first. Load-bearing, don't undo:
+
+1. **It is code, not data — it cannot be sanitized.** The bytes cross verbatim
+   into a sandbox the agent can read, so it is opt-in (by file presence) and
+   documented as "no secrets in these files." Never try to allowlist-"sanitize"
+   zsh; never widen this to auto-vacuum arbitrary host dotfiles (`~/.zshrc`,
+   `~/.p10k.zsh`) — only the aic-namespaced seed dir and the project files.
+2. **Root-locked, not a privilege grant.** It lands `root:root 0444` + create-
+   once so an agent can't tamper with it (preserving the "shell startup is
+   root-managed" guarantee), but its contents still execute only as `vscode`
+   when sourced — the same authority the agent already has, and the same risk
+   class as the already-accepted `post-create.project.sh`. Keep the install on
+   the shared `aic-lock-user-config` path; don't add a writable-in-`$HOME` rc.
+3. **zsh only.** p10k and the `source` lines live in the managed `.zshrc`;
+   bash/fish keep the managed baseline unchanged. Don't source zsh syntax from
+   the bash/fish startup files.
+4. The files are control-boundary paths (in `AIC_CONTROL_FILES`): real files,
+   never symlinks. Keep them out of `apply_template()`'s copy/rewrite/remove
+   lists so sync never clobbers them.
+
+Guarded by the personal-shell-overlay assertions in the host-security test (and
+the runtime shell-lock smoke).
 
 **AI-tool refresh on every create.** `refresh_ai_tools()` runs early in
 `main()` and floats Claude Code + Codex + OpenCode to latest on every
@@ -645,20 +683,27 @@ Review any change to these files for security regressions:
   (single source of truth); the shim only maps + dispatches. Don't add a
   second native `permission` deny that could diverge. Guarded by the
   "opencode guardrail blocks a .env read" test.
-- `template/aic-chown-volumes`, `template/aic-lock-gitconfig` — the only
+- `template/aic-chown-volumes`, `template/aic-lock-user-config` — the only
   non-firewall scripts allowed via `NOPASSWD`; both use privileged/interpreter
   modes, fixed PATH/env, umask, and hardcoded inputs/destinations.
   `aic-chown-volumes` never accepts target argv. Besides the path prefix, it
   verifies canonical exact mountpoints against the current container through
   `/run/aic-host/docker.sock`, uses GET only with curl config/proxies disabled,
   and accepts only option-free local named volumes before `chown -h -R`.
-  `aic-lock-gitconfig` runs `/usr/bin/python3 -I`, opens the one fixed
-  `vscode`-owned staging inode without following links, parses it with Git
-  `--no-includes` under a minimal env, allows only fixed safe keys/exact aic
-  values, and atomically creates (never replaces)
-  `/etc/aic/user-config/gitconfig` as `root:root 0444`. Do not turn either into
-  a general copy/chown/config installer. Guarded by the dedicated tests plus
-  runtime smoke.
+  `aic-lock-user-config` runs `/usr/bin/python3 -I` and installs a fixed
+  `TARGETS` table, never argv: it opens each `vscode`-owned staging inode
+  without following links and atomically creates (never replaces) a
+  `root:root 0444` destination under `/etc/aic/user-config/`. The **required**
+  `gitconfig` target is parsed with Git `--no-includes` under a minimal env and
+  allows only fixed safe keys/exact aic values. The **optional** personal-shell
+  targets (`shell/rc.zsh`, `shell/p10k.zsh`) are installed **without** content
+  validation — zsh can't be allowlisted — which is safe only because the bytes
+  come from the trusted human staged before any agent runs, the file lands
+  root-locked so an agent can't tamper with it, and its contents still execute
+  only as `vscode`. Do not add a content-bearing target without a validator
+  unless all three hold, and do not turn either helper into a general
+  copy/chown/config installer. Guarded by the dedicated tests plus runtime
+  smoke. See "Personal config overlay".
 - `.github/workflows/*.yml` — GHCR uses job-scoped `GITHUB_TOKEN` package
   permission; npm uses OIDC trusted publishing + provenance, not a long-lived
   npm token. Publishing jobs run only on push/schedule/dispatch, never PR;
