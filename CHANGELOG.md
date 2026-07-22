@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-22
+
 ### Added
 
 - **Bring your own zsh prompt and aliases into the sandbox.** New opt-in
@@ -582,7 +584,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Initial release: a sandboxed devcontainer for Claude Code and Codex.** Runs
   them in bypass / auto-approve mode.
 
-[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/stefanoginella/aicontainer/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/stefanoginella/aicontainer/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/stefanoginella/aicontainer/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/stefanoginella/aicontainer/compare/v0.4.3...v0.5.0
