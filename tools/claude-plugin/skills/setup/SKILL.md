@@ -1,5 +1,4 @@
 ---
-name: aicontainer-setup
 description: "Manual setup of aicontainer (the sandboxed devcontainer for running AI coding agents in bypass/auto-approve mode) in a project."
 disable-model-invocation: true
 ---

@@ -228,7 +228,7 @@ You can still use `aic` from a separate terminal at the same time — `aic rebui
 Wiring aicontainer to a specific project is a handful of project-owned files — an
 LSP server on `PATH`, a writable `.venv` volume, a `Dockerfile.project` for
 Playwright, host-service env (see [Per-project overrides](#per-project-overrides-that-survive-aic-sync)).
-The optional **aicontainer-setup** Claude Code plugin does that conversationally:
+The optional **aicontainer** Claude Code plugin does that conversationally:
 it detects your stack, checks whether a headless Linux devcontainer even fits,
 then proposes and writes those files for you — and offers to install the `aic`
 CLI first if it's missing. It also handles re-setup, auditing an existing
@@ -239,14 +239,14 @@ Install it from inside Claude Code:
 
 ```text
 /plugin marketplace add stefanoginella/claude-code-plugins
-/plugin install aicontainer-setup@stefanoginella-plugins
+/plugin install aicontainer@stefanoginella-plugins
 ```
 
 Then run it from a Claude Code session **on your host** — not inside the sandbox,
 which mounts `.devcontainer/` read-only:
 
 ```text
-/aicontainer-setup
+/aicontainer:setup
 ```
 
 It shows you the plan, writes the files once you approve, and stops *before*
@@ -256,7 +256,7 @@ yourself.
 Uninstall the plugin and drop the marketplace:
 
 ```text
-/plugin uninstall aicontainer-setup@stefanoginella-plugins
+/plugin uninstall aicontainer@stefanoginella-plugins
 /plugin marketplace remove stefanoginella-plugins
 ```
 
