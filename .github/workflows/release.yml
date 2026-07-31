@@ -1214,17 +1214,46 @@ jobs:
         env:
           TAG_VERSION: ${{ steps.ver.outputs.v }}
           GHCR_VERSION_IDENTITY: ${{ steps.ghcr_version.outputs.identity }}
+          NPM_VERSION_EXISTS: ${{ steps.npm_version.outputs.exists }}
+          NPM_PUBLISHED_TAG: ${{ steps.npm_tag.outputs.tag }}
         run: |
           set -euo pipefail
           package=$(node -p "require('./package.json').name")
-          npm_latest=$(npm view "$package" dist-tags.latest --json \
-            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)||""))')
-          if [ "$npm_latest" != "$TAG_VERSION" ]; then
-            echo "is_latest=false" >> "$GITHUB_OUTPUT"
-            echo "npm latest is $npm_latest; leaving GHCR :latest unchanged."
+
+          # Never read `latest` back from the registry right after publishing:
+          # npm's read path is CDN-cached, so `npm view` keeps reporting the
+          # previous version for a while after a successful publish. Trusting it
+          # here left both GHCR `:latest` and the GitHub Release `Latest` badge
+          # stuck on an old version. When this run published, the dist-tag it
+          # used is authoritative — "Choose npm dist-tag" already did the
+          # conservative semver comparison against the registry. Only a recovery
+          # rerun that published nothing has to ask, and it races nothing.
+          if [ "$NPM_VERSION_EXISTS" != true ]; then
+            if [ "$NPM_PUBLISHED_TAG" = latest ]; then
+              is_latest=true
+              reason="published v${TAG_VERSION} as npm latest"
+            else
+              is_latest=false
+              reason="published v${TAG_VERSION} with npm dist-tag '$NPM_PUBLISHED_TAG'"
+            fi
+          else
+            npm_latest=$(npm view "$package" dist-tags.latest --json \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)||""))')
+            if [ "$npm_latest" = "$TAG_VERSION" ]; then
+              is_latest=true
+              reason="npm latest is already v${TAG_VERSION}"
+            else
+              is_latest=false
+              reason="npm latest is $npm_latest"
+            fi
+          fi
+
+          echo "is_latest=$is_latest" >> "$GITHUB_OUTPUT"
+          if [ "$is_latest" != true ]; then
+            echo "$reason; leaving GHCR :latest unchanged."
             exit 0
           fi
-          echo "is_latest=true" >> "$GITHUB_OUTPUT"
+          echo "$reason."
 
           # A matching historical npm tarball lets an unannotated GHCR tag be
           # preserved for an idempotent rerun, but it does not prove the image

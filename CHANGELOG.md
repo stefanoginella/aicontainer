@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Releases are marked "Latest" again on GitHub and GHCR.** The release
+  workflow read npm's `latest` dist-tag back seconds after publishing it, and
+  npm's CDN-cached read path still reported the previous version — so every
+  release since 0.6.0 left the badge and the floating `:latest` alias behind.
+  The tag the run published with is now authoritative (`release.yml`).
+
 ## [0.8.0] - 2026-07-31
 
 ### Added
