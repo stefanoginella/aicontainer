@@ -1019,7 +1019,7 @@ jobs:
       # Check npm before GHCR so an old, unannotated image tag can be treated
       # as a complete historical release only when its immutable npm tarball
       # independently proves that this exact tag was already published.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
