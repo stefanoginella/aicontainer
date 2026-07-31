@@ -17,6 +17,11 @@ actually usable for the project — a Python repo needs a writable `.venv`, an
 agent that uses go-to-definition needs a language server on `PATH`, a Postgres
 app needs the DB reachable. That per-project wiring is the work here.
 
+The other half is the *person*: their tool settings, prompt, aliases, and
+statusline. Some of that is seeded automatically, some is deliberately dropped,
+and some needs an explicit opt-in they'd never guess at. Step 6 walks them
+through it — a sandbox the user can't stand working in doesn't get used.
+
 ## Golden rules (read first — they shape everything below)
 
 These come straight from how aicontainer is designed; violating them creates work
@@ -35,7 +40,8 @@ that silently gets wiped or breaks `aic sync`.
 - **All customization lives in project-owned files** that `aic sync` never
   touches: `Dockerfile.project`, `docker-compose.override.yml`, `chown-paths`,
   `post-create.project.sh`, `vscode-extensions`, `vscode-settings.json`,
-  `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`. These are opt-in by presence.
+  `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`, `statusline.{sh,mjs,js,py}`.
+  These are opt-in by presence.
 - **`aic rebuild` is the verb that builds — `aic up` is not.** `aic up` runs a
   plain `devcontainer up`, and the managed pull-mode Compose sets
   `pull_policy: missing`: when the resolved image tag is already cached, Compose
@@ -52,12 +58,12 @@ that silently gets wiped or breaks `aic sync`.
   tool. Hand it to them; never route around it with `--allow-unsafe`. Trust
   binds to an exact config hash, so **any** later edit to
   `docker-compose.override.yml` or `Dockerfile.project` revokes it — settle the
-  config completely before you ask (Step 7).
+  config completely before you ask (Step 8).
 - **Show the plan, then apply.** Detect and confirm first, present the full plan,
   get a yes, then write files and run `aic init` / `aic sync`. **Confirm before
   the first boot** — it pulls or builds a multi-gigabyte image and can take
   minutes — but once the user says go, drive it yourself: verify the container
-  actually boots and fix what's broken (Step 8). Don't just hand back a command
+  actually boots and fix what's broken (Step 9). Don't just hand back a command
   and hope.
 
 ## Step 0 — Preconditions
@@ -89,7 +95,7 @@ Before anything, confirm the ground is solid:
      `aic` still isn't found, stop and surface the error; don't push ahead into
      the steps below.
 4. **Is Docker running?** `docker info` should succeed (Docker Desktop / OrbStack
-   / Colima). Setup can still proceed without it, but Step 8's boot verification
+   / Colima). Setup can still proceed without it, but Step 9's boot verification
    (and `aic up` generally) will need it — note it rather than blocking.
 5. **Is there already an aic setup here?** If `.devcontainer/devcontainer.json`
    exists and references aicontainer (the GHCR image or `AIC_TOOLS`), this is a
@@ -98,7 +104,7 @@ Before anything, confirm the ground is solid:
    Still read the README (Step 1) and re-detect/confirm the stack (Steps 2–3),
    then follow "Update mode" below instead of the greenfield Step 5. (If no
    `.devcontainer/` exists, it's a fresh setup — continue straight through
-   Steps 1–9.) A missing `.devcontainer/` still isn't proof of a clean slate: a
+   Steps 1–10.) A missing `.devcontainer/` still isn't proof of a clean slate: a
    repo set up under an older aic can leave a stale legacy Docker volume/stack
    that `aic up` migrates automatically (`aic: migrating legacy session
    transcripts …`). That's expected, not an error — don't treat it as a failure.
@@ -127,17 +133,23 @@ stack profile (Steps 2–3) first, then:
 1. **Inventory what's already there.** List which project-owned files exist and
    **read their contents**: `Dockerfile.project`, `docker-compose.override.yml`,
    `chown-paths`, `post-create.project.sh`, `vscode-extensions`,
-   `vscode-settings.json`, `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`. Also
+   `vscode-settings.json`, `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`,
+   `statusline.{sh,mjs,js,py}`. Also
    note the current `AIC_TOOLS` / `AIC_SHELL` in `devcontainer.json` (the only
-   managed values that survive `aic sync`), and whether a host-global overlay
-   already exists at `~/.config/aicontainer/{rc,p10k}.zsh`. This is your
-   baseline — what's already covered.
+   managed values that survive `aic sync`), and which host-global overlays
+   already exist at `~/.config/aicontainer/` (`rc.zsh`, `p10k.zsh`,
+   `statusline.*`). This is your baseline — what's already covered.
 2. **Compute the delta against the refreshed stack — look for three things:**
    - **Missing coverage** — a stack fact with no matching personalization: a new
      language with no LSP server in `post-create.project.sh` and no editor
      extension; a Python project with no writable `.venv` volume; a newly-added
      Postgres/Redis service not wired in `docker-compose.override.yml`;
      Playwright/Chromium added with no `Dockerfile.project`.
+   - **Missing personalization** — the user's environment, not the stack: no
+     shell/prompt overlay and no statusline while their host has them (Step 6),
+     or a statusline copied into the seed dir that has since drifted from the
+     host original. An existing setup predating a slot won't have it; offer it
+     rather than assuming they declined.
    - **Stale / incorrect entries** — personalization that no longer matches: a
      `chown-paths` line for a volume that's no longer declared; a
      `vscode-settings.json` interpreter path that no longer exists; an LSP install
@@ -151,11 +163,11 @@ stack profile (Steps 2–3) first, then:
 3. **If nothing is missing, stale, or drifted, say so and stop.** "Your
    personalization already matches your stack; nothing to update" is a valid,
    useful outcome — don't invent changes to look busy.
-4. **Otherwise present only the delta (Step 6) and apply it (Step 7).** Write the
+4. **Otherwise present only the delta (Step 7) and apply it (Step 8).** Write the
    new/changed project-owned files, leave correct existing ones untouched, then
    run `aic sync` (the re-setup verb) so override wiring and the
    `vscode-extensions` / `vscode-settings.json` merges refresh. Then move to
-   Step 8 to confirm the refreshed setup actually boots — an update that
+   Step 9 to confirm the refreshed setup actually boots — an update that
    "should" fix a gap isn't done until you've watched it come up clean.
 
 ## Step 1 — Read the current aicontainer README
@@ -309,16 +321,10 @@ Step 1; rationale and the LSP-by-language table: `references/stack-and-suitabili
 - **`firewall-allowlist`** — only if the user wants the stricter opt-in network
   allowlist (reviewing untrusted code, corporate LAN). Off by default; mention it,
   don't impose it.
-- **`shell-rc.zsh` / `p10k.zsh` (personal shell overlay)** — the user's own zsh
-  prompt/aliases inside the sandbox (zsh only); two independent slots, opt-in by
-  presence. Two sources, project winning: the project-owned
-  `.devcontainer/{shell-rc.zsh,p10k.zsh}` (per-project), or the host-global seed
-  `~/.config/aicontainer/{rc,p10k}.zsh` (every project on the machine). It is
-  **code, not data** — it crosses into the sandbox **verbatim** (it can't be
-  sanitized) and the in-container agent can read it, so **no secrets, ever**. The
-  host's real `~/.zshrc` / `~/.p10k.zsh` are **never** auto-forwarded. If the user
-  wants their prompt in the sandbox, don't hand-wave it — use the offer in
-  "Personal shell overlay — offer to draft a safe version" below.
+- **Personal overlays (`shell-rc.zsh`, `p10k.zsh`, `statusline.*`)** — the user's
+  own prompt, aliases, and Claude statusline inside the sandbox. These are
+  *personalization*, not stack mapping, and they're the piece users most often
+  assume happens automatically. Handle them in **Step 6**, not here.
 
 **LSP is a first-class concern** (the user cares about it). Make explicit that
 there are *two* LSP surfaces: the **editor's** IntelliSense (extensions +
@@ -326,16 +332,92 @@ settings) and the **agent's** LSP tool (a language-server binary on `PATH`,
 installed from `post-create.project.sh`). A project usually wants both. See the
 references table for the binary + extension per language.
 
-### Personal shell overlay — offer to draft a safe version (optional)
+## Step 6 — Port the user's host config and preferences
 
-Most users who want "my shell inside the sandbox" have a host `~/.p10k.zsh` /
-`~/.zshrc` and reasonably expect them to appear. They don't: aicontainer never
-auto-forwards host dotfiles — they routinely hold secrets and host-specific
+A sandbox that builds the project but feels alien to work in is a half-done
+setup. This step closes the gap between "the container runs" and "it's *my*
+environment." Do it for fresh setups and update-mode runs alike.
+
+Lead with what's already handled — most users assume nothing carries over, and
+that's wrong. **Don't re-explain the whole boundary; tell them what to *do*.**
+
+### 6.1 — Already automatic: nothing to do but keep it current
+
+Before every `aic up`/`rebuild`, a root-only, networkless one-shot sanitizer
+reads four fixed host files and emits allowlisted JSON the container consumes
+read-only. The user edits these **on the host** and re-runs `aic rebuild`:
+
+| Host file | Carries over |
+| --- | --- |
+| `~/.claude/settings.json` | model, effort, editor mode, theme, plugins/marketplaces, MCP servers, verbosity… |
+| `~/.codex/config.toml` | model, reasoning effort, personality, `[mcp_servers.*]`, `[projects.*]` |
+| `~/.config/opencode/opencode.json` | provider/model, agents, instructions, theme, keybinds, formatter, lsp, mcp |
+| `~/.gitconfig` | identity + non-executable workflow prefs (pull/push/rebase/diff/merge) |
+
+### 6.2 — Deliberately dropped: say so before they hunt for it
+
+Not bugs — the allowlist exists because these either defeat the sandbox or carry
+host-only paths/secrets. State the *replacement*, not just the removal:
+
+- **`permissions`, `hooks`, Codex `approval_policy` / `sandbox_mode`** — the
+  container enforces its own at root-managed precedence. That's the whole point.
+- **`env` blocks, inline MCP `env`/`headers`, API keys/tokens** — never
+  forwarded. Replacement: log in **inside** the container once (`claude`,
+  `codex`, `opencode auth login`, `gh auth login`, `npm login`); credentials
+  persist in a global volume across rebuilds and projects.
+- **`statusLine`** — a command string pointing at a host path. Replacement: the
+  statusline overlay in 6.3.
+- **Git `credential.helper`, aliases, `include`/`includeIf`, `core.hooksPath`,
+  signing key paths** — command/path-bearing. Replacement for signing: `aic
+  signing` provisions a sandbox-only key (the host key is never forwarded).
+- **Host `~/.zshrc` / `~/.p10k.zsh`** — never auto-forwarded. Replacement: 6.3.
+- **MCP servers pointing at host-only binaries** will be seeded but fail to
+  start in Linux; URL-based and npm-installed ones work. Worth naming if the
+  user has any, so a startup error later isn't a mystery.
+
+### 6.3 — The opt-in overlays: offer to set them up
+
+Three independent slots, all **opt-in by file presence**, all surviving `aic
+sync`, each available host-globally (once, every project) or per-project:
+
+| What | Host-global seed | Project file |
+| --- | --- | --- |
+| zsh startup (aliases, functions, exports) | `~/.config/aicontainer/rc.zsh` | `.devcontainer/shell-rc.zsh` |
+| powerlevel10k prompt | `~/.config/aicontainer/p10k.zsh` | `.devcontainer/p10k.zsh` |
+| Claude Code statusline | `~/.config/aicontainer/statusline.{sh,mjs,js,py}` | `.devcontainer/statusline.{sh,mjs,js,py}` |
+
+Mind the **filename asymmetry**: the shell rc is `rc.zsh` host-side but
+`shell-rc.zsh` project-side. `p10k.zsh` and `statusline.*` use the same name in
+both places. The project file wins when both exist. All take effect on the next
+`aic rebuild`.
+
+The statusline slot is the script only — aicontainer supplies the command
+(`/usr/local/bin/aic-statusline`, a fixed launcher) and picks the interpreter
+from the **extension**: `.sh`→bash, `.mjs`/`.js`→node, `.py`→python3. So:
+
+- **One self-contained file.** A statusline that `import`s sibling modules
+  breaks; vendor it or pick a different one. Its own state under
+  `~/.claude/statusline/` is writable and per-project, so caches work.
+- Anything it shells out to must exist in the container (`git` does; host-only
+  binaries don't).
+- **Best host setup:** keep the real script *at* `~/.config/aicontainer/statusline.mjs`
+  and point the host `~/.claude/settings.json` there too — one file, no drift.
+  Otherwise it's a copy that will go stale; say so.
+
+> ⚠️ All three are **code, not data**: they cross **verbatim** (they can't be
+> sanitized) and the in-container agent can read them. **No secrets, ever** — and
+> flag that host paths/usernames baked into them become visible in the sandbox.
+> They land root-owned `0444`, so once installed the agent can't modify them, and
+> they run only as the unprivileged `vscode` user.
+
+### 6.4 — Offer to draft the overlays from their host files (optional)
+
+Users who want "my shell/statusline inside the sandbox" usually already have a
+host `~/.p10k.zsh`, `~/.zshrc`, or statusline script and reasonably expect them
+to appear. They don't — host dotfiles routinely hold secrets and host-specific
 breakage, and this sandbox runs an untrusted agent that can read whatever is
-mounted. The overlay reads only the aic-namespaced seed or the project files
-(see the overlay bullet above). So *offer to bridge that gap*: **draft** the
-overlay from their host dotfiles — an assisted, reviewed draft, never a silent
-transform.
+mounted. So *offer to bridge that gap*: **draft** the overlay from their host
+files — an assisted, reviewed draft, never a silent transform.
 
 This is safe to do here because *you* run on the **host**, as the user's
 permissioned session — a different trust context from the sandboxed
@@ -346,7 +428,9 @@ drafted file.
 
 When the user opts in:
 
-1. **Read the host files** (`~/.p10k.zsh`, `~/.zshrc`) host-side.
+1. **Read the host files** host-side — `~/.p10k.zsh`, `~/.zshrc`, and the script
+   named by their host `statusLine.command` (parse the path out of
+   `~/.claude/settings.json`; don't guess a location).
 2. **`p10k.zsh` — near-verbatim.** Almost always `p10k configure` output:
    declarative `typeset -g POWERLEVEL9K_*`, no secrets. Copy it, but **scan** for
    the unusual — custom segment functions that shell out, hardcoded host paths,
@@ -357,26 +441,32 @@ When the user opts in:
    `source`d secret/env files, plugin managers and `eval "$(tool init)"` for
    tools not in the sandbox, aliases to host-only binaries. **When in doubt,
    leave it out.**
-4. **Be honest about the two distinct risks when you present it.** You are
+4. **`statusline.*` — copy whole, then audit.** Unlike an rc file you can't
+   extract "the safe half" of a program, so it's all-or-nothing: read the whole
+   script and report what would break or leak — a hardcoded host path, a
+   host-only binary it shells out to, an API token, a network call, a sibling
+   `import`. If any of those are present, say so and let the user decide between
+   fixing the script, dropping the slot, or accepting it.
+5. **Be honest about the two distinct risks when you present it.** You are
    *reliable* at avoiding breakage ("this sources oh-my-zsh at a host path —
    dropped"); you *assist but cannot certify* secret removal. Never say "I
    sanitized your config" — say "here's a lean draft; review it and confirm there
    are no secrets."
-5. **Show a kept / dropped-with-reason summary** per file and fold the candidates
-   into the Step 6 plan. Require an explicit yes — this is content pulled from the
+6. **Show a kept / dropped-with-reason summary** per file and fold the candidates
+   into the Step 7 plan. Require an explicit yes — this is content pulled from the
    user's private files, so it gets its own focused look, not a blanket approval.
-6. **On approval, write** to `~/.config/aicontainer/` (host-global — one prompt
+7. **On approval, write** to `~/.config/aicontainer/` (host-global — one setup
    for every project) or `.devcontainer/` (this project only), as the user
-   prefers. **Mind the filename asymmetry:** the host seed is `rc.zsh` /
-   `p10k.zsh`; the project files are `shell-rc.zsh` / `p10k.zsh`. It takes effect
-   on the next `aic rebuild` (zsh sources it *after* the managed baseline, so a
-   personal prompt wins).
+   prefers, using the filenames in 6.3's table.
 
 If the user declines, or you can't confidently produce a clean draft, fall back
-to the manual path: they create `~/.config/aicontainer/p10k.zsh` (and optionally
-`rc.zsh`) by hand — no secrets — then `aic rebuild`.
+to the manual path: they place the files by hand — no secrets — then `aic
+rebuild`. Either way, verify the result in Step 9 (`aic run test -r
+/etc/aic/user-config/statusline/statusline.mjs`, `aic run
+/usr/local/bin/aic-statusline`, or a login `zsh -lic true`) rather than assuming
+it landed.
 
-## Step 6 — Present the plan
+## Step 7 — Present the plan
 
 Show the user, before touching anything:
 
@@ -384,17 +474,22 @@ Show the user, before touching anything:
 2. The `aic init` invocation (with `--with` / `--shell`).
 3. Each project-owned file you'll create, **with its contents**, and one line on
    *why* (which stack fact drives it).
-4. **Whether this plan will need `aic trust`, stated up front** — name the
+4. **The Step 6 personalization**, called out separately from the stack wiring —
+   what carries over untouched, what is deliberately dropped and what replaces
+   it, and any overlay file you drafted (kept/dropped summary, its own explicit
+   yes). Say plainly where each overlay lands: host-global `~/.config/aicontainer/`
+   or this project's `.devcontainer/`.
+5. **Whether this plan will need `aic trust`, stated up front** — name the
    finding it will produce (almost always the `Dockerfile.project` root build)
    and that they'll run one command in their own terminal at a known point. A
    user who meets the gate only when the build stops thinks setup broke.
-5. That you'll offer to verify the setup boots — `aic rebuild` when there's a
+6. That you'll offer to verify the setup boots — `aic rebuild` when there's a
    `Dockerfile.project`, plain `aic up` otherwise — watched to completion and
    fixed if broken, pending their okay since it's a multi-gigabyte pull/build.
 
 Get an explicit yes. If they want changes, fold them in and re-show.
 
-## Step 7 — Apply
+## Step 8 — Apply
 
 Order matters (so the override gets wired into `dockerComposeFile`):
 
@@ -434,10 +529,10 @@ Order matters (so the override gets wired into `dockerComposeFile`):
    landed. Do not pass `--allow-unsafe`, and do not edit any project-owned file
    after they approve without telling them it needs re-approval.
 
-Config is on disk and trusted now, but not yet proven to work. Move to Step 8
+Config is on disk and trusted now, but not yet proven to work. Move to Step 9
 before calling this done.
 
-## Step 8 — Verify it boots
+## Step 9 — Verify it boots
 
 Writing the files isn't the job — a sandbox the project can't actually start in
 isn't done. Prove it boots and that Step 5's customization took effect before
@@ -451,7 +546,7 @@ reporting success.
    it as-is — anything that must re-run (a changed `post-create.project.sh`, a
    new named volume, a rebuilt image) needs `aic rebuild` too. If they'd rather
    run it themselves, or Step 0 flagged Docker isn't running, skip straight to
-   Step 9 and hand off the commands instead.
+   Step 10 and hand off the commands instead.
 2. **Run it unpiped and read the whole output.** `aic up 2>&1 | tail -60` returns
    `tail`'s exit status, so a config aic *refused* reads as a clean exit-0
    success. Capture the full output (background it if it's long) and actually
@@ -461,7 +556,7 @@ reporting success.
 3. **If it fails, fix it — don't punt a broken container to the user.** Read the
    actual error, then match it to the likely project-owned file:
    - `unsafe configuration is not trusted` → the config changed since the user
-     approved it (or was never approved). Back to Step 7's items 5–7: validate,
+     approved it (or was never approved). Back to Step 8's items 5–7: validate,
      settle, re-ask. Never `--allow-unsafe`.
    - Boots fine but every baked tool is missing and the named volumes aren't
      writable → the build never ran. You used `aic up` where a
@@ -494,6 +589,14 @@ reporting success.
    - Named volume writable: `aic run test -w /workspace/.venv && echo ok`.
    - Host service reachable: `aic run curl -sS host.docker.internal:5432` (or
      whatever the stack needs).
+   - **Step 6 overlays landed** (only for slots the plan actually filled):
+     `aic run ls -l /etc/aic/user-config/shell /etc/aic/user-config/statusline`
+     should show `root … 444` files. Then prove they *run*: `aic run
+     /usr/local/bin/aic-statusline` should print a status line (a silent exit
+     means nothing was installed; an error is the script's own), and `aic run
+     zsh -lic 'alias'` should show a personal alias. If a slot is empty, the
+     usual cause is a filename typo — `rc.zsh` vs `shell-rc.zsh`, or an
+     extension outside `{sh,mjs,js,py}`.
    - `aic preflight` to confirm the trust boundary (firewall mode, mounts)
      matches the plan.
    `aic run` proves the **agent** LSP (binary on `PATH`), volumes, and services —
@@ -506,14 +609,14 @@ reporting success.
    up if they are.
 
 If verification genuinely isn't possible (no Docker, offline, user declined),
-say so plainly and fall back to the Step 9 handoff.
+say so plainly and fall back to the Step 10 handoff.
 
-## Step 9 — Hand off
+## Step 10 — Hand off
 
 Tell the user what to run next and how to confirm it worked. This differs a
-little depending on whether Step 8 ran:
+little depending on whether Step 9 ran:
 
-- **If Step 8 verified it:** say so, state whether it's still up or you ran
+- **If Step 9 verified it:** say so, state whether it's still up or you ran
   `aic down`, and give them the resume path — `aic shell` (or `aic up` again
   if stopped), then `claude` / `codex` / `opencode`.
 - **If verification was skipped or declined:** hand off the full CLI path, in
@@ -526,6 +629,11 @@ little depending on whether Step 8 ran:
 - **Mention if relevant:** `aic preflight` to re-print the trust boundary;
   `aic signing` if they sign commits (the host signing key isn't forwarded);
   the firewall opt-in for stricter network containment.
+- **If Step 6 left anything for them:** the one-time logins they'll do inside
+  the container (`claude` / `codex` / `opencode auth login`, `gh auth login`),
+  and — for host-global overlays they placed by hand — that editing
+  `~/.config/aicontainer/*` or their host config files takes effect on the next
+  `aic rebuild`, in this project and every other one.
 
 Keep the handoff concrete — these are copy-pasteable commands, not prose.
 

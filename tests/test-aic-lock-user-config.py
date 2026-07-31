@@ -100,6 +100,31 @@ class TargetTableContractTests(unittest.TestCase):
             self.assertIsNone(t.validator, f"{dest_name} must have no content validator")
             self.assertEqual(t.staging.as_posix(), staging)
 
+    def test_statusline_targets_are_optional_unvalidated_and_scoped(self) -> None:
+        """The statusline slot is a FIXED per-extension table, not a discovered
+        set: the destination filename is what tells /usr/local/bin/aic-statusline
+        which interpreter to use, so a new extension must be added deliberately
+        here (and to the launcher) rather than inferred at runtime."""
+        table = self.by_dest()
+        for dest_name, staging in (
+            ("statusline.sh", "/home/vscode/.aic-statusline-sh.staging"),
+            ("statusline.mjs", "/home/vscode/.aic-statusline-mjs.staging"),
+            ("statusline.js", "/home/vscode/.aic-statusline-js.staging"),
+            ("statusline.py", "/home/vscode/.aic-statusline-py.staging"),
+        ):
+            t = table[("/etc/aic/user-config/statusline", dest_name)]
+            self.assertFalse(t.required, f"{dest_name} must be optional")
+            self.assertIsNone(t.validator, f"{dest_name} must have no content validator")
+            self.assertEqual(t.staging.as_posix(), staging)
+
+    def test_staging_paths_are_unique_hardcoded_home_files(self) -> None:
+        """Two targets sharing a staging path would let one overlay's bytes land
+        at another's destination."""
+        staging = [t.staging.as_posix() for t in LOCK.TARGETS]
+        self.assertEqual(len(staging), len(set(staging)), "duplicate staging path")
+        for path in staging:
+            self.assertTrue(path.startswith("/home/vscode/."), path)
+
     def test_every_destination_is_under_the_root_owned_user_config_dir(self) -> None:
         for t in LOCK.TARGETS:
             self.assertTrue(

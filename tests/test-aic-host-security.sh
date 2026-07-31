@@ -568,6 +568,25 @@ rm "$TMP/overlay/.devcontainer/shell-rc.zsh"
 [ -f "$TMP/overlay/.devcontainer/p10k.zsh" ] \
   || fail "pull sync removed the project-owned p10k.zsh"
 
+# Personal statusline overlay (opt-in, Claude Code): every supported extension is
+# a project-owned control-boundary path — survives sync, never a symlink. The
+# host statusLine command itself is never seeded; only this file crosses.
+new_project "$TMP/statusline"
+for ext in sh mjs js py; do
+  printf '# aic statusline %s\n' "$ext" > "$TMP/statusline/.devcontainer/statusline.$ext"
+done
+(cd "$TMP/statusline" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+for ext in sh mjs js py; do
+  grep -q "aic statusline $ext" "$TMP/statusline/.devcontainer/statusline.$ext" \
+    || fail "sync clobbered project-owned statusline.$ext"
+  rm "$TMP/statusline/.devcontainer/statusline.$ext"
+  ln -s /etc/passwd "$TMP/statusline/.devcontainer/statusline.$ext"
+  if (cd "$TMP/statusline" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1); then
+    fail "sync accepted a symlinked project-owned statusline.$ext"
+  fi
+  rm "$TMP/statusline/.devcontainer/statusline.$ext"
+done
+
 # Resolved-Compose validation inspects every service and aliases, not raw YAML
 # patterns only. Non-interactive startup must fail before devcontainer/Docker up.
 new_project "$TMP/unsafe"

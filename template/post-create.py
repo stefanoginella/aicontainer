@@ -62,6 +62,9 @@ GITCONFIG_STAGING = HOME / ".aic-gitconfig.staging"
 GITCONFIG_MANAGED = Path("/etc/aic/user-config/gitconfig")
 GITIGNORE_MANAGED = Path("/etc/aic/gitignore")
 
+# Project-owned control inputs live here, RO-mounted from the repository.
+PROJECT_DEVCONTAINER = Path("/workspace/.devcontainer")
+
 # Personal-config overlay (opt-in). A project-owned .devcontainer/{shell-rc,p10k}
 # or the host ~/.config/aicontainer/{rc,p10k} — routed verbatim through the
 # sanitizer — is staged here (vscode) and installed root-owned 0444 by
@@ -75,11 +78,36 @@ SHELL_RC_MANAGED = SHELL_MANAGED_DIR / "rc.zsh"
 P10K_MANAGED = SHELL_MANAGED_DIR / "p10k.zsh"
 SHELL_RC_STAGING = HOME / ".aic-shell-rc.staging"
 P10K_STAGING = HOME / ".aic-p10k.staging"
-PROJECT_SHELL_RC = Path("/workspace/.devcontainer/shell-rc.zsh")
-PROJECT_P10K = Path("/workspace/.devcontainer/p10k.zsh")
+PROJECT_SHELL_RC = PROJECT_DEVCONTAINER / "shell-rc.zsh"
+PROJECT_P10K = PROJECT_DEVCONTAINER / "p10k.zsh"
 HOST_SEED_SHELL_RC = HOST_SEED / "shell-rc.zsh"
 HOST_SEED_P10K = HOST_SEED / "p10k.zsh"
-MAX_PERSONAL_SHELL_BYTES = 1024 * 1024
+MAX_PERSONAL_OVERLAY_BYTES = 1024 * 1024
+
+# Personal statusline overlay (opt-in, Claude Code only). Same channel and trust
+# class as the personal shell overlay above: a project-owned
+# .devcontainer/statusline.<ext> — or the host ~/.config/aicontainer/statusline.<ext>
+# routed verbatim through the sanitizer — staged here and installed root-owned
+# 0444 by aic-lock-user-config, then executed by the baked, root-owned
+# /usr/local/bin/aic-statusline launcher.
+#
+# The host settings.json "statusLine" field itself is NEVER seeded: it is an
+# arbitrary command string, it stays off CLAUDE_ALLOWED_FIELDS, and its host
+# paths do not exist here. What aic writes into settings.json is the fixed
+# launcher path, and the launcher picks the interpreter from the installed
+# file's fixed extension — so no host-provided string is ever executed and no
+# command-line rewriting heuristic is involved. See AGENTS.md, "personal config
+# overlay".
+STATUSLINE_MANAGED_DIR = Path("/etc/aic/user-config/statusline")
+STATUSLINE_COMMAND = "/usr/local/bin/aic-statusline"
+# (managed filename, staging path) in fixed resolution order. MUST stay aligned
+# with aic-lock-user-config's TARGETS and the launcher's lookup order.
+STATUSLINE_VARIANTS = (
+    ("statusline.sh", HOME / ".aic-statusline-sh.staging"),
+    ("statusline.mjs", HOME / ".aic-statusline-mjs.staging"),
+    ("statusline.js", HOME / ".aic-statusline-js.staging"),
+    ("statusline.py", HOME / ".aic-statusline-py.staging"),
+)
 
 # Sandbox commit-signing material, provisioned by `aic signing` and persisted
 # in the aic-auth-global volume (so the pubkey is registered on GitHub once and
@@ -118,6 +146,11 @@ ENABLED_TOOLS = frozenset(
 # this set — permissions, hooks, apiKeyHelper, awsAuthRefresh,
 # awsCredentialExpiration — is dropped because it would either defeat the
 # sandbox boundary or carry host-specific auth secrets/paths.
+#
+# statusLine stays out on purpose: it is an arbitrary host command string with
+# host-only paths. Bringing a personal statusline into the sandbox goes through
+# the opt-in verbatim overlay instead (see the STATUSLINE_* constants), which
+# installs the script root-owned and runs it through a fixed launcher.
 #
 # MCP fields ARE seeded (parallel to [mcp_servers.*] in Codex). MCPs that
 # reference host-only binaries fail to start in the container (harmless,
@@ -410,7 +443,10 @@ def setup_claude() -> None:
     # per-project home; no globally writable directory controls it. Precreate
     # all known prompt/code roots so a fresh project has the same isolated
     # surface as one where the CLI has already used a feature.
-    for dirname in ("projects", "skills", "agents", "commands", "plugins"):
+    # "statusline" is the conventional home for a statusline script's own state
+    # (caches, counters). Precreate it so an overlay statusline can write there
+    # on first render without special-casing a missing directory.
+    for dirname in ("projects", "skills", "agents", "commands", "plugins", "statusline"):
         (claude_dir / dirname).mkdir(exist_ok=True)
 
 
@@ -616,13 +652,14 @@ def _write_sanitized_seed(name: str, value: dict) -> None:
 
 
 def _copy_verbatim_seed(name: str, raw_src: Path) -> None:
-    """Copy one opt-in personal shell file verbatim into the sanitized volume.
+    """Copy one opt-in personal overlay file verbatim into the sanitized volume.
 
-    Unlike the four JSON seeds, personal shell config is code and CANNOT be
-    allowlist-sanitized, so it is copied byte-for-byte from the trusted human's
-    input. This is not a security downgrade of the sanitizer: the file lands
-    root-owned 0444 (an in-container agent cannot tamper with it) and its
-    contents still execute only as the unprivileged `vscode` user when sourced.
+    Unlike the four JSON seeds, a personal shell rc / p10k config / Claude
+    statusline is code and CANNOT be allowlist-sanitized, so it is copied
+    byte-for-byte from the trusted human's input. This is not a security
+    downgrade of the sanitizer: the file lands root-owned 0444 (an in-container
+    agent cannot tamper with it) and its contents still execute only as the
+    unprivileged `vscode` user — the same authority the agent already has.
     Absent/oversized/non-regular inputs are simply skipped (opt-in by presence).
     """
     try:
@@ -632,9 +669,9 @@ def _copy_verbatim_seed(name: str, raw_src: Path) -> None:
     except OSError as e:
         log(f"sanitizer: skipping personal {name} ({e})")
         return
-    if not data or len(data) > MAX_PERSONAL_SHELL_BYTES:
-        if len(data) > MAX_PERSONAL_SHELL_BYTES:
-            log(f"sanitizer: personal {name} exceeds {MAX_PERSONAL_SHELL_BYTES} bytes; skipping")
+    if not data or len(data) > MAX_PERSONAL_OVERLAY_BYTES:
+        if len(data) > MAX_PERSONAL_OVERLAY_BYTES:
+            log(f"sanitizer: personal {name} exceeds {MAX_PERSONAL_OVERLAY_BYTES} bytes; skipping")
         return
     SANITIZED_HOST_SEED.mkdir(parents=True, exist_ok=True)
     os.chmod(SANITIZED_HOST_SEED, 0o700)
@@ -656,7 +693,7 @@ def sanitize_seeds() -> int:
     """One-shot Compose service entry point. It alone sees raw host inputs; the
     long-running devcontainer receives only root-owned products through a
     read-only volume: four allowlisted JSON seeds plus, when present, the opt-in
-    personal shell overlay copied verbatim (see _copy_verbatim_seed)."""
+    personal overlay files copied verbatim (see _copy_verbatim_seed)."""
     if os.geteuid() != 0:
         log("sanitizer: must run as root")
         return 1
@@ -668,10 +705,14 @@ def sanitize_seeds() -> int:
     }
     for name, value in outputs.items():
         _write_sanitized_seed(name, value)
-    # Opt-in personal shell overlay from the host ~/.config/aicontainer/ dir.
+    # Opt-in personal overlay from the host ~/.config/aicontainer/ dir: zsh
+    # startup, the p10k prompt, and the Claude Code statusline script. Every
+    # name here is fixed; nothing is discovered by globbing the seed dir.
     aic_config = RAW_HOST_SEED / "aic-config"
     _copy_verbatim_seed("shell-rc.zsh", aic_config / "rc.zsh")
     _copy_verbatim_seed("p10k.zsh", aic_config / "p10k.zsh")
+    for statusline_name, _ in STATUSLINE_VARIANTS:
+        _copy_verbatim_seed(statusline_name, aic_config / statusline_name)
     os.chmod(SANITIZED_HOST_SEED, 0o555)
     log("sanitizer: wrote fixed allowlisted seeds")
     return 0
@@ -1263,6 +1304,43 @@ def block_metadata() -> None:
         log(f"warning: metadata egress block skipped ({e}); continuing")
 
 
+def _is_overlay_source(candidate: Path) -> bool:
+    """A usable personal-overlay input: a real, non-symlinked regular file."""
+    try:
+        return not candidate.is_symlink() and candidate.is_file()
+    except OSError:
+        return False
+
+
+def _clear_overlay_staging(staging: Path, label: str) -> bool:
+    """Remove a stale staging file left by a prior run. False = unusable path."""
+    if staging.is_symlink() or staging.exists():
+        if staging.is_dir():
+            log(f"warning: refusing non-file {label} staging path {staging}")
+            return False
+        staging.unlink()
+    return True
+
+
+def _write_overlay_staging(src: Path, staging: Path, label: str) -> None:
+    """Copy one personal-overlay source verbatim into its fixed staging path."""
+    try:
+        data = src.read_bytes()
+    except OSError as e:
+        log(f"warning: could not read personal {label} source {src}: {e}")
+        return
+    if len(data) > MAX_PERSONAL_OVERLAY_BYTES:
+        log(f"warning: personal {label} {src} exceeds {MAX_PERSONAL_OVERLAY_BYTES} bytes; skipping")
+        return
+
+    staging.touch(mode=0o600)
+    staging.write_bytes(data)
+    # World-readable so the fixed sudo helper (which lacks broad DAC_OVERRIDE)
+    # can read it; its inode/owner/link checks still prevent path substitution.
+    staging.chmod(0o644)
+    log(f"staged personal {label} from {src} for root-owned install")
+
+
 def _stage_personal_shell_file(
     project_src: Path, seed_src: Path, staging: Path, managed: Path, label: str
 ) -> None:
@@ -1279,41 +1357,13 @@ def _stage_personal_shell_file(
         # Already installed in this container; a rebuild starts from a fresh
         # image and re-stages. Mirrors setup_gitconfig's re-run guard.
         return
+    if not _clear_overlay_staging(staging, label):
+        return
 
-    # Clear any stale staging file (leftover from a prior run).
-    if staging.is_symlink() or staging.exists():
-        if staging.is_dir():
-            log(f"warning: refusing non-file {label} staging path {staging}")
-            return
-        staging.unlink()
-
-    src = None
-    for candidate in (project_src, seed_src):
-        try:
-            if candidate.is_symlink() or not candidate.is_file():
-                continue
-        except OSError:
-            continue
-        src = candidate
-        break
+    src = next((c for c in (project_src, seed_src) if _is_overlay_source(c)), None)
     if src is None:
         return
-
-    try:
-        data = src.read_bytes()
-    except OSError as e:
-        log(f"warning: could not read personal {label} source {src}: {e}")
-        return
-    if len(data) > MAX_PERSONAL_SHELL_BYTES:
-        log(f"warning: personal {label} {src} exceeds {MAX_PERSONAL_SHELL_BYTES} bytes; skipping")
-        return
-
-    staging.touch(mode=0o600)
-    staging.write_bytes(data)
-    # World-readable so the fixed sudo helper (which lacks broad DAC_OVERRIDE)
-    # can read it; its inode/owner/link checks still prevent path substitution.
-    staging.chmod(0o644)
-    log(f"staged personal {label} from {src} for root-owned install")
+    _write_overlay_staging(src, staging, label)
 
 
 def setup_personal_shell() -> None:
@@ -1332,18 +1382,87 @@ def setup_personal_shell() -> None:
     )
 
 
+def _installed_statusline() -> str | None:
+    """The one managed statusline filename installed in this container, if any."""
+    for name, _ in STATUSLINE_VARIANTS:
+        if (STATUSLINE_MANAGED_DIR / name).is_file():
+            return name
+    return None
+
+
+def setup_statusline() -> None:
+    """Stage the opt-in personal Claude Code statusline for root-owned install.
+
+    Exactly one variant is ever staged. The project-owned
+    .devcontainer/statusline.<ext> group beats the host seed group, and within a
+    group the fixed STATUSLINE_VARIANTS order decides — no globbing, no
+    discovery of arbitrary filenames, and no host command string anywhere in the
+    chain (see the STATUSLINE_* constants).
+    """
+    if "claude-code" not in ENABLED_TOOLS:
+        return
+    for _, staging in STATUSLINE_VARIANTS:
+        if not _clear_overlay_staging(staging, "statusline"):
+            return
+    if _installed_statusline() is not None:
+        # Already installed in this container; a rebuild starts fresh and
+        # re-stages. Mirrors setup_gitconfig's re-run guard.
+        return
+
+    for source_root in (PROJECT_DEVCONTAINER, HOST_SEED):
+        for name, staging in STATUSLINE_VARIANTS:
+            candidate = source_root / name
+            if _is_overlay_source(candidate):
+                _write_overlay_staging(candidate, staging, f"statusline ({name})")
+                return
+
+
+def apply_statusline() -> None:
+    """Point Claude Code's per-project settings at the installed statusline.
+
+    Runs after lock_config(), so it keys off what actually landed root-owned
+    rather than what was staged: a failed or refused install simply leaves
+    settings.json without a statusLine instead of pointing Claude at a file that
+    is not there. The command written is the fixed launcher constant.
+    """
+    if "claude-code" not in ENABLED_TOOLS:
+        return
+    installed = _installed_statusline()
+    if installed is None:
+        return
+    settings_file = CLAUDE_HOME / "settings.json"
+    try:
+        settings = json.loads(settings_file.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"warning: could not read {settings_file} to wire the statusline: {e}")
+        return
+    if not isinstance(settings, dict):
+        log(f"warning: {settings_file} is not a JSON object; skipping statusline")
+        return
+    settings["statusLine"] = {"type": "command", "command": STATUSLINE_COMMAND}
+    try:
+        _safe_write_text(settings_file, json.dumps(settings, indent=2) + "\n")
+    except OSError as e:
+        log(f"warning: could not wire the statusline into {settings_file}: {e}")
+        return
+    log(f"personal statusline wired: {STATUSLINE_MANAGED_DIR / installed}")
+
+
 def lock_config() -> None:
     """Install every staged fixed-target config through the narrow
     aic-lock-user-config helper (validated gitconfig plus the optional verbatim
-    personal shell overlay). The helper deliberately lacks DAC_OVERRIDE, so the
-    unprivileged owner removes its own staging files after the atomic install."""
+    personal shell + statusline overlay). The helper deliberately lacks
+    DAC_OVERRIDE, so the unprivileged owner removes its own staging files after
+    the atomic install."""
     try:
         subprocess.run(["sudo", "/usr/local/bin/aic-lock-user-config"], check=True)
         log(f"installed root-owned user config under {GITCONFIG_MANAGED.parent}")
     except (OSError, subprocess.CalledProcessError) as e:
         log(f"warning: aic-lock-user-config failed: {e}")
     finally:
-        for staging in (GITCONFIG_STAGING, SHELL_RC_STAGING, P10K_STAGING):
+        staged = [GITCONFIG_STAGING, SHELL_RC_STAGING, P10K_STAGING]
+        staged.extend(staging for _, staging in STATUSLINE_VARIANTS)
+        for staging in staged:
             try:
                 staging.unlink()
             except FileNotFoundError:
@@ -1568,7 +1687,10 @@ def main() -> None:
     # volume — no leaf-file symlink to be clobbered by its atomic-rename writes.
     setup_gitconfig()
     setup_personal_shell()
+    setup_statusline()
     lock_config()
+    # After the install, so it keys off the root-owned file that actually landed.
+    apply_statusline()
     verify_socket_proxy()
     run_project_hook()
     # Last, so a missing-identity warning is the final thing in `aic rebuild`

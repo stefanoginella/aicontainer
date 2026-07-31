@@ -324,6 +324,7 @@ USER root
 
 RUN install -d -o root -g root -m 0755 \
       /etc/aic/shell/zsh /etc/aic/shell /etc/aic/user-config /etc/aic/user-config/shell \
+      /etc/aic/user-config/statusline \
     && mv /home/vscode/.zshrc /etc/aic/shell/zsh/.zshrc \
     && cp /home/vscode/.bashrc /etc/aic/shell/bashrc \
     && rm -f /home/vscode/.bashrc \
@@ -353,6 +354,36 @@ set -gx PATH $FNM_DIR $PATH
 fnm env --use-on-cd | source
 FISH_EOF
 
+# Managed launcher for the opt-in personal Claude Code statusline overlay
+# (post-create's STATUSLINE_* constants; AGENTS.md "personal config overlay").
+# This fixed path is the ONLY thing written into settings.json's statusLine
+# command, so no host-provided command string is ever executed and there is no
+# command-line rewriting heuristic. The interpreter comes from the installed
+# file's extension, chosen from this hardcoded list — the scripts themselves are
+# root:root 0444 in a root-owned directory, so an in-container agent cannot add
+# or replace one. No overlay installed -> render nothing and exit clean.
+RUN cat > /usr/local/bin/aic-statusline <<'STATUSLINE_EOF'
+#!/bin/sh
+# aicontainer managed statusline launcher — do not edit (root-owned).
+set -u
+dir=/etc/aic/user-config/statusline
+
+run_node() {
+  # fnm keeps the default toolchain behind a stable alias path; Claude may
+  # invoke this with a PATH that never sourced a shell rc. Fall back to PATH.
+  for node in /home/vscode/.fnm/aliases/default/bin/node /usr/local/bin/node /usr/bin/node; do
+    [ -x "$node" ] && exec "$node" "$1"
+  done
+  exec node "$1"
+}
+
+[ -r "$dir/statusline.sh" ]  && exec /bin/bash "$dir/statusline.sh"
+[ -r "$dir/statusline.mjs" ] && run_node "$dir/statusline.mjs"
+[ -r "$dir/statusline.js" ]  && run_node "$dir/statusline.js"
+[ -r "$dir/statusline.py" ]  && exec /usr/bin/python3 "$dir/statusline.py"
+exit 0
+STATUSLINE_EOF
+
 RUN cat > /etc/aic/gitignore <<'GITIGNORE_EOF'
 # aicontainer global excludes
 .claude/
@@ -369,11 +400,13 @@ GITIGNORE_EOF
 
 RUN chown -R root:root /etc/aic/shell /etc/aic/user-config \
                        /etc/profile.d/aic-bash.sh /etc/fish/conf.d/aic.fish \
-                       /etc/aic/gitignore \
-    && chmod 0755 /etc/aic/shell /etc/aic/shell/zsh /etc/aic/user-config /etc/aic/user-config/shell \
+                       /etc/aic/gitignore /usr/local/bin/aic-statusline \
+    && chmod 0755 /etc/aic/shell /etc/aic/shell/zsh /etc/aic/user-config \
+                  /etc/aic/user-config/shell /etc/aic/user-config/statusline \
     && chmod 0444 /etc/aic/shell/zsh/.zshrc /etc/aic/shell/zshrc.reference \
                   /etc/aic/shell/bashrc /etc/profile.d/aic-bash.sh \
-                  /etc/fish/conf.d/aic.fish /etc/aic/gitignore
+                  /etc/fish/conf.d/aic.fish /etc/aic/gitignore \
+    && chmod 0555 /usr/local/bin/aic-statusline
 
 ENV ZDOTDIR=/etc/aic/shell/zsh
 

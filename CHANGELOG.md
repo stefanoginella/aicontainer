@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Bring your own Claude Code statusline into the sandbox.** Drop
+  `statusline.{sh,mjs,js,py}` in `~/.config/aicontainer/` (all projects) or
+  `.devcontainer/` (one project) and `aic rebuild`. The script is installed
+  root-owned and run by a fixed managed launcher; your host `statusLine` command
+  string is still never seeded. Copied verbatim — keep secrets out of it.
+
+### Changed
+
+- **`aicontainer:setup` now walks you through porting your host config.** The
+  skill has a dedicated step covering what is seeded automatically, what is
+  deliberately dropped, and how to opt into the shell/prompt/statusline
+  overlays — with an assisted, reviewed draft rather than a silent copy.
+
 ## [0.7.1] - 2026-07-31
 
 ### Fixed

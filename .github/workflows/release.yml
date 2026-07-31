@@ -140,6 +140,25 @@ jobs:
             > /tmp/proj/.devcontainer/shell-rc.zsh
           printf '# aic smoke overlay p10k\ntouch /tmp/aic-smoke-p10k-sourced\n' \
             > /tmp/proj/.devcontainer/p10k.zsh
+          # Opt-in personal statusline overlay: the script lands root-owned 0444
+          # and Claude Code is pointed at the fixed baked launcher, never at a
+          # host command string.
+          printf '#!/bin/bash\necho "AIC_SMOKE_STATUSLINE"\n' \
+            > /tmp/proj/.devcontainer/statusline.sh
+          # Host Claude settings the sanitizer must NOT forward: statusLine is an
+          # arbitrary command string bound to host-only paths, and env is
+          # secret-bearing. `model` proves the allowlist still seeds preferences.
+          mkdir -p "$HOME/.claude"
+          cat > "$HOME/.claude/settings.json" <<'JSON'
+          {
+            "model": "opus",
+            "statusLine": {
+              "type": "command",
+              "command": "node /home/runner/.claude/statusline/aic-smoke-host.mjs"
+            },
+            "env": { "AIC_SMOKE_HOST_SECRET": "must-not-cross" }
+          }
+          JSON
           cd /tmp/proj && git init -q
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build --force
       - name: Bring up the devcontainer
@@ -166,6 +185,51 @@ jobs:
             [ -e /tmp/aic-smoke-rc-sourced ] && [ -e /tmp/aic-smoke-p10k-sourced ] \
               || { echo "FAIL: overlay not sourced by login zsh"; exit 1; }
             echo "OK: personal shell overlay is root-locked, verbatim, and sourced after baseline"
+          '
+      - name: Smoke test - personal statusline installs root-locked and is wired
+        working-directory: /tmp/proj
+        run: |
+          # The opt-in project-owned .devcontainer/statusline.sh lands root-owned
+          # 0444 under /etc/aic/user-config/statusline, is executed by the fixed
+          # baked launcher, and is what settings.json points at. The host's own
+          # statusLine command string must never be seeded.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            f=/etc/aic/user-config/statusline/statusline.sh
+            [ -e "$f" ] || { echo "FAIL: $f missing"; exit 1; }
+            perms=$(stat -c "%U %a" "$f")
+            [ "$perms" = "root 444" ] || { echo "FAIL: $f expected root 444, got $perms"; exit 1; }
+            if echo x >> "$f" 2>/dev/null; then echo "FAIL: vscode can write $f"; exit 1; fi
+            grep -q AIC_SMOKE_STATUSLINE "$f" \
+              || { echo "FAIL: statusline not installed verbatim"; exit 1; }
+            for other in statusline.mjs statusline.js statusline.py; do
+              if [ -e "/etc/aic/user-config/statusline/$other" ]; then
+                echo "FAIL: unexpected $other installed"; exit 1
+              fi
+            done
+            # The directory itself must stay root-owned so an agent cannot drop a
+            # higher-priority variant next to the human'"'"'s script.
+            if touch /etc/aic/user-config/statusline/statusline.mjs 2>/dev/null; then
+              echo "FAIL: vscode can add a statusline variant"; exit 1
+            fi
+            lperms=$(stat -c "%U %a" /usr/local/bin/aic-statusline)
+            [ "$lperms" = "root 555" ] \
+              || { echo "FAIL: launcher expected root 555, got $lperms"; exit 1; }
+            cmd=$(python3 -c "import json;print(json.load(open(\"$HOME/.claude/settings.json\")).get(\"statusLine\",{}).get(\"command\",\"\"))")
+            [ "$cmd" = "/usr/local/bin/aic-statusline" ] \
+              || { echo "FAIL: settings.json statusLine command is \"$cmd\""; exit 1; }
+            # The host settings.json staged above carries a statusLine command
+            # and an env secret; the sanitizer must have dropped both while still
+            # seeding the allowlisted preference.
+            if grep -qE "aic-smoke-host\\.mjs|AIC_SMOKE_HOST_SECRET" "$HOME/.claude/settings.json"; then
+              echo "FAIL: a host statusLine command / env secret crossed the sanitizer"; exit 1
+            fi
+            grep -q "\"model\"" "$HOME/.claude/settings.json" \
+              || { echo "FAIL: allowlisted host preference was not seeded"; exit 1; }
+            out=$(/usr/local/bin/aic-statusline </dev/null)
+            [ "$out" = "AIC_SMOKE_STATUSLINE" ] \
+              || { echo "FAIL: launcher rendered \"$out\""; exit 1; }
+            echo "OK: personal statusline is root-locked, launcher-run, and wired into Claude Code"
           '
       - name: Smoke test - AI CLIs resolve (Codex is standalone, not npm)
         working-directory: /tmp/proj

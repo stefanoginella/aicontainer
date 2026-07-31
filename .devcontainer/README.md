@@ -74,6 +74,7 @@ covered by persistent trust and always need that per-run flag.
 | `vscode-settings.json` | VS Code editor settings (a JSON object) | *Project-specific VS Code extensions & settings* |
 | `shell-rc.zsh` | Personal zsh startup (aliases, functions, prompt) sourced after the managed baseline | *Personal shell config* |
 | `p10k.zsh` | Personal powerlevel10k prompt config (`p10k configure` output) | *Personal shell config* |
+| `statusline.{sh,mjs,js,py}` | Personal Claude Code statusline script, run by the managed launcher | *Personal Claude Code statusline* |
 
 Full docs: <https://github.com/stefanoginella/aicontainer#readme>
 

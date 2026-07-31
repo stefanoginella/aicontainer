@@ -31,7 +31,7 @@ shown automatically at the end of every `aic up`).
 |---|---|
 | Project directory | **Yes, read-write** (`/workspace`) — the one writable host path. |
 | Host Git / Claude / Codex / OpenCode config | The raw files are visible only to a fixed, root-only, networkless one-shot sanitizer. The agent receives root-owned JSON containing allowlisted preferences; executable Git config, inline credentials, MCP env/header secrets, and security-policy fields are removed. See [Config seeding](#config-seeding-from-the-host). |
-| Host shell startup files (`.zshrc`, `.bashrc`, fish config, p10k) | **No.** Shells start from root-managed aicontainer profiles, so a previous session cannot plant startup code and host startup scripts never enter the sandbox. |
+| Host shell startup files (`.zshrc`, `.bashrc`, fish config, p10k) and Claude `statusLine` | **Not automatically.** Shells start from root-managed aicontainer profiles and the host `statusLine` command is dropped, so nothing host-side plants startup code. You can opt in per file by copying it into `~/.config/aicontainer/` (`rc.zsh`, `p10k.zsh`, `statusline.*`); those cross verbatim and land root-locked. See [Personal shell config](#personal-shell-config) and [statusline](#personal-claude-code-statusline). |
 | Host home, `~/.ssh`, SSH-agent socket | **No** — not mounted, not forwarded. |
 | Host credentials (API keys, `gh` token, keychain) | **No** — nothing auto-forwarded; you log in once *inside* the container. |
 | Package-manager caches | **No** — container-local volumes, not your host caches. |
@@ -562,6 +562,40 @@ The host seed is read **read-only** by the seed sanitizer and copied verbatim; a
 
 > ⚠️ **These files are copied verbatim — they can't be sanitized like the JSON configs.** They're shell *code*, executed inside a sandbox an autonomous agent can read. **Don't put secrets in them** (no tokens, no `export API_KEY=…`). Keep them to prompt/alias cosmetics. They run only as the unprivileged `vscode` user and, once installed, are root-locked so the agent can't modify them.
 
+### Personal Claude Code statusline
+
+Your host `statusLine` setting is **not** seeded — it's an arbitrary command string pointing at a host path that doesn't exist in the container (see [threat model](#threat-model)). Bringing your statusline in works like the shell overlay above: you hand aicontainer the **script**, and aicontainer supplies the command.
+
+Drop one file, named by the interpreter you want:
+
+| File | Run as |
+| --- | --- |
+| `statusline.sh` | `bash` |
+| `statusline.mjs` | `node` (ESM) |
+| `statusline.js` | `node` (CommonJS) |
+| `statusline.py` | `python3` |
+
+Host-global (every project on this machine):
+
+```bash
+mkdir -p ~/.config/aicontainer
+cp ~/.claude/statusline/statusline.mjs ~/.config/aicontainer/statusline.mjs
+aic rebuild
+```
+
+Or per-project, as `.devcontainer/statusline.mjs` — the project file wins when both exist. Same filename in both places (unlike `rc.zsh` / `shell-rc.zsh`).
+
+On the next create, post-create installs the script `root:root 0444` at `/etc/aic/user-config/statusline/`, and sets Claude's `statusLine.command` to the fixed managed launcher `/usr/local/bin/aic-statusline`, which picks the interpreter from that filename. **No string from your host settings is ever executed** — only your script file crosses, and the command aic writes is its own constant.
+
+Notes that matter in practice:
+
+- **One file, no bundle.** A statusline that `import`s sibling modules won't find them; vendor it into a single file (your script may still read/write its own state under `~/.claude/statusline/`, which is precreated and per-project).
+- **`node` and `python3` are the container's.** Anything your script shells out to must exist in the sandbox — `git` and the usual CLI tools do; host-only binaries don't.
+- **The single source of truth trick:** keep the real script at `~/.config/aicontainer/statusline.mjs` on the host and point your *host* `~/.claude/settings.json` at that same path, so host and sandbox never drift.
+- Claude Code only — Codex and OpenCode have no equivalent.
+
+> ⚠️ Same rule as the shell overlay: **copied verbatim, readable by the agent, no secrets.** It runs as the unprivileged `vscode` user, and once installed it's root-locked so the agent can't modify it — but its bytes (including any host paths or usernames baked into it) are visible inside the sandbox.
+
 ### Project-specific VS Code extensions & settings
 
 `devcontainer.json` is the only place that auto-installs editor extensions and applies machine-scope settings, but it's **regenerated wholesale on every `aic init`/`aic sync`** — so hand-editing its `customizations.vscode` block doesn't survive (and an in-container agent can't edit anything under `.devcontainer/` at all). Two project-owned files are merged in instead, both opt-in by presence and never touched by sync:
@@ -796,6 +830,12 @@ root filesystem, and no auth/session mounts reads exactly four files:
 `~/.config/opencode/opencode.json`. It emits four root-owned JSON objects into a
 per-project volume; the long-running agent receives that volume read-only.
 
+It also reads the opt-in `~/.config/aicontainer/` directory, whose fixed
+filenames (`rc.zsh`, `p10k.zsh`, `statusline.{sh,mjs,js,py}`) are *code* and so
+are copied verbatim rather than allowlisted — they exist only because you put
+them there, and they land root-owned and read-only. Nothing else in that
+directory is read.
+
 The sanitizer copies only known preference fields and recursively removes
 literal credential-bearing keys such as `env`, `headers`, `authorization`, API
 keys, tokens, secrets, and passwords. Security-critical behavior is enforced
@@ -840,10 +880,20 @@ on recreate; root-managed policy remains separate from those writable homes.
 secret-looking provider keys are stripped recursively. Run `opencode auth
 login` inside once; that credential persists globally.
 
+**Command-bearing config is never seeded:** Claude's `statusLine`, tool `hooks`,
+`apiKeyHelper`, and the gitconfig `credential.helper` / aliases / includes are
+all dropped rather than rewritten — an allowlist that admits one arbitrary
+command string is not an allowlist. A personal statusline comes in through the
+opt-in verbatim overlay instead (see [Personal Claude Code
+statusline](#personal-claude-code-statusline)): you provide the script, aic
+installs it root-locked and supplies its own fixed command.
+
 **Host paths not exposed to the agent:** none of the raw config files above,
-host tool history/transcripts/credentials, host statusline scripts, shell rc
-files, `~/.ssh`, or the SSH agent. The container creates its own login state and
-project data in Docker volumes.
+host tool history/transcripts/credentials, shell rc files, `~/.ssh`, or the SSH
+agent. The container creates its own login state and project data in Docker
+volumes. The only host files that cross verbatim are the ones you deliberately
+place in `~/.config/aicontainer/` (`rc.zsh`, `p10k.zsh`, `statusline.*`), which
+land root-owned and read-only.
 
 ## Commit signing
 
@@ -987,10 +1037,18 @@ agent *inside* it. Run both.
 **Powerlevel10k glyphs look wrong.** Install the [Meslo Nerd Font](https://github.com/romkatv/powerlevel10k#meslo-nerd-font-patched-for-powerlevel10k) and set it as your terminal font.
 
 **Powerlevel10k asks to run `p10k configure`.** Shell startup is deliberately
-root-managed and never imports the host's `.p10k.zsh`. The image suppresses the
-interactive setup wizard and uses the bundled theme defaults. For a custom
-prompt, choose Bash/fish or bake a reviewed config into `Dockerfile.project`;
-do not add a writable home rc include.
+root-managed and never auto-imports the host's `.p10k.zsh`, so the image
+suppresses the wizard and uses the bundled theme defaults. To get your own
+prompt, copy it into the opt-in seed dir — `cp ~/.p10k.zsh
+~/.config/aicontainer/p10k.zsh` — then `aic rebuild`. See [Personal shell
+config](#personal-shell-config); don't add a writable home rc include.
+
+**My statusline is missing inside the container.** Expected: the host
+`statusLine` command is never seeded. Copy the *script* to
+`~/.config/aicontainer/statusline.<ext>` and `aic rebuild` — see [Personal
+Claude Code statusline](#personal-claude-code-statusline). If it's installed but
+renders nothing, run `/usr/local/bin/aic-statusline` inside the container to see
+the error.
 
 **Claude Code pre-fills `source /workspace/.venv/bin/activate`.** Harmless —
 Claude spotted a project venv and suggested (but did not run) activation. If

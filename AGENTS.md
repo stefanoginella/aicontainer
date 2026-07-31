@@ -222,10 +222,11 @@ JSON objects into the per-project sanitized volume, which the main container
 mounts RO. Sanitization recursively removes literal
 env/header/auth/key/token/secret/password fields. Git uses a fixed safe-key
 list and `/usr/bin/git --no-includes`. The personal overlay is the one
-exception to JSON sanitization: `rc.zsh`/`p10k.zsh` are **code**, copied
-verbatim (bounded, root-owned `0444`) into that same volume — never
-field-stripped, never merged into main's config, and only ever *sourced*
-(never executed by the sanitizer). Do not mount a raw input into main, add a
+exception to JSON sanitization: `rc.zsh`/`p10k.zsh`/`statusline.{sh,mjs,js,py}`
+are **code**, copied verbatim (bounded, root-owned `0444`) into that same volume
+— never field-stripped, never merged into main's config, and never executed by
+the sanitizer itself. Every one of those names is a literal in `sanitize_seeds()`;
+the seed dir is never globbed. Do not mount a raw input into main, add a
 non-JSON output beyond that overlay, or make sanitizer failure soft.
 
 All Claude/Codex/OpenCode config, memory, skills/plugins, prompt history, and
@@ -279,8 +280,8 @@ Users must not hand-edit those two files — per-project tweaks go in the
 project-owned files `apply_template()` never touches: `Dockerfile.project`,
 `firewall-allowlist`, `chown-paths`, `post-create.project.sh`,
 `docker-compose.override.yml`, `vscode-extensions`, `vscode-settings.json`,
-`shell-rc.zsh`, `p10k.zsh`. All share one contract: **opt-in by file presence,
-survive sync, read-only inside the container.**
+`shell-rc.zsh`, `p10k.zsh`, `statusline.{sh,mjs,js,py}`. All share one contract:
+**opt-in by file presence, survive sync, read-only inside the container.**
 
 **`docker-compose.override.yml`** — sync-safe home for anything that would
 otherwise live in `containerEnv` or the compose service (env, `extra_hosts`,
@@ -392,16 +393,19 @@ JSONC trailing comma is tolerated). Load-bearing, don't undo:
 Guarded by the "aic sync merges project-owned vscode-extensions /
 vscode-settings.json" test.
 
-**Personal config overlay** (`shell-rc.zsh`, `p10k.zsh`) — lets the trusted
-human bring a familiar zsh prompt/aliases into the sandbox. Two sources feed
-one overlay, project file winning: a project-owned `.devcontainer/shell-rc.zsh`
-/ `.devcontainer/p10k.zsh`, and the opt-in host seed `~/.config/aicontainer/{rc,
-p10k}.zsh` routed **verbatim** through `aic-seed-sanitizer` (the only place a
-raw host file is allowed; never mounted into main). `setup_personal_shell()`
-stages the winner; `aic-lock-user-config` installs it `root:root 0444` under
-`/etc/aic/user-config/shell/`; the baked `.zshrc` sources `p10k.zsh` then
-`rc.zsh` **after** the managed baseline, so a personal prompt wins while the
-managed history/fnm/PATH setup still runs first. Load-bearing, don't undo:
+**Personal config overlay** (`shell-rc.zsh`, `p10k.zsh`, `statusline.*`) — lets
+the trusted human bring a familiar zsh prompt/aliases and Claude statusline into
+the sandbox. Two sources feed one overlay, project file winning: a project-owned
+`.devcontainer/shell-rc.zsh` / `.devcontainer/p10k.zsh` /
+`.devcontainer/statusline.{sh,mjs,js,py}`, and the opt-in host seed
+`~/.config/aicontainer/{rc,p10k}.zsh` / `~/.config/aicontainer/statusline.*`
+routed **verbatim** through `aic-seed-sanitizer` (the only place a raw host file
+is allowed; never mounted into main). `setup_personal_shell()` /
+`setup_statusline()` stage the winner; `aic-lock-user-config` installs it
+`root:root 0444` under `/etc/aic/user-config/{shell,statusline}/`; the baked
+`.zshrc` sources `p10k.zsh` then `rc.zsh` **after** the managed baseline, so a
+personal prompt wins while the managed history/fnm/PATH setup still runs first.
+Load-bearing, don't undo:
 
 1. **It is code, not data — it cannot be sanitized.** The bytes cross verbatim
    into a sandbox the agent can read, so it is opt-in (by file presence) and
@@ -414,15 +418,34 @@ managed history/fnm/PATH setup still runs first. Load-bearing, don't undo:
    when sourced — the same authority the agent already has, and the same risk
    class as the already-accepted `post-create.project.sh`. Keep the install on
    the shared `aic-lock-user-config` path; don't add a writable-in-`$HOME` rc.
-3. **zsh only.** p10k and the `source` lines live in the managed `.zshrc`;
-   bash/fish keep the managed baseline unchanged. Don't source zsh syntax from
-   the bash/fish startup files.
+3. **The shell overlay is zsh only.** p10k and the `source` lines live in the
+   managed `.zshrc`; bash/fish keep the managed baseline unchanged. Don't source
+   zsh syntax from the bash/fish startup files.
 4. The files are control-boundary paths (in `AIC_CONTROL_FILES`): real files,
    never symlinks. Keep them out of `apply_template()`'s copy/rewrite/remove
    lists so sync never clobbers them.
+5. **The statusline overlay carries the script, never a command string.**
+   `statusLine` stays off `CLAUDE_ALLOWED_FIELDS` — the pre-0.6.0 rewriting of
+   the host `statusLine.command` was a heuristic on a trust boundary and must
+   not come back. What `apply_statusline()` writes into the per-project
+   `settings.json` is the constant `/usr/local/bin/aic-statusline`, a baked
+   root-owned `0555` launcher that maps the *installed filename* to a hardcoded
+   interpreter. Three fixed tables must stay aligned:
+   `STATUSLINE_VARIANTS` (post-create), the `statusline/` `TARGETS`
+   (`aic-lock-user-config`), and the launcher's dispatch list. A new extension
+   is a deliberate edit to all three, never runtime discovery — never glob the
+   seed dir, and never let the launcher take the script path from argv or env.
+   `apply_statusline()` runs *after* `lock_config()` on purpose, so it keys off
+   the root-owned file that actually landed; a refused install must leave
+   `settings.json` with no `statusLine` rather than a dangling command. The
+   interpreter itself (fnm's `node`) lives in a `vscode`-owned tree and is not
+   part of the tamper-proof guarantee — that is acceptable precisely because the
+   statusline already runs with `vscode` authority, and it is *not* a reason to
+   relax the root-lock on the script.
 
-Guarded by the personal-shell-overlay assertions in the host-security test (and
-the runtime shell-lock smoke).
+Guarded by `tests/test-aic-statusline-overlay.py`, the personal-overlay
+assertions in the host-security test, and the runtime shell-lock + statusline
+smokes.
 
 **AI-tool refresh on every create.** `refresh_ai_tools()` runs early in
 `main()` and floats Claude Code + Codex + OpenCode to latest on every
@@ -695,15 +718,20 @@ Review any change to these files for security regressions:
   without following links and atomically creates (never replaces) a
   `root:root 0444` destination under `/etc/aic/user-config/`. The **required**
   `gitconfig` target is parsed with Git `--no-includes` under a minimal env and
-  allows only fixed safe keys/exact aic values. The **optional** personal-shell
-  targets (`shell/rc.zsh`, `shell/p10k.zsh`) are installed **without** content
-  validation — zsh can't be allowlisted — which is safe only because the bytes
-  come from the trusted human staged before any agent runs, the file lands
-  root-locked so an agent can't tamper with it, and its contents still execute
-  only as `vscode`. Do not add a content-bearing target without a validator
-  unless all three hold, and do not turn either helper into a general
-  copy/chown/config installer. Guarded by the dedicated tests plus runtime
-  smoke. See "Personal config overlay".
+  allows only fixed safe keys/exact aic values. The **optional** personal
+  overlay targets (`shell/rc.zsh`, `shell/p10k.zsh`,
+  `statusline/statusline.{sh,mjs,js,py}`) are installed **without** content
+  validation — zsh and a statusline script can't be allowlisted — which is safe
+  only because the bytes come from the trusted human staged before any agent
+  runs, the file lands root-locked so an agent can't tamper with it, and its
+  contents still execute only as `vscode`. Do not add a content-bearing target
+  without a validator unless all three hold, and do not turn either helper into
+  a general copy/chown/config installer. Guarded by the dedicated tests plus
+  runtime smoke. See "Personal config overlay".
+- `template/Dockerfile`'s baked `/usr/local/bin/aic-statusline` — root-owned
+  `0555`, not a sudoers helper. It is the only thing Claude's `statusLine`
+  command ever names, and it dispatches a hardcoded interpreter at a hardcoded
+  path. Never make it read a path from argv/env, and never `eval` file content.
 - `.github/workflows/*.yml` — GHCR uses job-scoped `GITHUB_TOKEN` package
   permission; npm uses OIDC trusted publishing + provenance, not a long-lived
   npm token. Publishing jobs run only on push/schedule/dispatch, never PR;

@@ -14,9 +14,10 @@ Targets fall into two classes:
     allowlist before install; REQUIRED, so its absence is an error. This is the
     former ``aic-lock-gitconfig`` behavior, unchanged.
 
-  * Verbatim personal shell (``shell/rc.zsh``, ``shell/p10k.zsh``). Arbitrary
-    zsh that cannot be meaningfully allowlisted, so it is installed WITHOUT
-    content validation; OPTIONAL, installed only when its staging file exists.
+  * Verbatim personal overlay (``shell/rc.zsh``, ``shell/p10k.zsh``, and one of
+    ``statusline/statusline.{sh,mjs,js,py}``). Arbitrary zsh / statusline code
+    that cannot be meaningfully allowlisted, so it is installed WITHOUT content
+    validation; OPTIONAL, installed only when its staging file exists.
     Safe despite the missing content check because:
       1. the bytes originate from the trusted human's own config (a project
          file a human placed under ``.devcontainer/`` or the host ``$HOME``),
@@ -25,8 +26,8 @@ Targets fall into two classes:
          the installed file afterward, preserving the "shell startup is
          root-managed" guarantee; and
       3. root only OWNS the file — its contents still execute as the
-         unprivileged ``vscode`` user when sourced, so they grant no privilege
-         the agent does not already have.
+         unprivileged ``vscode`` user when sourced or rendered, so they grant no
+         privilege the agent does not already have.
     See AGENTS.md, "personal config overlay".
 """
 
@@ -227,11 +228,17 @@ def validate_gitconfig_contents(source_fd: int) -> None:
 
 
 # The fixed install table. gitconfig keeps its allowlist validator and stays
-# required; the personal shell files are optional and installed verbatim (see
-# the module docstring for why the missing content check is safe). Staging
-# paths MUST match post-create.py's GITCONFIG_STAGING / SHELL_RC_STAGING /
-# P10K_STAGING; destination directories MUST already exist root-owned (created
-# in template/Dockerfile).
+# required; the personal shell and statusline files are optional and installed
+# verbatim (see the module docstring for why the missing content check is safe).
+# Staging paths MUST match post-create.py's GITCONFIG_STAGING / SHELL_RC_STAGING
+# / P10K_STAGING / STATUSLINE_VARIANTS; destination directories MUST already
+# exist root-owned (created in template/Dockerfile).
+#
+# The statusline variants are one entry per SUPPORTED EXTENSION, not a
+# discovered set: the destination filename carries the interpreter choice, and
+# /usr/local/bin/aic-statusline resolves it from this same fixed list. post-create
+# only ever stages one of them, and create-once install means the others stay
+# absent for the life of the container.
 TARGETS = (
     Target(
         Path("/home/vscode/.aic-gitconfig.staging"),
@@ -251,6 +258,34 @@ TARGETS = (
         Path("/home/vscode/.aic-p10k.staging"),
         Path("/etc/aic/user-config/shell"),
         "p10k.zsh",
+        required=False,
+        validator=None,
+    ),
+    Target(
+        Path("/home/vscode/.aic-statusline-sh.staging"),
+        Path("/etc/aic/user-config/statusline"),
+        "statusline.sh",
+        required=False,
+        validator=None,
+    ),
+    Target(
+        Path("/home/vscode/.aic-statusline-mjs.staging"),
+        Path("/etc/aic/user-config/statusline"),
+        "statusline.mjs",
+        required=False,
+        validator=None,
+    ),
+    Target(
+        Path("/home/vscode/.aic-statusline-js.staging"),
+        Path("/etc/aic/user-config/statusline"),
+        "statusline.js",
+        required=False,
+        validator=None,
+    ),
+    Target(
+        Path("/home/vscode/.aic-statusline-py.staging"),
+        Path("/etc/aic/user-config/statusline"),
+        "statusline.py",
         required=False,
         validator=None,
     ),

@@ -191,7 +191,7 @@ compose_has_project_name () {
 # control inputs. Never follow a repository-provided symlink at this boundary:
 # `aic init --force` / `aic sync` run as the host user, so following one could
 # overwrite or read an arbitrary host file outside the repository.
-AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh"
+AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh statusline.sh statusline.mjs statusline.js statusline.py"
 
 validate_devcontainer_paths () {
   local require_dir="${1:-optional}" path name linked
@@ -1179,13 +1179,20 @@ cmd_sync () {
       ;;
   esac
   echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
-  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, post-create.project.sh, docker-compose.override.yml, vscode-extensions, vscode-settings.json, shell-rc.zsh, p10k.zsh) are untouched"
+  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, post-create.project.sh, docker-compose.override.yml, vscode-extensions, vscode-settings.json, shell-rc.zsh, p10k.zsh, statusline.*) are untouched"
   if [ -f .devcontainer/docker-compose.override.yml ]; then
     echo "aic: wired docker-compose.override.yml into dockerComposeFile"
   fi
   if [ -f .devcontainer/shell-rc.zsh ] || [ -f .devcontainer/p10k.zsh ]; then
     echo "aic: personal shell overlay present (shell-rc.zsh / p10k.zsh): installed root-owned on next 'aic rebuild' and sourced by zsh"
   fi
+  local statusline_file
+  for statusline_file in statusline.sh statusline.mjs statusline.js statusline.py; do
+    if [ -f ".devcontainer/$statusline_file" ]; then
+      echo "aic: personal statusline present ($statusline_file): installed root-owned on next 'aic rebuild' and wired into Claude Code"
+      break
+    fi
+  done
   if [ -f .devcontainer/vscode-extensions ]; then
     local extcount; extcount="$(grep -cvE '^[[:space:]]*(#|$)' .devcontainer/vscode-extensions 2>/dev/null)" || extcount=0
     echo "aic: merged vscode-extensions ($extcount listed) into customizations.vscode.extensions"
@@ -2730,10 +2737,11 @@ migrate_legacy_session_volume () {
 prepare_host_seed_paths () {
   local dir file
   [ -n "${HOME:-}" ] || die "HOME is not set; cannot prepare host configuration seeds"
-  # ~/.config/aicontainer is the opt-in personal-shell-overlay seed dir, mounted
+  # ~/.config/aicontainer is the opt-in personal-overlay seed dir, mounted
   # read-only into the sanitizer. Ensure it exists so the bind source is a
   # user-owned directory (not a root-owned dir Docker would create); it stays
-  # empty until the user drops rc.zsh / p10k.zsh in it (opt-in by presence).
+  # empty until the user drops rc.zsh / p10k.zsh / statusline.<ext> in it
+  # (opt-in by presence).
   for dir in "$HOME/.claude" "$HOME/.codex" "$HOME/.config" "$HOME/.config/opencode" "$HOME/.config/aicontainer"; do
     if [ -e "$dir" ] || [ -L "$dir" ]; then
       [ -d "$dir" ] || die "host seed parent exists but is not a directory: $dir"
@@ -3556,7 +3564,8 @@ Usage:
                        Project-owned files (Dockerfile.project, firewall-
                        allowlist, chown-paths, post-create.project.sh,
                        docker-compose.override.yml, vscode-extensions,
-                       vscode-settings.json, shell-rc.zsh, p10k.zsh) are
+                       vscode-settings.json, shell-rc.zsh, p10k.zsh,
+                       statusline.{sh,mjs,js,py}) are
                        untouched; an existing
                        docker-compose.override.yml is auto-wired into
                        dockerComposeFile, and vscode-extensions /
