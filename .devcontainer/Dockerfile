@@ -60,7 +60,7 @@ COPY --from=uv /uv /usr/local/bin/uv
 
 # fzf (GitHub release is newer than apt and includes shell integration)
 # renovate: datasource=github-releases depName=junegunn/fzf
-ARG FZF_VERSION=0.74.0
+ARG FZF_VERSION=0.74.1
 RUN ARCH=$(dpkg --print-architecture) && \
     case "${ARCH}" in \
       amd64) FZF_ARCH="linux_amd64" ;; \
