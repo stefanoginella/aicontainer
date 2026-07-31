@@ -36,11 +36,29 @@ that silently gets wiped or breaks `aic sync`.
   touches: `Dockerfile.project`, `docker-compose.override.yml`, `chown-paths`,
   `post-create.project.sh`, `vscode-extensions`, `vscode-settings.json`,
   `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`. These are opt-in by presence.
+- **`aic rebuild` is the verb that builds — `aic up` is not.** `aic up` runs a
+  plain `devcontainer up`, and the managed pull-mode Compose sets
+  `pull_policy: missing`: when the resolved image tag is already cached, Compose
+  reuses it and **never runs your `Dockerfile.project`**. The stack comes up
+  looking healthy on the plain base image, with every baked tool missing and
+  every named volume still `root:root`. `aic rebuild` adds
+  `--remove-existing-container --build-no-cache`, which is what actually builds.
+  So: if the plan writes a `Dockerfile.project`, the first boot is `aic rebuild`,
+  and so is every boot after you edit it.
+- **Host-boundary trust is the user's to grant — you can't, and shouldn't.** A
+  `Dockerfile.project` (or an added mount, a protected env key, Docker socket
+  exposure) makes `aic validate` / `up` / `rebuild` fail closed until the human
+  runs `aic trust`, which **requires a TTY** and so cannot run from your Bash
+  tool. Hand it to them; never route around it with `--allow-unsafe`. Trust
+  binds to an exact config hash, so **any** later edit to
+  `docker-compose.override.yml` or `Dockerfile.project` revokes it — settle the
+  config completely before you ask (Step 7).
 - **Show the plan, then apply.** Detect and confirm first, present the full plan,
   get a yes, then write files and run `aic init` / `aic sync`. **Confirm before
-  `aic up`** — it pulls or builds a multi-gigabyte image and can take minutes —
-  but once the user says go, drive it yourself: verify the container actually
-  boots and fix what's broken (Step 8). Don't just hand back a command and hope.
+  the first boot** — it pulls or builds a multi-gigabyte image and can take
+  minutes — but once the user says go, drive it yourself: verify the container
+  actually boots and fix what's broken (Step 8). Don't just hand back a command
+  and hope.
 
 ## Step 0 — Preconditions
 
@@ -84,6 +102,18 @@ Before anything, confirm the ground is solid:
    repo set up under an older aic can leave a stale legacy Docker volume/stack
    that `aic up` migrates automatically (`aic: migrating legacy session
    transcripts …`). That's expected, not an error — don't treat it as a failure.
+6. **Is a stale stack still running for this path?** The Compose project name is
+   derived from the canonical path (`aic-<basename>-<hash>`), so a *previous*
+   setup for this directory — even one whose `.devcontainer/` is long gone — can
+   still own containers and volumes in the same namespace. `aic up` deliberately
+   does **not** pass `--remove-orphans` (it can't attribute them), so those
+   services keep running and resurface later as mystery containers in `docker
+   compose ps`. Look now:
+   `docker ps -a --filter "name=aic-<basename>-"` and
+   `docker volume ls --filter "name=aic-<basename>-"`. The clean sweep is
+   `aic down` (which *does* use `--remove-orphans`) once a config exists. Stale
+   named volumes may hold real data — surface them and let the user decide;
+   never delete a volume unasked.
 
 ## Update mode — auditing an existing setup
 
@@ -216,13 +246,33 @@ Step 1; rationale and the LSP-by-language table: `references/stack-and-suitabili
   `target`/cargo, Go build cache. Persists across rebuilds and dodges the macOS
   bind-mount perf hit. **Always pair a named volume with a `chown-paths` entry** —
   Docker inits named volumes `root:root` and the mount is otherwise unwritable by
-  `vscode`. Keep caches under `/workspace/` or `/home/vscode/.cache/` (the only
-  paths `chown-paths` honors).
+  `vscode`. **`/workspace/…` and `/home/vscode/.cache/…` are the only mount
+  targets aic accepts at all** — that's a validator rule on every mount the
+  override adds, not merely a `chown-paths` limit. Most tools' default cache dirs
+  sit outside it — `~/.cargo`, `~/.m2`, `~/.gradle`, `~/go/pkg`, `~/.pub-cache` —
+  and mounting one makes aic reject the *whole config* with `added mount target
+  is outside approved project data paths`. Relocate the cache, not the rule: mount
+  `/home/vscode/.cache/<tool>` and point the tool at it by setting its home var
+  (`CARGO_HOME`, `GOMODCACHE`, `UV_CACHE_DIR`, …) in `Dockerfile.project`, so the
+  value is baked into the image rather than an override `environment:` key the
+  validator has to re-review.
 - **`Dockerfile.project`** — for anything needing `apt` / root or baked-in
   browsers: native build deps, DB clients, Playwright/Chromium (README has the
   exact recipe), extra language runtimes. `FROM` must match the pinned tag in the
   generated `docker-compose.yml` (read it after init). Point at it with a `build:`
   block in `docker-compose.override.yml`, **not** by editing `docker-compose.yml`.
+  Two consequences the recipe leaves implicit, and both bite:
+  - **Give the build its own `image:` tag in the same override block.** Compose
+    tags a build's output with whatever `image:` resolves to, and the managed file
+    resolves it to the *shared* `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` — so a
+    bare `build:` block silently re-tags the base image locally and hands this
+    project's image to **every other aic project on the machine**. aic permits a
+    distinct tag whenever a `build:` is present, so always add
+    `image: <project>-devcontainer:vX.Y.Z` next to it.
+  - **It always costs exactly one `aic trust`, and it makes `aic rebuild` the
+    boot verb.** Image builds run as root, so aic treats every project Dockerfile
+    as a boundary expansion even when `FROM` is the official base. Both golden
+    rules above — plan the sequence around them rather than discovering them.
 - **`docker-compose.override.yml`** — env vars, host-service wiring
   (`DATABASE_URL: …@host.docker.internal:5432/…` to reach a DB running on the
   host; add the `extra_hosts` line on Linux), extra ports/mounts, the named-volume
@@ -334,9 +384,13 @@ Show the user, before touching anything:
 2. The `aic init` invocation (with `--with` / `--shell`).
 3. Each project-owned file you'll create, **with its contents**, and one line on
    *why* (which stack fact drives it).
-4. That you'll offer to verify the setup boots (`aic up`, watched to
-   completion, fixing anything broken) before handing off — pending their okay
-   since it's a multi-gigabyte pull/build.
+4. **Whether this plan will need `aic trust`, stated up front** — name the
+   finding it will produce (almost always the `Dockerfile.project` root build)
+   and that they'll run one command in their own terminal at a known point. A
+   user who meets the gate only when the build stops thinks setup broke.
+5. That you'll offer to verify the setup boots — `aic rebuild` when there's a
+   `Dockerfile.project`, plain `aic up` otherwise — watched to completion and
+   fixed if broken, pending their okay since it's a multi-gigabyte pull/build.
 
 Get an explicit yes. If they want changes, fold them in and re-show.
 
@@ -355,9 +409,33 @@ Order matters (so the override gets wired into `dockerComposeFile`):
    `devcontainer.json` (it's wired only when the file is present). Verify with
    `grep dockerComposeFile .devcontainer/devcontainer.json` — both files should
    appear.
+5. **Validate, and stop the hash from moving.** Run `aic validate` — it applies
+   the same gate as `up`/`rebuild` but never prompts and never writes trust, so
+   it's the one safe way for *you* to read the findings. Fix everything
+   mechanical it reports now (rejected mount targets, managed-file drift,
+   override syntax). Every fix changes the config hash, and the hash must stop
+   moving before the user trusts it.
+6. **De-risk the build before spending the user's approval** — only when there's
+   a `Dockerfile.project`. A plain `docker build` against it, tagged with the
+   same image name the override sets, needs no trust, proves the Dockerfile
+   compiles, and warms the layer cache so the post-trust `aic rebuild` is quick:
 
-Config is on disk now, not yet proven to work. Move to Step 8 before calling
-this done.
+   ```bash
+   docker build -f .devcontainer/Dockerfile.project -t <override's image tag> .devcontainer
+   ```
+
+   A Dockerfile bug caught here costs nothing; caught after trust, it costs
+   another round-trip through the user.
+7. **Hand the trust step to the user.** When `aic validate` ends in `unsafe
+   configuration is not trusted`, stop: show the exact `!` finding lines, say in
+   one sentence why the plan needs each, and ask them to run `aic trust` in their
+   own terminal. Then re-run `aic validate` — `configuration valid — managed
+   files and resolved Compose model are accepted.` is the confirmation that it
+   landed. Do not pass `--allow-unsafe`, and do not edit any project-owned file
+   after they approve without telling them it needs re-approval.
+
+Config is on disk and trusted now, but not yet proven to work. Move to Step 8
+before calling this done.
 
 ## Step 8 — Verify it boots
 
@@ -365,16 +443,29 @@ Writing the files isn't the job — a sandbox the project can't actually start i
 isn't done. Prove it boots and that Step 5's customization took effect before
 reporting success.
 
-1. **Ask before pulling/building.** `aic up` pulls a multi-gigabyte GHCR image
-   (pull mode) or builds one locally (`--build` mode, or any `Dockerfile.project`)
-   — either can take minutes and use real disk. Confirm with the user before
-   running it. If they'd rather run it themselves, or Step 0 flagged Docker
-   isn't running, skip straight to Step 9 and hand off the commands instead.
-2. **Run `aic up`** and watch it through to completion, not just the exit code
-   — a `Dockerfile.project` build failure, a bad `docker-compose.override.yml`
-   key, or a stale pinned tag all surface here.
+1. **Pick the verb, then ask before pulling/building.** `aic rebuild` if the plan
+   wrote a `Dockerfile.project` — it is the only verb that builds one (golden
+   rules); plain `aic up` otherwise. Either can pull a multi-gigabyte GHCR image,
+   take minutes, and use real disk, so confirm with the user first. In **update
+   mode** the container usually already exists, and `aic up` will happily leave
+   it as-is — anything that must re-run (a changed `post-create.project.sh`, a
+   new named volume, a rebuilt image) needs `aic rebuild` too. If they'd rather
+   run it themselves, or Step 0 flagged Docker isn't running, skip straight to
+   Step 9 and hand off the commands instead.
+2. **Run it unpiped and read the whole output.** `aic up 2>&1 | tail -60` returns
+   `tail`'s exit status, so a config aic *refused* reads as a clean exit-0
+   success. Capture the full output (background it if it's long) and actually
+   read it — the exit code alone won't distinguish a refusal, a
+   `Dockerfile.project` build failure, a bad override key, and a stale pinned
+   tag.
 3. **If it fails, fix it — don't punt a broken container to the user.** Read the
    actual error, then match it to the likely project-owned file:
+   - `unsafe configuration is not trusted` → the config changed since the user
+     approved it (or was never approved). Back to Step 7's items 5–7: validate,
+     settle, re-ask. Never `--allow-unsafe`.
+   - Boots fine but every baked tool is missing and the named volumes aren't
+     writable → the build never ran. You used `aic up` where a
+     `Dockerfile.project` needs `aic rebuild`.
    - Image build error → check `Dockerfile.project`'s `FROM` matches the pinned
      tag (`grep image: .devcontainer/docker-compose.yml`).
    - Compose parse/validation error → check `docker-compose.override.yml`
@@ -391,6 +482,13 @@ reporting success.
    the first fix without confirming it actually resolved the failure.
 4. **Spot-check the plan actually landed**, using `aic run <cmd>` (no need for
    an interactive shell):
+   - **The container is running the image you expect** — do this one first
+     whenever there's a `Dockerfile.project`; it catches a skipped build in a
+     single command:
+     `docker compose --env-file .devcontainer/.env -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.override.yml ps --format '{{.Service}}\t{{.Image}}'`.
+     If `devcontainer` shows the base `ghcr.io/stefanoginella/aicontainer:…` tag,
+     your build never ran — `aic rebuild`. It also flags any *unexpected* service
+     in the list, which is usually a Step 0.6 orphan from a prior stack.
    - LSP binary on `PATH`: `aic run command -v pyright-langserver` (or whatever
      Step 5 installed).
    - Named volume writable: `aic run test -w /workspace/.venv && echo ok`.
@@ -418,9 +516,11 @@ little depending on whether Step 8 ran:
 - **If Step 8 verified it:** say so, state whether it's still up or you ran
   `aic down`, and give them the resume path — `aic shell` (or `aic up` again
   if stopped), then `claude` / `codex` / `opencode`.
-- **If verification was skipped or declined:** hand off the full CLI path —
-  `aic up` (pulls/builds the image, starts the stack), then `aic shell`, then
-  `claude` / `codex` / `opencode`.
+- **If verification was skipped or declined:** hand off the full CLI path, in
+  order — `aic trust` first if `aic validate` is still refusing, then
+  `aic rebuild` (or `aic up` when there's no `Dockerfile.project`) to
+  pull/build and start the stack, then `aic shell`, then `claude` / `codex` /
+  `opencode`.
 - **VS Code path** (either case): install the Dev Containers extension, then
   `Cmd+Shift+P → Dev Containers: Reopen in Container`.
 - **Mention if relevant:** `aic preflight` to re-print the trust boundary;

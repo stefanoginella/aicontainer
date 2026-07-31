@@ -61,6 +61,12 @@ generating config.
   containers through the socket-proxy (`docker compose up` works inside).
 - **Native / apt build deps, DB clients, extra runtimes** → `Dockerfile.project`.
 
+> Any `Dockerfile.project` route above carries three fixed costs — budget for
+> them in the plan, don't discover them: it needs its own `image:` tag in the
+> override (else the build re-tags the shared base image), it costs exactly one
+> interactive `aic trust`, and it makes `aic rebuild` — never `aic up` — the
+> boot verb. SKILL.md's golden rules and Step 7 have the sequence.
+
 ### Poor fit / non-fit (warn before generating anything)
 - **iOS / macOS-native** — Xcode, Swift + AppKit/UIKit, code-signing,
   notarization. Host-macOS toolchain; cannot run in Linux.
@@ -119,9 +125,9 @@ README's "Stop VS Code auto-activating a `.venv`" recipe is the source.
 |---|---|
 | Python + uv web app w/ Postgres | named volume for `.venv` + uv cache (+ `chown-paths`); override env `DATABASE_URL`→`host.docker.internal`; `post-create.project.sh` (`uv sync`, `npm i -g pyright`); `vscode-extensions`/`-settings` (pylance, interpreter path, venv-activate-off) |
 | Node/TS service | named volume for `node_modules`; `post-create.project.sh` (`npm ci`, `npm i -g typescript typescript-language-server`); `vscode-extensions`/`-settings` (eslint, prettier, format-on-save) |
-| Anything with browser e2e | `Dockerfile.project` (Playwright/Chromium recipe) + `build:` block in the override |
-| Go service | named volume for build cache; `post-create.project.sh` (`go install gopls`); `golang.go` |
-| Rust crate | named volume for `target`/cargo (+ `chown-paths`); `rust-analyzer` + `rust-lang.rust-analyzer` |
+| Anything with browser e2e | `Dockerfile.project` (Playwright/Chromium recipe) + `build:` **and** a distinct `image:` in the override |
+| Go service | named volume for build cache at `/home/vscode/.cache/go-build` (+ `chown-paths`); `post-create.project.sh` (`go install gopls`); `golang.go` |
+| Rust crate | named volumes `/workspace/target` and `/home/vscode/.cache/cargo` (+ `chown-paths`; set `CARGO_HOME` in `Dockerfile.project` — `~/.cargo` is not an accepted mount target); `rust-analyzer` + `rust-lang.rust-analyzer` |
 
 ## 5. post-create.project.sh: sandbox constraints and recipes
 
