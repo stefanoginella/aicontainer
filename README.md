@@ -365,13 +365,22 @@ file:
 ```yaml
 services:
   devcontainer:
+    # Required: give the build its own tag. Compose names a build's output
+    # after whatever `image:` resolves to, and the managed Compose file
+    # resolves it to the SHARED ghcr.io/stefanoginella/aicontainer:vX.Y.Z —
+    # so without this line the build silently re-tags the base image on your
+    # machine and hands this project's image to every other aic project.
+    image: myproject-devcontainer:vX.Y.Z
     build:
       context: .
       dockerfile: Dockerfile.project
 ```
 
 Run `aic sync`, inspect the resolved warning, then `aic trust` once and `aic
-rebuild`. A project Dockerfile executes as root while the image is built and can
+rebuild`. **`aic up` is not enough here:** it reuses the cached image
+(`pull_policy: missing`) and never runs the build, so the container comes up on
+the plain base image with none of your additions. A project Dockerfile executes
+as root while the image is built and can
 replace any sandbox helper, so aic intentionally treats every custom build as a
 host-boundary expansion even when its `FROM` is the official base. The trust is
 for the exact relevant config hash; changing the Dockerfile or override asks for

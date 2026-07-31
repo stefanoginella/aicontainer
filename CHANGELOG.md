@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `Dockerfile.project` recipe no longer clobbers the shared base image.**
+  Compose names a build's output after the service's `image:`, which the managed
+  Compose file resolves to `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` — so the
+  documented override now sets a project-specific tag, and says plainly that
+  `aic rebuild`, not `aic up`, is what runs the build.
+
 ## [0.7.0] - 2026-07-22
 
 ### Added
