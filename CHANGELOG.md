@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Docker socket proxy updated to v0.5.0.** The digest-pinned
+  `tecnativa/docker-socket-proxy` image that fronts the host socket moves to
+  v0.5.0 (newer HAProxy base). No change to the endpoint allowlist.
+
 ### Fixed
 
 - **Releases are marked "Latest" again on GitHub and GHCR.** The release
