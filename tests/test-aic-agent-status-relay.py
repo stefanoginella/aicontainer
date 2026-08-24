@@ -137,6 +137,30 @@ class PayloadTests(unittest.TestCase):
             )
         )
 
+    def test_accepts_every_label_expected_project_label_can_produce(self) -> None:
+        # aic strips disallowed characters instead of substituting them, so a
+        # checkout named "_internal" or "-scratch" keeps its leading _ or -.
+        # Dropping those projects would be silent: the hook has no diagnostic.
+        for label in ("_internal", "-scratch", "a", "my-api_2", "x" * 32):
+            payload = STATUS.build_payload(
+                "claude",
+                {"session_id": "session-1", "hook_event_name": "Stop"},
+                dict(ENV, AIC_STATUS_PROJECT=label),
+            )
+            assert payload is not None, label
+            self.assertEqual(payload["project"], label)
+        # The alphabet stays exactly aic's own: no uppercase, spaces,
+        # separators, or over-long values that the CLI can never generate.
+        for label in ("", "Project", "my api", "my.api", "my/api", "x" * 33):
+            self.assertIsNone(
+                STATUS.build_payload(
+                    "claude",
+                    {"session_id": "session-1", "hook_event_name": "Stop"},
+                    dict(ENV, AIC_STATUS_PROJECT=label),
+                ),
+                label,
+            )
+
 
 class DeliveryTests(unittest.TestCase):
     def test_posts_compact_json_to_the_one_fixed_endpoint(self) -> None:
@@ -258,6 +282,30 @@ class ManagedWiringTests(unittest.TestCase):
         # strict-firewall exception while still passing them.
         self.assertIn('\nSTATUS_RELAY_HOST="host.docker.internal"\n', FIREWALL)
         self.assertIn("\nSTATUS_RELAY_PORT=8787\n", FIREWALL)
+
+    def test_unreachable_relay_host_never_removes_the_allowlist(self) -> None:
+        # No compose template publishes host.docker.internal, so on plain
+        # Docker Engine or rootless Docker the name does not resolve. An
+        # informational callback must degrade to no rule, never abort enable
+        # and leave the project with no outbound allowlist at all.
+        enable = FIREWALL.split('resolve_proxy_into_set "$proxy_set"', 1)[1]
+        enable = enable.split('prepare_chain_v4 "$out_chain"', 1)[0]
+        relay_failure = enable.split('$STATUS_RELAY_HOST resolved 0 IPs', 1)
+        self.assertEqual(len(relay_failure), 2)
+        self.assertIn("WARNING", relay_failure[0].rsplit("echo", 1)[1])
+        self.assertNotIn("exit 1", relay_failure[1].split("fi", 1)[0])
+        self.assertIn("relay=0", relay_failure[1].split("fi", 1)[0])
+        # A relay name that resolves into a prohibited range is scoped the
+        # same way: it must not turn the shared abort flag on for everyone.
+        self.assertIn(
+            'PROHIBITED_RESOLUTION="$relay_prohibited_before"', FIREWALL
+        )
+        # Allowlist and socket-proxy resolution stay hard failures.
+        for guard in (
+            "resolved 0 allowlist IPs",
+            "socket-proxy resolved 0 IPs",
+        ):
+            self.assertIn("exit 1", enable.split(guard, 1)[1].split("fi", 1)[0])
 
 
 if __name__ == "__main__":

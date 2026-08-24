@@ -18,7 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Relay Claude and Codex lifecycle status to a host dashboard.** An opt-in,
   metadata-only managed hook posts working/waiting/end events to a fixed local
   endpoint; prompt content, tool inputs, paths, transcripts, and credentials
-  never enter the payload, and the strict firewall opens only that host port.
+  never enter the payload. One host marker at
+  `~/.config/aicontainer/status-relay` enables it for every project, `aic
+  status` shows whether it is applied yet, and the strict firewall opens only
+  that host port — silently skipping the rule, never the allowlist, when the
+  host publishes no gateway name.
 
 ## [0.8.1] - 2026-08-24
 

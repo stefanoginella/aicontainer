@@ -15,8 +15,17 @@ from typing import Any, BinaryIO
 
 ENDPOINT = "http://host.docker.internal:8787/events"
 MAX_INPUT_BYTES = 1_048_576
+# Socket timeout only: it bounds connect/send/recv, not the getaddrinfo call
+# urllib makes first. A resolver that blackholes host.docker.internal is
+# bounded by the agent's own hook timeout, not by this value.
 TIMEOUT_SECONDS = 0.5
 SAFE_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@ -]*$")
+# expected_project_label() strips disallowed characters instead of
+# substituting them, so a checkout in a directory named "_internal" or
+# "-scratch" keeps its leading _ or -. Mirror that exact alphabet and length
+# here: a stricter first character would silently drop every event for those
+# projects. It stays narrower than SAFE_VALUE in every other respect.
+SAFE_LABEL = re.compile(r"^[a-z0-9_-]{1,32}$")
 
 EVENT_STATES = {
     "claude": {
@@ -48,6 +57,12 @@ def safe_value(value: object, *, limit: int) -> str | None:
     return value
 
 
+def safe_label(value: object) -> str | None:
+    if not isinstance(value, str) or not SAFE_LABEL.fullmatch(value):
+        return None
+    return value
+
+
 def utc_timestamp() -> str:
     return (
         dt.datetime.now(dt.timezone.utc)
@@ -69,7 +84,7 @@ def build_payload(
 
     event = safe_value(event_input.get("hook_event_name"), limit=40)
     session_id = safe_value(event_input.get("session_id"), limit=128)
-    project = safe_value(environ.get("AIC_STATUS_PROJECT"), limit=32)
+    project = safe_label(environ.get("AIC_STATUS_PROJECT"))
     project_id = safe_value(environ.get("AIC_STATUS_PROJECT_ID"), limit=64)
     if not event or event not in EVENT_STATES[provider]:
         return None

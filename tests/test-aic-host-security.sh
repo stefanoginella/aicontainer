@@ -6,7 +6,9 @@ REAL_DOCKER=$(command -v docker)
 REAL_DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-export XDG_CONFIG_HOME="$TMP/host-config"
+export HOME="$TMP/host-home"
+export DOCKER_CONFIG="$REAL_DOCKER_CONFIG"
+mkdir -p "$HOME"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -208,12 +210,15 @@ echo "$out" | grep -q 'configuration valid' \
 
 # Only an exact global host marker can enable the callback; repository state
 # cannot supply the bit, endpoint, or project identity.
-relay_config="$TMP/relay-config"
-mkdir -p "$relay_config/aicontainer" "$TMP/relay-project"
-printf 'enabled\n' > "$relay_config/aicontainer/status-relay"
+relay_home="$TMP/relay-home"
+mkdir -p "$relay_home/.config/aicontainer" "$TMP/relay-project"
+printf 'enabled\n' > "$relay_home/.config/aicontainer/status-relay"
 git -C "$TMP/relay-project" init -q
-(cd "$TMP/relay-project" && XDG_CONFIG_HOME="$relay_config" AIC_HOME="$ROOT" \
-  "$ROOT/aic" init --with codex --shell zsh >/dev/null)
+# XDG_CONFIG_HOME must not move the marker: the Compose seed mount and
+# prepare_host_seed_paths() both hardcode $HOME/.config/aicontainer, so an
+# XDG-derived root would read a directory nothing else in aic ever uses.
+(cd "$TMP/relay-project" && HOME="$relay_home" XDG_CONFIG_HOME="$TMP/decoy-config" \
+  AIC_HOME="$ROOT" "$ROOT/aic" init --with codex --shell zsh >/dev/null)
 relay_name=$(sed -n 's/^name:[[:space:]]*//p' \
   "$TMP/relay-project/.devcontainer/docker-compose.yml")
 grep -q '^AIC_STATUS_RELAY=1$' "$TMP/relay-project/.devcontainer/.env" \
@@ -221,10 +226,24 @@ grep -q '^AIC_STATUS_RELAY=1$' "$TMP/relay-project/.devcontainer/.env" \
 grep -q "^AIC_STATUS_PROJECT_ID=$relay_name$" \
   "$TMP/relay-project/.devcontainer/.env" \
   || fail "enabled relay did not retain its managed project identity"
-out=$(cd "$TMP/relay-project" && XDG_CONFIG_HOME="$relay_config" \
+out=$(cd "$TMP/relay-project" && HOME="$relay_home" \
   AIC_HOME="$ROOT" "$ROOT/aic" status 2>&1)
 echo "$out" | grep -q 'relay:    enabled (host.docker.internal:8787)' \
   || fail "status did not report the enabled agent status relay"
+# A marker alone changes nothing until the generated .env is rewritten and the
+# container recreated. The diagnostic must say that instead of reporting a
+# relay the project is not running.
+sed -i.bak 's/^AIC_STATUS_RELAY=1$/AIC_STATUS_RELAY=0/' \
+  "$TMP/relay-project/.devcontainer/.env"
+rm -f "$TMP/relay-project/.devcontainer/.env.bak"
+out=$(cd "$TMP/relay-project" && HOME="$relay_home" \
+  AIC_HOME="$ROOT" "$ROOT/aic" status 2>&1)
+echo "$out" | grep -q 'relay:    enabled on host; pending aic rebuild' \
+  || fail "status claimed a relay the project has not applied yet"
+(cd "$TMP/relay-project" && HOME="$relay_home" AIC_HOME="$ROOT" \
+  "$ROOT/aic" sync >/dev/null)
+grep -q '^AIC_STATUS_RELAY=1$' "$TMP/relay-project/.devcontainer/.env" \
+  || fail "sync did not re-apply the host status-relay mode"
 
 cat > "$TMP/relay-project/.devcontainer/docker-compose.override.yml" <<'YAML'
 services:
@@ -232,9 +251,9 @@ services:
     environment:
       AIC_STATUS_RELAY: "0"
 YAML
-(cd "$TMP/relay-project" && XDG_CONFIG_HOME="$relay_config" AIC_HOME="$ROOT" \
+(cd "$TMP/relay-project" && HOME="$relay_home" AIC_HOME="$ROOT" \
   "$ROOT/aic" sync >/dev/null)
-out=$(cd "$TMP/relay-project" && XDG_CONFIG_HOME="$relay_config" \
+out=$(cd "$TMP/relay-project" && HOME="$relay_home" \
   AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
 echo "$out" | grep -q 'environment AIC_STATUS_RELAY overrides a managed startup or isolation boundary' \
   || fail "repository override silently changed the host-owned status relay mode"
@@ -242,19 +261,19 @@ echo "$out" | grep -q 'environment AIC_STATUS_RELAY overrides a managed startup 
 # A refused marker must be rejected before apply_template touches anything.
 # The managed copy is wholesale, so a late failure would leave devcontainer.json
 # reset to the pristine template with the project's AIC_TOOLS/AIC_SHELL lost.
-bad_relay_config="$TMP/bad-relay-config"
-mkdir -p "$bad_relay_config/aicontainer"
-printf enabled > "$bad_relay_config/aicontainer/status-relay"
+bad_relay_home="$TMP/bad-relay-home"
+mkdir -p "$bad_relay_home/.config/aicontainer"
+printf enabled > "$bad_relay_home/.config/aicontainer/status-relay"
 before_sync=$(cat "$TMP/one/api/.devcontainer/devcontainer.json")
-if (cd "$TMP/one/api" && XDG_CONFIG_HOME="$bad_relay_config" AIC_HOME="$ROOT" \
+if (cd "$TMP/one/api" && HOME="$bad_relay_home" AIC_HOME="$ROOT" \
     "$ROOT/aic" sync >/dev/null 2>&1); then
   fail "status relay accepted a malformed host marker"
 fi
 [ "$before_sync" = "$(cat "$TMP/one/api/.devcontainer/devcontainer.json")" ] \
   || fail "refused status-relay marker left a half-applied managed template"
-rm "$bad_relay_config/aicontainer/status-relay"
-ln -s /etc/passwd "$bad_relay_config/aicontainer/status-relay"
-if (cd "$TMP/one/api" && XDG_CONFIG_HOME="$bad_relay_config" AIC_HOME="$ROOT" \
+rm "$bad_relay_home/.config/aicontainer/status-relay"
+ln -s /etc/passwd "$bad_relay_home/.config/aicontainer/status-relay"
+if (cd "$TMP/one/api" && HOME="$bad_relay_home" AIC_HOME="$ROOT" \
     "$ROOT/aic" sync >/dev/null 2>&1); then
   fail "status relay accepted a symlinked host marker"
 fi
@@ -263,7 +282,7 @@ fi
 # Diagnostics must not disagree with the mutating commands: a marker that makes
 # init/sync/up refuse is a blocker, so doctor has to name it and exit nonzero.
 set +e
-out=$(cd "$TMP/one/api" && XDG_CONFIG_HOME="$bad_relay_config" AIC_HOME="$ROOT" \
+out=$(cd "$TMP/one/api" && HOME="$bad_relay_home" AIC_HOME="$ROOT" \
   "$ROOT/aic" doctor 2>&1)
 doctor_relay_rc=$?
 set -e

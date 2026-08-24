@@ -358,7 +358,17 @@ cmd_enable() {
   load_extra_domains "$allow_set"
   resolve_proxy_into_set "$proxy_set"
   if [ "$relay" -eq 1 ]; then
+    local relay_prohibited_before="$PROHIBITED_RESOLUTION"
     resolve_domain_into_set "$status_set" "$STATUS_RELAY_HOST"
+    if [ "$PROHIBITED_RESOLUTION" != "$relay_prohibited_before" ]; then
+      # Scoped on purpose: the optional relay is the only thing that loses
+      # here. Restoring the previous value keeps a prohibited allowlist or
+      # socket-proxy resolution a hard failure below.
+      echo "aic-firewall: WARNING — $STATUS_RELAY_HOST resolved into a prohibited range; the status relay stays blocked." >&2
+      PROHIBITED_RESOLUTION="$relay_prohibited_before"
+      ipset flush "$status_set"
+      relay=0
+    fi
   fi
 
   if [ "$PROHIBITED_RESOLUTION" -ne 0 ]; then
@@ -378,9 +388,14 @@ cmd_enable() {
     echo "aic-firewall: ERROR — socket-proxy resolved 0 IPs; leaving the allowlist policy unchanged." >&2
     exit 1
   fi
+  # A host that does not publish host.docker.internal (plain Docker Engine or
+  # rootless Docker on Linux) must not cost the project its allowlist: the
+  # relay is informational, so it degrades to "no rule" and the enable
+  # continues. Only allowlist/socket-proxy resolution failures abort.
   if [ "$relay" -eq 1 ] && { ! [[ "${status_count:-0}" =~ ^[0-9]+$ ]] || [ "${status_count:-0}" -eq 0 ]; }; then
-    echo "aic-firewall: ERROR — $STATUS_RELAY_HOST resolved 0 IPs; leaving the allowlist policy unchanged." >&2
-    exit 1
+    echo "aic-firewall: WARNING — $STATUS_RELAY_HOST resolved 0 IPs; the status relay stays blocked (the allowlist is unchanged)." >&2
+    status_count=0
+    relay=0
   fi
   echo "==> aic-firewall: $count allowlist IPs; $proxy_count socket-proxy IP(s); $status_count status-relay IP(s)"
 

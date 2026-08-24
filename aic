@@ -147,9 +147,13 @@ export_runtime_environment () {
 # user does that globally with one exact, non-symlinked marker file:
 #   ~/.config/aicontainer/status-relay  (contents: "enabled\n")
 # Its contents never enter the container; only the generated 0/1 mode does.
+# XDG_CONFIG_HOME is deliberately not honored: the personal-overlay seed dir
+# is fixed at $HOME/.config/aicontainer in both Compose templates and in
+# prepare_host_seed_paths(), so a second root here would read a directory the
+# rest of the project never touches — a silently ignored marker, not an error.
 status_relay_mode () {
   local root file bytes value
-  root="${XDG_CONFIG_HOME:-$HOME/.config}"
+  root="$HOME/.config"
   file="$root/aicontainer/status-relay"
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
     printf '0\n'
@@ -166,6 +170,17 @@ status_relay_mode () {
     return 1
   fi
   printf '1\n'
+}
+
+# The 0/1 mode the project will actually run with. write_runtime_environment_file()
+# owns the file, so this is generated state, never repository input: a missing or
+# unreadable file means "not applied yet", which is exactly the disabled default.
+read_applied_status_relay () {
+  local file=".devcontainer/.env" value
+  if [ -f "$file" ] && [ ! -L "$file" ]; then
+    value="$(sed -n 's/^AIC_STATUS_RELAY=\(.*\)$/\1/p' "$file" | tail -n1)"
+  fi
+  if [ "${value:-0}" = 1 ]; then printf '1\n'; else printf '0\n'; fi
 }
 
 write_runtime_environment_file () {
@@ -3521,7 +3536,8 @@ status_volume_state () {
 cmd_status () {
   [ "$#" -eq 0 ] || die "usage: aic status"
   require_in_project
-  local project mode tools shell docker_mode relay_mode consent="n/a" cli_version pinned image_summary
+  local project mode tools shell docker_mode relay_mode relay_applied
+  local consent="n/a" cli_version pinned image_summary
   local daemon=0 cid="" auth_cid="" runtime_state="unavailable" running_image=""
   local auth_state sessions_state bridge_state="unknown (Docker unavailable)" bridge_health=""
   local host_socket="unavailable" runtime_identity
@@ -3539,9 +3555,19 @@ cmd_status () {
     *) docker_mode="invalid — run aic sync --no-docker" ;;
   esac
   if relay_mode="$(status_relay_mode 2>/dev/null)"; then
-    [ "$relay_mode" = 1 ] \
-      && relay_mode="enabled (host.docker.internal:8787)" \
-      || relay_mode="disabled"
+    # The marker is host consent; the generated .env is what this project runs
+    # with. Report both, so the line never claims a relay that only starts
+    # after the next rebuild (which rewrites .env and recreates the container).
+    relay_applied="$(read_applied_status_relay)"
+    if [ "$relay_mode" != "$relay_applied" ]; then
+      [ "$relay_mode" = 1 ] \
+        && relay_mode="enabled on host; pending aic rebuild" \
+        || relay_mode="disabled on host; pending aic rebuild"
+    elif [ "$relay_mode" = 1 ]; then
+      relay_mode="enabled (host.docker.internal:8787)"
+    else
+      relay_mode="disabled"
+    fi
   else
     relay_mode="invalid host marker"
   fi

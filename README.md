@@ -622,17 +622,25 @@ Code initialization refresh the mode automatically. To opt out, delete the
 marker and rebuild. The marker must be a regular, non-symlinked file containing
 exactly `enabled` plus a newline. A repository `.env` or Compose override cannot
 silently turn the relay on, change its identity, or redirect it. `aic status`
-reports whether the host-global relay is enabled for the current project.
+reports the host marker and the value the project actually runs with, so a
+marker written but not yet applied shows as `pending aic rebuild`.
 
 Every callback goes to the non-configurable URL
-`http://host.docker.internal:8787/events`, times out after 500 ms, ignores proxy
-environment variables and redirects, and fails open: no listener, malformed
-hook input, DNS failure, or HTTP error can delay or change agent behavior. On
-Docker Desktop for macOS/Windows, `host.docker.internal` is built in. Linux
+`http://host.docker.internal:8787/events`, ignores proxy environment variables
+and redirects, and fails open: no listener, malformed hook input, DNS failure,
+or HTTP error is swallowed and never changes agent behavior. The 500 ms
+timeout covers the connection itself, not the preceding name lookup — a host
+resolver that blackholes `host.docker.internal` instead of answering is
+bounded by each tool's own hook timeout (a couple of seconds), so keep the
+name either resolvable or absent.
+
+On Docker Desktop for macOS/Windows, `host.docker.internal` is built in. Linux
 users must expose the host gateway (usually an `extra_hosts` entry for
 `host.docker.internal:host-gateway`, reviewed with `aic trust`). If the opt-in
 network allowlist is active, aic permits only TCP 8787 to that resolved
-host-gateway address — it does not add the host to the general allowlist.
+host-gateway address — it does not add the host to the general allowlist. When
+the name does not resolve, the firewall warns and simply omits that one rule;
+an unreachable dashboard never costs the project its outbound allowlist.
 
 The JSON contract is deliberately small:
 

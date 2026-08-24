@@ -29,10 +29,10 @@ it.
     modes; a managed guide to the do-not-edit vs project-owned split. Keep its
     two lists in sync with `apply_template()` and the project-owned files.
   - `.gitignore` — copied in both modes and contains only `.env`.
-`.devcontainer/.env` itself is atomically generated per host/context; it holds
-the socket, runtime user, path-free project identity, and host-owned status
-relay mode. It is a managed control file, not a template asset or project-owned
-override.
+  - `.env` itself is atomically generated per host/context; it holds the
+    socket, runtime user, path-free project identity, and host-owned status
+    relay mode. It is a managed control file, not a template asset or
+    project-owned override.
 - `.github/workflows/`
   - `rebuild.yml` — **security-refresh track**: relevant template/CLI/test/
     package pushes to `main`, weekly cron, `workflow_dispatch`. Publishes GHCR
@@ -211,16 +211,29 @@ the dotenv grammar, or remove `.env`/`.gitignore` from the control-path checks
 and template copies.
 
 **The agent-status relay is generated host consent too.** It defaults off and
-only the exact, non-symlinked `~/.config/aicontainer/status-relay` marker can
-enable it; repository Compose/devcontainer input cannot set or redirect it.
-The managed environment values (`AIC_STATUS_RELAY`, `AIC_STATUS_PROJECT`, and
+only the exact, non-symlinked `$HOME/.config/aicontainer/status-relay` marker
+can enable it; repository Compose/devcontainer input cannot set or redirect it.
+That path is fixed, not XDG-derived: the Compose seed mount and
+`prepare_host_seed_paths()` hardcode the same directory, and a second root
+would make a correctly written marker silently do nothing. The managed
+environment values (`AIC_STATUS_RELAY`, `AIC_STATUS_PROJECT`, and
 `AIC_STATUS_PROJECT_ID`) stay protected by resolved-config validation. The
 root-owned hook sends only the fixed schema covered by
 `tests/test-aic-agent-status-relay.py` to
 `http://host.docker.internal:8787/events`, with proxies/redirects disabled and
-fail-open timeout/error handling. Never add prompt, response, path, transcript,
-tool input/result, or error content. The strict firewall exception must remain
-an exact TCP-8787 status ipset rule, never general host-gateway reachability.
+fail-open timeout/error handling. Its label validation must keep accepting the
+full `expected_project_label()` alphabet (leading `_`/`-` included), otherwise
+affected projects lose every event with no diagnostic anywhere. Never add
+prompt, response, path, transcript, tool input/result, or error content.
+
+The strict firewall exception must remain an exact TCP-8787 status ipset rule,
+never general host-gateway reachability — and it must stay strengthen-only in
+the other direction too: when `host.docker.internal` does not resolve (plain
+Docker Engine, rootless Docker) or resolves into a prohibited range, `enable`
+warns and omits that one rule. It must never abort and leave the project with
+no allowlist; observability cannot be allowed to remove policy. `aic status`
+reports the marker together with the applied `.env` value for the same reason:
+a diagnostic that claims an unapplied relay is active is a wrong diagnostic.
 
 ## Host seeds, tool homes, and reusable auth
 
