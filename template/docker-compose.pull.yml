@@ -199,16 +199,17 @@ services:
     read_only: true
     tmpfs:
       - /run
-      # 0.4.x writes the rendered haproxy.cfg to /tmp/haproxy.cfg on startup.
+      # The image renders haproxy.cfg to /tmp/haproxy.cfg on startup, so /tmp
+      # must stay writable under the read-only rootfs.
       - /tmp
     volumes:
       - type: bind
         source: ${AIC_DOCKER_SOCKET:-/var/run/docker.sock}
         target: /var/run/docker.sock
         read_only: true
-      # haproxy 3.x in 0.4.x loads /var/lib/haproxy/server-state on startup;
-      # an anonymous volume seeds it from the image (the file is pre-touched
-      # in the Dockerfile) while keeping the path writable.
+      # haproxy loads /var/lib/haproxy/server-state on startup; an anonymous
+      # volume seeds it from the image (the file is pre-touched in the image's
+      # own Dockerfile) while keeping the path writable.
       - /var/lib/haproxy
     environment:
       # Host object reads are OFF by default: an unrestricted agent does not
