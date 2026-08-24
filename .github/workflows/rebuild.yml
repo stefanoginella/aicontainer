@@ -400,6 +400,26 @@ jobs:
             fi
           '
 
+      - name: Smoke test - agent status hooks are managed and opt-in
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . bash -lc '
+            set -e
+            [ "${AIC_STATUS_RELAY-}" = 0 ] || { echo "FAIL: status relay did not default off"; exit 1; }
+            [ "$(stat -c "%U:%G:%a" /etc/aic/hooks/agent-status.py)" = root:root:644 ] \
+              || { echo "FAIL: status relay hook is not root-owned 0644"; exit 1; }
+            command="/usr/bin/python3 -I /etc/aic/hooks/agent-status.py claude"
+            jq -e --arg command "$command" \
+              ".hooks.SessionStart[0].hooks[0].command == \$command and .hooks.SessionEnd[0].hooks[0].command == \$command" \
+              /etc/claude-code/managed-settings.json >/dev/null \
+              || { echo "FAIL: Claude lifecycle hooks are not managed"; exit 1; }
+            [ "$(grep -Fc "/usr/bin/python3 -I /etc/aic/hooks/agent-status.py codex" /etc/codex/requirements.toml)" = 5 ] \
+              || { echo "FAIL: Codex lifecycle hooks are not managed"; exit 1; }
+            payload='\''{"session_id":"ci-secret","hook_event_name":"Stop","prompt":"must-not-leak"}'\''
+            printf "%s\n" "$payload" | /usr/bin/python3 -I /etc/aic/hooks/agent-status.py claude
+            echo "OK: metadata relay is root-managed, wired, opt-in, and fail-open"
+          '
+
       - name: Smoke test - OpenCode guardrail blocks a .env read
         working-directory: /tmp/proj
         run: |
