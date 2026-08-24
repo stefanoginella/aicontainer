@@ -239,19 +239,27 @@ out=$(cd "$TMP/relay-project" && XDG_CONFIG_HOME="$relay_config" \
 echo "$out" | grep -q 'environment AIC_STATUS_RELAY overrides a managed startup or isolation boundary' \
   || fail "repository override silently changed the host-owned status relay mode"
 
+# A refused marker must be rejected before apply_template touches anything.
+# The managed copy is wholesale, so a late failure would leave devcontainer.json
+# reset to the pristine template with the project's AIC_TOOLS/AIC_SHELL lost.
 bad_relay_config="$TMP/bad-relay-config"
 mkdir -p "$bad_relay_config/aicontainer"
 printf enabled > "$bad_relay_config/aicontainer/status-relay"
+before_sync=$(cat "$TMP/one/api/.devcontainer/devcontainer.json")
 if (cd "$TMP/one/api" && XDG_CONFIG_HOME="$bad_relay_config" AIC_HOME="$ROOT" \
     "$ROOT/aic" sync >/dev/null 2>&1); then
   fail "status relay accepted a malformed host marker"
 fi
+[ "$before_sync" = "$(cat "$TMP/one/api/.devcontainer/devcontainer.json")" ] \
+  || fail "refused status-relay marker left a half-applied managed template"
 rm "$bad_relay_config/aicontainer/status-relay"
 ln -s /etc/passwd "$bad_relay_config/aicontainer/status-relay"
 if (cd "$TMP/one/api" && XDG_CONFIG_HOME="$bad_relay_config" AIC_HOME="$ROOT" \
     "$ROOT/aic" sync >/dev/null 2>&1); then
   fail "status relay accepted a symlinked host marker"
 fi
+[ "$before_sync" = "$(cat "$TMP/one/api/.devcontainer/devcontainer.json")" ] \
+  || fail "symlinked status-relay marker left a half-applied managed template"
 
 # The copied guide and ignore file are managed security/UX artifacts too: the
 # former tells an in-container agent which paths it must not edit, while the

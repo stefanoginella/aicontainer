@@ -1027,6 +1027,7 @@ cmd_init () {
   shell="$(validate_shell "$shell")"
 
   resolve_docker_socket >/dev/null || die "cannot initialize aicontainer with the selected Docker context"
+  status_relay_mode >/dev/null || die "fix the host status-relay marker before initializing"
   apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer" "$docker"
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
   set_docker_consent "$docker"
@@ -1196,6 +1197,7 @@ cmd_sync () {
   shell="$(validate_shell "$shell")"
 
   resolve_docker_socket >/dev/null || die "cannot sync aicontainer with the selected Docker context"
+  status_relay_mode >/dev/null || die "fix the host status-relay marker before syncing"
   apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer" "$docker"
   patch_devcontainer_json ".devcontainer/devcontainer.json" "$tools" "$shell"
   # None is also a revocation: clear stale outside-repo read/write consent even
@@ -1681,7 +1683,35 @@ function inspectHostPassThrough(model, baseline) {
     }
   }
 }
+// Compose accepts `environment` / `build.args` as either a map or a `K=V`
+// list, and merging an override flips the managed base's map into a list. The
+// comparisons below key on position, so without this normalization every
+// managed `${VAR}` in the base would read as override-added the moment any
+// override exists. Compare by name instead.
+function normalizeEnvShape(value) {
+  if (!Array.isArray(value)) return value;
+  const out = {};
+  for (const entry of value) {
+    if (typeof entry !== 'string') return value;
+    const eq = entry.indexOf('=');
+    if (eq === -1) out[entry] = null;
+    else out[entry.slice(0, eq)] = entry.slice(eq + 1);
+  }
+  return out;
+}
+function normalizeInterpolationModel(model) {
+  for (const service of Object.values((model && model.services) || {})) {
+    if (!service || typeof service !== 'object') continue;
+    if (service.environment) service.environment = normalizeEnvShape(service.environment);
+    if (service.build && typeof service.build === 'object' && service.build.args) {
+      service.build.args = normalizeEnvShape(service.build.args);
+    }
+  }
+  return model;
+}
 if (hasOverride) {
+  normalizeInterpolationModel(rawBase);
+  normalizeInterpolationModel(rawFinal);
   inspectInterpolation(rawFinal, rawBase);
   inspectHostPassThrough(rawFinal, rawBase);
 }
