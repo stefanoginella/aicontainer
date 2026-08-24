@@ -285,7 +285,7 @@ jobs:
       - name: Smoke test - socket-proxy exposes only ping/version by default
         working-directory: /tmp/proj
         run: |
-          grep -qF 'tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476' .devcontainer/docker-compose.yml \
+          grep -qF 'tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459' .devcontainer/docker-compose.yml \
             || { echo "FAIL: socket-proxy image is not digest-pinned"; exit 1; }
           devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/_ping
           devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/version >/dev/null

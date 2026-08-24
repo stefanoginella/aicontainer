@@ -18,6 +18,15 @@
       "matchStrings": [
         "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)(?: registryUrl=(?<registryUrl>.*?))?\\s+ARG \\w+_VERSION=(?<currentValue>.*)\\s"
       ]
+    },
+    {
+      "description": "Keep the CI smoke assertion's hardcoded socket-proxy pin in sync with the compose files. rebuild.yml and release.yml assert the exact digest-pinned image because that service holds the raw host socket, so a compose-only bump fails the smoke test every cycle.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/(rebuild|release)\\.yml$/"],
+      "matchStrings": [
+        "(?<depName>tecnativa/docker-socket-proxy):(?<currentValue>v[^@'\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
     }
   ]
 }
