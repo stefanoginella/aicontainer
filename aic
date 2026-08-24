@@ -55,15 +55,24 @@ legacy_project_name () {
 expected_project_name () {
   local base root hash
   root="$(pwd -P)"
-  base="$(basename -- "$root")"
+  base="$(expected_project_label)"
+  hash="$(node -e 'process.stdout.write(require("crypto").createHash("sha256").update(process.argv[1]).digest("hex").slice(0,12))' "$root")" \
+    || die "Node.js 18+ is required to compute the project identity"
+  printf 'aic-%s-%s\n' "$base" "$hash"
+}
+
+# Human-readable, dotenv-safe half of the project identity. This is deliberately
+# path-free: the host status relay may expose it to a local dashboard, while the
+# hash in expected_project_name() remains the collision-resistant identifier.
+expected_project_label () {
+  local base
+  base="$(basename -- "$(pwd -P)")"
   # toLowerCase().replace(/[^a-z0-9_-]/g, '') — strip, don't substitute. Keep
   # the readable portion bounded so Docker object names remain manageable.
   base="$(printf '%s' "$base" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -dc 'a-z0-9_-')"
   base="${base:0:32}"
   [ -n "$base" ] || base="project"
-  hash="$(node -e 'process.stdout.write(require("crypto").createHash("sha256").update(process.argv[1]).digest("hex").slice(0,12))' "$root")" \
-    || die "Node.js 18+ is required to compute the project identity"
-  printf 'aic-%s-%s\n' "$base" "$hash"
+  printf '%s\n' "$base"
 }
 
 # The Dev Containers CLI remaps the vscode user to the host UID/GID on native
@@ -127,19 +136,49 @@ resolve_docker_socket () {
 export_runtime_environment () {
   AIC_DOCKER_SOCKET="$(resolve_docker_socket)"
   AIC_RUNTIME_USER="$(runtime_user_id)"
-  export AIC_DOCKER_SOCKET AIC_RUNTIME_USER
+  AIC_STATUS_RELAY="$(status_relay_mode)" || return 1
+  AIC_STATUS_PROJECT="$(expected_project_label)"
+  AIC_STATUS_PROJECT_ID="$(expected_project_name)"
+  export AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY \
+    AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID
+}
+
+# A repository must not be able to opt itself into a host callback. The host
+# user does that globally with one exact, non-symlinked marker file:
+#   ~/.config/aicontainer/status-relay  (contents: "enabled\n")
+# Its contents never enter the container; only the generated 0/1 mode does.
+status_relay_mode () {
+  local root file bytes value
+  root="${XDG_CONFIG_HOME:-$HOME/.config}"
+  file="$root/aicontainer/status-relay"
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    printf '0\n'
+    return 0
+  fi
+  if [ -L "$file" ] || [ ! -f "$file" ]; then
+    err "$file must be a regular file, not a symlink"
+    return 1
+  fi
+  bytes="$(wc -c < "$file" | tr -d '[:space:]')"
+  value="$(cat "$file" 2>/dev/null || true)"
+  if [ "$bytes" != 8 ] || [ "$value" != enabled ]; then
+    err "$file must contain exactly 'enabled' followed by a newline"
+    return 1
+  fi
+  printf '1\n'
 }
 
 write_runtime_environment_file () {
   local file=".devcontainer/.env" tmp
-  export_runtime_environment || die "could not select a bind-mountable Docker socket"
+  export_runtime_environment || die "could not generate the managed host runtime environment"
   [ -d .devcontainer ] || return 0
   if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then
     die "$file must be a regular file, not a symlink"
   fi
   tmp="$(mktemp ".devcontainer/.aic-env.XXXXXX")"
-  printf 'AIC_DOCKER_SOCKET=%s\nAIC_RUNTIME_USER=%s\n' \
-    "$AIC_DOCKER_SOCKET" "$AIC_RUNTIME_USER" > "$tmp"
+  printf 'AIC_DOCKER_SOCKET=%s\nAIC_RUNTIME_USER=%s\nAIC_STATUS_RELAY=%s\nAIC_STATUS_PROJECT=%s\nAIC_STATUS_PROJECT_ID=%s\n' \
+    "$AIC_DOCKER_SOCKET" "$AIC_RUNTIME_USER" "$AIC_STATUS_RELAY" \
+    "$AIC_STATUS_PROJECT" "$AIC_STATUS_PROJECT_ID" > "$tmp"
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$file"
 }
@@ -149,7 +188,10 @@ validate_runtime_environment_file () {
   [ -e "$file" ] || return 0
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   expected="AIC_DOCKER_SOCKET=$AIC_DOCKER_SOCKET
-AIC_RUNTIME_USER=$AIC_RUNTIME_USER"
+AIC_RUNTIME_USER=$AIC_RUNTIME_USER
+AIC_STATUS_RELAY=$AIC_STATUS_RELAY
+AIC_STATUS_PROJECT=$AIC_STATUS_PROJECT
+AIC_STATUS_PROJECT_ID=$AIC_STATUS_PROJECT_ID"
   actual="$(cat "$file" 2>/dev/null || true)"
   [ "$actual" = "$expected" ]
 }
@@ -1419,12 +1461,15 @@ analyze_resolved_config () {
     .devcontainer/devcontainer.json "$TEMPLATE_DIR/devcontainer.json" \
     "$base_json" "$expected_json" "$final_json" "$noenv_json" \
     "$raw_base_json" "$raw_final_json" "$(pwd -P)" \
-    "$(expected_project_name)" "$has_override" "$(runtime_user_id)" >> "$out" <<'NODE'
+    "$(expected_project_name)" "$has_override" "$(runtime_user_id)" \
+    "${AIC_STATUS_RELAY:-0}" "${AIC_STATUS_PROJECT:-$(expected_project_label)}" \
+    "${AIC_STATUS_PROJECT_ID:-$(expected_project_name)}" >> "$out" <<'NODE'
 const fs = require('fs');
 const path = require('path');
 
 const [devFile, templateDevFile, baseFile, expectedFile, finalFile, noenvFile,
-  rawBaseFile, rawFinalFile, rootArg, expectedName, hasOverrideRaw, runtimeUser] = process.argv.slice(2);
+  rawBaseFile, rawFinalFile, rootArg, expectedName, hasOverrideRaw, runtimeUser,
+  statusRelay, statusProject, statusProjectId] = process.argv.slice(2);
 const root = fs.realpathSync(rootArg);
 const hasOverride = hasOverrideRaw === '1';
 // Findings include repository-controlled service names, paths, and values.
@@ -1715,6 +1760,18 @@ function normalizeManaged(model, actual) {
         volume.source = `<managed-source:${volume.target}>`;
       }
     }
+    const managedStatusEnvironment = {
+      AIC_STATUS_RELAY: statusRelay,
+      AIC_STATUS_PROJECT: statusProject,
+      AIC_STATUS_PROJECT_ID: statusProjectId,
+    };
+    for (const [key, expected] of Object.entries(managedStatusEnvironment)) {
+      const found = String((dev.environment || {})[key] || '');
+      if (actual && found !== expected) {
+        managed(`managed ${key} must match host-generated runtime state; run aic sync`);
+      }
+      if (dev.environment) dev.environment[key] = `<managed:${key}>`;
+    }
   }
   const proxy = m.services && m.services['socket-proxy'];
   if (proxy && proxy.environment) {
@@ -1821,7 +1878,9 @@ const isApprovedDevcontainerDataTarget = target => {
 // root-managed tool homes, shell/Git startup, pre-policy dynamic loader, and
 // Docker proxy endpoint unless the host explicitly reviews the expansion.
 const protectedEnvironment = new Map(Object.entries(actualEnv));
-protectedEnvironment.set('DOCKER_HOST', String((baseServices.devcontainer.environment || {}).DOCKER_HOST || ''));
+for (const key of ['DOCKER_HOST', 'AIC_STATUS_RELAY', 'AIC_STATUS_PROJECT', 'AIC_STATUS_PROJECT_ID']) {
+  protectedEnvironment.set(key, String((baseServices.devcontainer.environment || {})[key] || ''));
+}
 protectedEnvironment.set('HOME', '/home/vscode');
 protectedEnvironment.set('ZDOTDIR', '/etc/aic/shell/zsh');
 protectedEnvironment.set('CODEX_HOME', '/home/vscode/.codex');
@@ -2070,11 +2129,14 @@ validate_project_security () {
   findings="$(mktemp "${TMPDIR:-/tmp}/aic-findings.XXXXXX")"
 
   if ! export_runtime_environment; then
-    printf 'MANAGED\t%s\n' 'could not resolve a bind-mountable local Docker socket from the selected context' >> "$findings"
+    printf 'MANAGED\t%s\n' 'could not resolve the managed host runtime environment (Docker context or status-relay marker)' >> "$findings"
     AIC_DOCKER_SOCKET=/var/run/docker.sock
-    export AIC_DOCKER_SOCKET
+    AIC_STATUS_RELAY=0
+    AIC_STATUS_PROJECT="$(expected_project_label)"
+    AIC_STATUS_PROJECT_ID="$(expected_project_name)"
+    export AIC_DOCKER_SOCKET AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID
   elif ! validate_runtime_environment_file; then
-    printf 'MANAGED\t%s\n' '.devcontainer/.env does not match this host Docker context; run aic sync or aic initialize' >> "$findings"
+    printf 'MANAGED\t%s\n' '.devcontainer/.env does not match this host runtime state; run aic sync or aic initialize' >> "$findings"
   fi
   validate_managed_build_files "$findings"
   if [ -f .devcontainer/Dockerfile ]; then
@@ -3372,7 +3434,7 @@ YAML
         if [ ! -e .devcontainer/.env ]; then
           doctor_warn ".devcontainer/.env is absent; aic initialize will generate it before startup"
         elif validate_runtime_environment_file; then
-          doctor_ok "managed Docker socket environment matches the selected context"
+          doctor_ok "managed host runtime environment matches the Docker context and relay mode"
         else
           doctor_fail ".devcontainer/.env is stale or modified — run 'aic sync' or 'aic initialize'"
         fi
@@ -3417,7 +3479,7 @@ status_volume_state () {
 cmd_status () {
   [ "$#" -eq 0 ] || die "usage: aic status"
   require_in_project
-  local project mode tools shell docker_mode consent="n/a" cli_version pinned image_summary
+  local project mode tools shell docker_mode relay_mode consent="n/a" cli_version pinned image_summary
   local daemon=0 cid="" auth_cid="" runtime_state="unavailable" running_image=""
   local auth_state sessions_state bridge_state="unknown (Docker unavailable)" bridge_health=""
   local host_socket="unavailable" runtime_identity
@@ -3434,6 +3496,13 @@ cmd_status () {
     rw) docker_consent_matches rw && consent="present" || consent="missing"; docker_mode="read-write (consent: $consent)" ;;
     *) docker_mode="invalid — run aic sync --no-docker" ;;
   esac
+  if relay_mode="$(status_relay_mode 2>/dev/null)"; then
+    [ "$relay_mode" = 1 ] \
+      && relay_mode="enabled (host.docker.internal:8787)" \
+      || relay_mode="disabled"
+  else
+    relay_mode="invalid host marker"
+  fi
 
   cli_version="$(read_aic_version)"
   pinned="$(read_pinned_compose_version)"
@@ -3483,6 +3552,7 @@ cmd_status () {
   printf '  project:  %s\n' "$project"
   printf '  mode:     %s; tools: %s; shell: %s\n' "$mode" "$tools" "$shell"
   printf '  Docker:   %s\n' "$docker_mode"
+  printf '  relay:    %s\n' "$relay_mode"
   printf '  host:     socket %s; runtime uid:gid %s\n' "$host_socket" "$runtime_identity"
   printf '  image:    %s\n' "$image_summary"
   printf '  runtime:  %s' "$runtime_state"

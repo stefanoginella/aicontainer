@@ -156,7 +156,7 @@ RUN chmod 0755 /usr/local/bin/aic-firewall \
 # ---------------------------------------------------------------------------
 COPY hooks/ /etc/aic/hooks/
 RUN chmod 755 /etc/aic/hooks /etc/aic /etc/aic/hooks/*.sh \
-    && chmod 644 /etc/aic/hooks/*.json /etc/aic/hooks/*.js \
+    && chmod 644 /etc/aic/hooks/*.json /etc/aic/hooks/*.js /etc/aic/hooks/*.py \
     && chown -R root:root /etc/aic
 
 # Claude Code and OpenCode both support root-owned managed settings on Linux.
@@ -171,7 +171,7 @@ RUN mkdir -p /etc/claude-code /etc/opencode \
     && chown -R root:root /etc/claude-code /etc/opencode
 
 # ---------------------------------------------------------------------------
-# Codex managed hook (wires the shared PreToolUse guardrail into Codex)
+# Codex managed hooks (shared guardrail + optional lifecycle status relay)
 # ---------------------------------------------------------------------------
 # Codex command hooks are trust-gated: a hook defined in ~/.codex/config.toml is
 # "non-managed", starts untrusted, and is SKIPPED until reviewed via `/hooks` —
@@ -182,12 +182,16 @@ RUN mkdir -p /etc/claude-code /etc/opencode \
 # Codex's event JSON (.tool_name / .tool_input.command, exit 2 = block) matches
 # what pre-tool-use.sh already parses; we match the Bash tool, through which
 # Codex runs shell and reads files (`cat`), so the .env-read and curl|sh checks
-# apply. Root-owned + 0644 so the agent can't edit or disable it.
+# apply. The lifecycle handlers are metadata-only, backgrounded where the event
+# permits it, and fail-open; SessionEnd is synchronous by Codex contract. The
+# requirements file and both scripts are root-owned so the agent can't edit or
+# disable either registration.
 # (NOTE: a prior version wrote a `[hooks] pre_tool_use = "..."` scalar into
 # config.toml — wrong schema AND non-managed, so it never ran for Codex.)
 RUN mkdir -p /etc/codex && cat > /etc/codex/requirements.toml <<'CODEX_REQ_EOF'
 # Managed by aicontainer — baked into the image, do not edit. Forces the shared
-# PreToolUse guardrail to run for Codex without an interactive trust prompt.
+# PreToolUse guardrail and wires the optional lifecycle status relay without an
+# interactive trust prompt.
 allow_managed_hooks_only = true
 allowed_approval_policies = ["never"]
 # Codex 0.144+ requires `read-only` to be present whenever any permission
@@ -210,6 +214,45 @@ type = "command"
 command = "/etc/aic/hooks/pre-tool-use.sh"
 timeout = 30
 statusMessage = "aicontainer guardrail"
+
+[[hooks.SessionStart]]
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/usr/bin/python3 -I /etc/aic/hooks/agent-status.py codex"
+timeout = 2
+async = true
+
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "/usr/bin/python3 -I /etc/aic/hooks/agent-status.py codex"
+timeout = 2
+async = true
+
+[[hooks.PermissionRequest]]
+
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "/usr/bin/python3 -I /etc/aic/hooks/agent-status.py codex"
+timeout = 2
+async = true
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "/usr/bin/python3 -I /etc/aic/hooks/agent-status.py codex"
+timeout = 2
+async = true
+
+[[hooks.SessionEnd]]
+
+[[hooks.SessionEnd.hooks]]
+type = "command"
+command = "/usr/bin/python3 -I /etc/aic/hooks/agent-status.py codex"
+timeout = 2
 CODEX_REQ_EOF
 RUN chmod 0644 /etc/codex/requirements.toml \
     && chown root:root /etc/codex/requirements.toml

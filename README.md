@@ -34,6 +34,7 @@ shown automatically at the end of every `aic up`).
 | Host shell startup files (`.zshrc`, `.bashrc`, fish config, p10k) and Claude `statusLine` | **Not automatically.** Shells start from root-managed aicontainer profiles and the host `statusLine` command is dropped, so nothing host-side plants startup code. You can opt in per file by copying it into `~/.config/aicontainer/` (`rc.zsh`, `p10k.zsh`, `statusline.*`); those cross verbatim and land root-locked. See [Personal shell config](#personal-shell-config) and [statusline](#personal-claude-code-statusline). |
 | Host home, `~/.ssh`, SSH-agent socket | **No** — not mounted, not forwarded. |
 | Host credentials (API keys, `gh` token, keychain) | **No** — nothing auto-forwarded; you log in once *inside* the container. |
+| Host agent-status receiver | **No by default.** A host-global marker opts all projects into metadata-only Claude/Codex lifecycle callbacks at one fixed local URL. Repositories cannot enable or redirect it. See [Agent status relay](#agent-status-relay). |
 | Package-manager caches | **No** — container-local volumes, not your host caches. |
 | Clipboard / browser | **No** — nothing bridged. |
 | `.env*` files | Blocked from the agent by the [PreToolUse hook](#whats-in-the-box). Your project's own `.env` is physically in `/workspace`, but the hook stops the agent from reading it — defense-in-depth at the tool layer, not a missing file. |
@@ -122,9 +123,10 @@ opencode           # runs with permissions set to allow (guardrail still on)
 
 `aic init` defaults to **pull mode**: it writes `devcontainer.json`,
 `docker-compose.yml`, a managed guide/ignore file, and a gitignored `.env` with
-the selected host socket and runtime UID/GID. `aic initialize` refreshes that
-host-only file automatically, so rootless Docker, Docker Desktop, Colima, and
-OrbStack need no aicontainer-specific flags. `aic up` pulls the prebuilt image
+the selected host socket, runtime UID/GID, project identity, and host-owned
+status-relay mode. `aic initialize` refreshes that host-only file automatically,
+so rootless Docker, Docker Desktop, Colima, and OrbStack need no
+aicontainer-specific flags. `aic up` pulls the prebuilt image
 from GHCR (≈30s on a warm runtime, vs. several minutes to build from scratch).
 Everything else — the Dockerfile, `post-create.py`, firewall, and hooks — is
 baked into the image.
@@ -596,6 +598,76 @@ Notes that matter in practice:
 
 > ⚠️ Same rule as the shell overlay: **copied verbatim, readable by the agent, no secrets.** It runs as the unprivileged `vscode` user, and once installed it's root-locked so the agent can't modify it — but its bytes (including any host paths or usernames baked into it) are visible inside the sandbox.
 
+### Agent status relay
+
+Want a Mac dashboard, Stream Deck-style controller, or spare-tablet service
+screen to show which Claude Code and Codex sessions are working or waiting?
+aicontainer can emit lifecycle hints from sessions started in a terminal **or
+the VS Code sidebars**. The integration uses each tool's managed hooks
+([Claude Code hooks](https://code.claude.com/docs/en/hooks), [Codex
+hooks](https://learn.chatgpt.com/docs/hooks)), so the editor location does not
+change the event source.
+
+Run a receiver on the Mac that accepts `POST /events` on port `8787`, then opt
+in globally on that host:
+
+```bash
+mkdir -p ~/.config/aicontainer
+printf 'enabled\n' > ~/.config/aicontainer/status-relay
+aic rebuild
+```
+
+Existing projects need a recreate once; future `aic init`, `aic sync`, and VS
+Code initialization refresh the mode automatically. To opt out, delete the
+marker and rebuild. The marker must be a regular, non-symlinked file containing
+exactly `enabled` plus a newline. A repository `.env` or Compose override cannot
+silently turn the relay on, change its identity, or redirect it. `aic status`
+reports whether the host-global relay is enabled for the current project.
+
+Every callback goes to the non-configurable URL
+`http://host.docker.internal:8787/events`, times out after 500 ms, ignores proxy
+environment variables and redirects, and fails open: no listener, malformed
+hook input, DNS failure, or HTTP error can delay or change agent behavior. On
+Docker Desktop for macOS/Windows, `host.docker.internal` is built in. Linux
+users must expose the host gateway (usually an `extra_hosts` entry for
+`host.docker.internal:host-gateway`, reviewed with `aic trust`). If the opt-in
+network allowlist is active, aic permits only TCP 8787 to that resolved
+host-gateway address — it does not add the host to the general allowlist.
+
+The JSON contract is deliberately small:
+
+```json
+{
+  "schema_version": 1,
+  "source": "aicontainer",
+  "provider": "codex",
+  "project": "my-api",
+  "project_id": "aic-my-api-0123456789ab",
+  "session_id": "session-uuid",
+  "event": "UserPromptSubmit",
+  "state": "working",
+  "occurred_at": "2026-08-24T10:00:00.000Z",
+  "model": "optional-model-name"
+}
+```
+
+`UserPromptSubmit` maps to `working`; start, permission/input notifications,
+elicitation, and normal stop map to `waiting`; a mid-turn compaction or
+elicitation response returns to `working`; Claude `StopFailure` maps to `error`;
+`SessionEnd` maps to `ended`. Claude notification events may also add
+`notification_type`. The allowlist above is exhaustive: **prompt and response
+text, tool names/inputs/results, working directory, transcript path, error
+details, and credentials are never forwarded.**
+
+Treat these events as untrusted display hints: code running inside the
+container can forge a POST to any reachable status listener. Keep ingestion
+write-only and harmless. In particular, do not put macro execution, shell
+commands, or Spotify credentials behind this same unauthenticated route; serve
+tablet controls through a separate authenticated host-side API. Hooks run in
+the background where the tool permits it, so the receiver should apply events
+by `occurred_at`, treat `ended` as terminal for that session ID, and expire
+stale sessions after a reasonable idle period.
+
 ### Project-specific VS Code extensions & settings
 
 `devcontainer.json` is the only place that auto-installs editor extensions and applies machine-scope settings, but it's **regenerated wholesale on every `aic init`/`aic sync`** — so hand-editing its `customizations.vscode` block doesn't survive (and an in-container agent can't edit anything under `.devcontainer/` at all). Two project-owned files are merged in instead, both opt-in by presence and never touched by sync:
@@ -833,8 +905,9 @@ per-project volume; the long-running agent receives that volume read-only.
 It also reads the opt-in `~/.config/aicontainer/` directory, whose fixed
 filenames (`rc.zsh`, `p10k.zsh`, `statusline.{sh,mjs,js,py}`) are *code* and so
 are copied verbatim rather than allowlisted — they exist only because you put
-them there, and they land root-owned and read-only. Nothing else in that
-directory is read.
+them there, and they land root-owned and read-only. The host `aic` CLI separately
+recognizes the exact `status-relay` enable marker in that directory; its bytes
+are not copied into the container. The sanitizer reads no other filename.
 
 The sanitizer copies only known preference fields and recursively removes
 literal credential-bearing keys such as `env`, `headers`, `authorization`, API
@@ -850,10 +923,12 @@ separately at root-managed precedence:
 | OpenCode `permission` | `{ "*": "allow" }` |
 | OpenCode policy/plugin | `/etc/opencode/opencode.json` + the shared guardrail |
 
-Codex's hook lives in `/etc/codex/requirements.toml` with a root-managed hook
-directory; a user hook would be trust-gated and skipped in autonomous mode.
-Claude and OpenCode use their supported system-managed configuration. All three
-dispatch to the same root-owned guardrail script.
+Codex's guardrail and lifecycle hooks live in `/etc/codex/requirements.toml`
+with a root-managed hook directory; a user hook would be trust-gated and
+skipped in autonomous mode. Claude and OpenCode use their supported
+system-managed configuration. All three tools dispatch guardrail events to the
+same root-owned policy script; Claude and Codex separately dispatch their
+opt-in status events to the metadata-only relay.
 
 Seeded preferences include Claude model/theme/editor/effort and MCP/plugin
 metadata; Codex model/personality plus `[features]`, `[notice]`, `[projects.*]`,
@@ -1014,6 +1089,9 @@ Design notes:
 - Only `NET_ADMIN` is needed for the firewall; `NET_RAW` remains dropped. If
   IPv6 is configured but cannot be filtered, `enable` refuses an
   IPv6-bypassable policy.
+- When the host-global agent status relay is enabled, its dedicated resolved
+  IP set is accepted on TCP 8787 only. The host gateway is never placed in the
+  general all-port domain set.
 
 ## FAQ
 

@@ -46,6 +46,11 @@ services:
       - NET_ADMIN
     environment:
       DOCKER_HOST: tcp://socket-proxy:2375
+      # Host-generated, gitignored values. Repositories cannot enable or
+      # redirect the metadata-only agent lifecycle relay on their own.
+      AIC_STATUS_RELAY: "${AIC_STATUS_RELAY:-0}"
+      AIC_STATUS_PROJECT: "${AIC_STATUS_PROJECT:-project}"
+      AIC_STATUS_PROJECT_ID: "${AIC_STATUS_PROJECT_ID:-aic-project}"
     depends_on:
       aic-auth-sync:
         condition: service_healthy

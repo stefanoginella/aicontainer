@@ -20,17 +20,19 @@ it.
   sync`; the source of truth for what lands in user repos.
   - `Dockerfile`, `post-create.py`, `hooks/`, `aic-firewall`,
     `aic-chown-volumes`, `aic-lock-user-config`, `.zshrc`, `.gitignore`
-  - `hooks/`: the shared guardrail `pre-tool-use.sh` plus
-    `opencode-guardrail.js`, the thin OpenCode adapter — all copied root-owned
-    to `/etc/aic/hooks/` and enforced for Claude, Codex, and OpenCode.
+  - `hooks/`: the shared guardrail `pre-tool-use.sh`, the thin OpenCode adapter
+    `opencode-guardrail.js`, and the opt-in metadata-only Claude/Codex lifecycle
+    relay `agent-status.py` — all copied root-owned to `/etc/aic/hooks/`.
   - `docker-compose.pull.yml` (default mode), `docker-compose.build.yml`
     (`--build` mode)
   - `README.md` — copied into every project's `.devcontainer/` in **both**
     modes; a managed guide to the do-not-edit vs project-owned split. Keep its
     two lists in sync with `apply_template()` and the project-owned files.
   - `.gitignore` — copied in both modes and contains only `.env`.
-    `.devcontainer/.env` itself is atomically generated per host/context; it is
-    a managed control file, not a template asset or project-owned override.
+`.devcontainer/.env` itself is atomically generated per host/context; it holds
+the socket, runtime user, path-free project identity, and host-owned status
+relay mode. It is a managed control file, not a template asset or project-owned
+override.
 - `.github/workflows/`
   - `rebuild.yml` — **security-refresh track**: relevant template/CLI/test/
     package pushes to `main`, weekly cron, `workflow_dispatch`. Publishes GHCR
@@ -192,8 +194,8 @@ local Unix-socket Docker context, Compose subpath schema support (stdin-only
 parse; no probe volume), Dev Container CLI, conventional Git-root shape,
 install completeness, control-path types, and project identity.
 Warnings exit 0; blockers exit nonzero. `aic status` reports identity/mode/
-tools/shell/Docker consent/image/runtime, credential-bridge health, and volume
-metadata without mutating it.
+tools/shell/Docker consent/status-relay mode/image/runtime, credential-bridge
+health, and volume metadata without mutating it.
 `aic validate` runs the full gate noninteractively, honors existing exact
 trust, never prompts, and never writes trust. Keep help/completions/tests in
 sync and do not turn diagnostics into implicit repair.
@@ -207,6 +209,18 @@ work without flags or machine-specific diffs. Never trust `AIC_DOCKER_SOCKET`
 from the environment or repository, accept a remote TCP/SSH endpoint, broaden
 the dotenv grammar, or remove `.env`/`.gitignore` from the control-path checks
 and template copies.
+
+**The agent-status relay is generated host consent too.** It defaults off and
+only the exact, non-symlinked `~/.config/aicontainer/status-relay` marker can
+enable it; repository Compose/devcontainer input cannot set or redirect it.
+The managed environment values (`AIC_STATUS_RELAY`, `AIC_STATUS_PROJECT`, and
+`AIC_STATUS_PROJECT_ID`) stay protected by resolved-config validation. The
+root-owned hook sends only the fixed schema covered by
+`tests/test-aic-agent-status-relay.py` to
+`http://host.docker.internal:8787/events`, with proxies/redirects disabled and
+fail-open timeout/error handling. Never add prompt, response, path, transcript,
+tool input/result, or error content. The strict firewall exception must remain
+an exact TCP-8787 status ipset rule, never general host-gateway reachability.
 
 ## Host seeds, tool homes, and reusable auth
 
@@ -687,6 +701,8 @@ Review any change to these files for security regressions:
   jump replacement. Prohibited metadata/link-local resolutions and a zero-IP
   result abort without changing active policy. Never flush a live/metadata
   chain, set policy ACCEPT, or silently ignore unfilterable configured IPv6.
+  The host status relay uses its own ipset and exact TCP-8787 rule; never put
+  `host.docker.internal` in the general all-port allowlist.
 - `template/hooks/pre-tool-use.sh` — blocks reads of `.env` and other
   sensitive paths. Loosening the matchers (`is_blocked_env`,
   `bash_touches_env`, `is_curl_pipe_sh`, `is_protected_path`, or the
@@ -697,6 +713,12 @@ Review any change to these files for security regressions:
   `/etc/codex/requirements.toml` + its `managed_dir`. Hooks in a user Codex
   config are non-managed → untrusted → skipped in autonomous mode; don't move
   it there.
+- `template/hooks/agent-status.py` — optional informational callbacks from
+  Claude/Codex managed lifecycle hooks. Its fixed endpoint and exhaustive
+  metadata schema are the privacy boundary; it ignores proxy settings and
+  redirects, caps input, and returns success on every malformed-input/network
+  path so observability cannot become policy. Treat receiver events as
+  forgeable and never attach command/macro authority to the ingestion route.
 - `template/hooks/opencode-guardrail.js` — OpenCode's slice of that same
   guardrail: a dependency-free plugin whose `tool.execute.before` maps
   OpenCode's `{tool, args}` to the JSON `pre-tool-use.sh` reads on stdin,

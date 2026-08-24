@@ -6,6 +6,7 @@ REAL_DOCKER=$(command -v docker)
 REAL_DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+export XDG_CONFIG_HOME="$TMP/host-config"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -180,6 +181,12 @@ grep -q '^AIC_DOCKER_SOCKET=/' "$TMP/one/api/.devcontainer/.env" \
   || fail "init did not generate the local Docker socket environment"
 grep -q '^AIC_RUNTIME_USER=[0-9][0-9]*:[0-9][0-9]*$' "$TMP/one/api/.devcontainer/.env" \
   || fail "init did not generate the runtime uid/gid environment"
+grep -q '^AIC_STATUS_RELAY=0$' "$TMP/one/api/.devcontainer/.env" \
+  || fail "agent status relay did not default off"
+grep -q '^AIC_STATUS_PROJECT=api$' "$TMP/one/api/.devcontainer/.env" \
+  || fail "agent status relay omitted the path-free project label"
+grep -q "^AIC_STATUS_PROJECT_ID=$name1$" "$TMP/one/api/.devcontainer/.env" \
+  || fail "agent status relay omitted the path-unique project identity"
 grep -q '^\.env$' "$TMP/one/api/.devcontainer/.gitignore" \
   || fail "host-specific Compose environment is not gitignored"
 for key in CONTAINERS EVENTS IMAGES INFO NETWORKS VOLUMES POST BUILD; do
@@ -199,6 +206,53 @@ out=$(cd "$TMP/one/api" && AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)
 echo "$out" | grep -q 'configuration valid' \
   || fail "validate did not accept a clean resolved configuration"
 
+# Only an exact global host marker can enable the callback; repository state
+# cannot supply the bit, endpoint, or project identity.
+relay_config="$TMP/relay-config"
+mkdir -p "$relay_config/aicontainer" "$TMP/relay-project"
+printf 'enabled\n' > "$relay_config/aicontainer/status-relay"
+git -C "$TMP/relay-project" init -q
+(cd "$TMP/relay-project" && XDG_CONFIG_HOME="$relay_config" AIC_HOME="$ROOT" \
+  "$ROOT/aic" init --with codex --shell zsh >/dev/null)
+relay_name=$(sed -n 's/^name:[[:space:]]*//p' \
+  "$TMP/relay-project/.devcontainer/docker-compose.yml")
+grep -q '^AIC_STATUS_RELAY=1$' "$TMP/relay-project/.devcontainer/.env" \
+  || fail "exact host status-relay marker did not enable the relay"
+grep -q "^AIC_STATUS_PROJECT_ID=$relay_name$" \
+  "$TMP/relay-project/.devcontainer/.env" \
+  || fail "enabled relay did not retain its managed project identity"
+out=$(cd "$TMP/relay-project" && XDG_CONFIG_HOME="$relay_config" \
+  AIC_HOME="$ROOT" "$ROOT/aic" status 2>&1)
+echo "$out" | grep -q 'relay:    enabled (host.docker.internal:8787)' \
+  || fail "status did not report the enabled agent status relay"
+
+cat > "$TMP/relay-project/.devcontainer/docker-compose.override.yml" <<'YAML'
+services:
+  devcontainer:
+    environment:
+      AIC_STATUS_RELAY: "0"
+YAML
+(cd "$TMP/relay-project" && XDG_CONFIG_HOME="$relay_config" AIC_HOME="$ROOT" \
+  "$ROOT/aic" sync >/dev/null)
+out=$(cd "$TMP/relay-project" && XDG_CONFIG_HOME="$relay_config" \
+  AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -q 'environment AIC_STATUS_RELAY overrides a managed startup or isolation boundary' \
+  || fail "repository override silently changed the host-owned status relay mode"
+
+bad_relay_config="$TMP/bad-relay-config"
+mkdir -p "$bad_relay_config/aicontainer"
+printf enabled > "$bad_relay_config/aicontainer/status-relay"
+if (cd "$TMP/one/api" && XDG_CONFIG_HOME="$bad_relay_config" AIC_HOME="$ROOT" \
+    "$ROOT/aic" sync >/dev/null 2>&1); then
+  fail "status relay accepted a malformed host marker"
+fi
+rm "$bad_relay_config/aicontainer/status-relay"
+ln -s /etc/passwd "$bad_relay_config/aicontainer/status-relay"
+if (cd "$TMP/one/api" && XDG_CONFIG_HOME="$bad_relay_config" AIC_HOME="$ROOT" \
+    "$ROOT/aic" sync >/dev/null 2>&1); then
+  fail "status relay accepted a symlinked host marker"
+fi
+
 # The copied guide and ignore file are managed security/UX artifacts too: the
 # former tells an in-container agent which paths it must not edit, while the
 # latter keeps host-specific runtime state out of Git.
@@ -216,6 +270,8 @@ echo "$out" | grep -q 'mode:     pull; tools: codex; shell: zsh' \
   || fail "status omitted the configured mode/tools/shell"
 echo "$out" | grep -q 'Docker:   none (ping/version only)' \
   || fail "status misreported the default Docker exposure"
+echo "$out" | grep -q 'relay:    disabled' \
+  || fail "status misreported the default agent status relay mode"
 echo "$out" | grep -q "image:    pinned v$version (matches CLI)" \
   || fail "status omitted image/CLI drift state"
 echo "$out" | grep -q 'auth:     credential bridge ' \

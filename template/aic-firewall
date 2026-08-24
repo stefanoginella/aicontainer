@@ -71,6 +71,8 @@ DEFAULT_ALLOWLIST=(
 )
 
 EXTRA_FILE="/workspace/.devcontainer/firewall-allowlist"
+STATUS_RELAY_HOST="host.docker.internal"
+STATUS_RELAY_PORT=8787
 
 ipt() { iptables -w 5 "$@"; }
 ip6t() { ip6tables -w 5 "$@"; }
@@ -154,6 +156,15 @@ resolve_proxy_into_set() {
 
 ipset_count() {
   ipset list "$1" | awk '/Number of entries:/ {print $4}'
+}
+
+status_relay_enabled() {
+  # sudo intentionally does not trust a caller-supplied environment here. PID
+  # 1 inherited the managed Compose environment when the container was made.
+  local value
+  [ -r /proc/1/environ ] || return 1
+  value="$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^AIC_STATUS_RELAY=//p' | tail -n1)"
+  [ "$value" = 1 ]
 }
 
 chain_exists_v4() { ipt -nL "$1" >/dev/null 2>&1; }
@@ -302,7 +313,7 @@ cmd_enable() {
     exit 1
   fi
 
-  local old_out old_in suffix out_chain in_chain allow_set proxy_set refs
+  local old_out old_in suffix out_chain in_chain allow_set proxy_set status_set refs
   old_out=$(active_chain_v4 OUTPUT)
   old_in=$(active_chain_v4 INPUT)
   refs=$(
@@ -326,31 +337,39 @@ cmd_enable() {
   fi
   allow_set="aic-allowed-v4-$suffix"
   proxy_set="aic-proxy-v4-$suffix"
+  status_set="aic-status-v4-$suffix"
 
   # Build the inactive ipsets/chains completely before the one-rule jump swap.
   # The active generation continues handling traffic throughout DNS resolution
   # and rule construction; an error leaves it untouched.
   ipset create "$allow_set" hash:net family inet -exist
   ipset create "$proxy_set" hash:net family inet -exist
+  ipset create "$status_set" hash:net family inet -exist
   ipset flush "$allow_set"
   ipset flush "$proxy_set"
+  ipset flush "$status_set"
 
   PROHIBITED_RESOLUTION=0
-  local d
+  local d relay=0
+  status_relay_enabled && relay=1
   for d in "${DEFAULT_ALLOWLIST[@]}"; do
     resolve_domain_into_set "$allow_set" "$d"
   done
   load_extra_domains "$allow_set"
   resolve_proxy_into_set "$proxy_set"
+  if [ "$relay" -eq 1 ]; then
+    resolve_domain_into_set "$status_set" "$STATUS_RELAY_HOST"
+  fi
 
   if [ "$PROHIBITED_RESOLUTION" -ne 0 ]; then
     echo "aic-firewall: ERROR — a name resolved into a prohibited metadata/link-local range; leaving the allowlist policy unchanged." >&2
     exit 1
   fi
 
-  local count proxy_count
+  local count proxy_count status_count
   count=$(ipset_count "$allow_set")
   proxy_count=$(ipset_count "$proxy_set")
+  status_count=$(ipset_count "$status_set")
   if ! [[ "${count:-0}" =~ ^[0-9]+$ ]] || [ "${count:-0}" -eq 0 ]; then
     echo "aic-firewall: ERROR — resolved 0 allowlist IPs; leaving the allowlist policy unchanged." >&2
     exit 1
@@ -359,7 +378,11 @@ cmd_enable() {
     echo "aic-firewall: ERROR — socket-proxy resolved 0 IPs; leaving the allowlist policy unchanged." >&2
     exit 1
   fi
-  echo "==> aic-firewall: $count allowlist IPs; $proxy_count socket-proxy IP(s)"
+  if [ "$relay" -eq 1 ] && { ! [[ "${status_count:-0}" =~ ^[0-9]+$ ]] || [ "${status_count:-0}" -eq 0 ]; }; then
+    echo "aic-firewall: ERROR — $STATUS_RELAY_HOST resolved 0 IPs; leaving the allowlist policy unchanged." >&2
+    exit 1
+  fi
+  echo "==> aic-firewall: $count allowlist IPs; $proxy_count socket-proxy IP(s); $status_count status-relay IP(s)"
 
   prepare_chain_v4 "$out_chain"
   # Keep metadata/link-local drops before every accept, even if the baseline
@@ -377,6 +400,11 @@ cmd_enable() {
   # Port 2375 is reachable only at the current compose socket-proxy address,
   # never at an arbitrary destination that happens to listen on that port.
   ipt -A "$out_chain" -p tcp -m set --match-set "$proxy_set" dst --dport 2375 -j ACCEPT
+  # The optional dashboard callback is equally narrow: the host-gateway
+  # address receives TCP 8787 only, never general access to host services.
+  if [ "$relay" -eq 1 ]; then
+    ipt -A "$out_chain" -p tcp -m set --match-set "$status_set" dst --dport "$STATUS_RELAY_PORT" -j ACCEPT
+  fi
   ipt -A "$out_chain" -m set --match-set "$allow_set" dst -j ACCEPT
   ipt -A "$out_chain" -j DROP
 
@@ -472,7 +500,7 @@ cmd_status() {
     echo
   fi
   echo "## active IPv4 allowlist ipset"
-  local active suffix set
+  local active suffix set status_set
   active=$(active_chain_v4 OUTPUT)
   case "$active" in
     AIC_OUT_A) suffix=a ;;
@@ -482,6 +510,10 @@ cmd_status() {
   if [ -n "$suffix" ]; then
     set="aic-allowed-v4-$suffix"
     ipset list "$set"
+    echo
+    echo "## active host status-relay ipset (TCP $STATUS_RELAY_PORT only)"
+    status_set="aic-status-v4-$suffix"
+    ipset list "$status_set"
   else
     echo "(not created yet — run: sudo aic-firewall enable)"
   fi
