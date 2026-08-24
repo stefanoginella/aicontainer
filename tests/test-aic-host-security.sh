@@ -260,6 +260,16 @@ if (cd "$TMP/one/api" && XDG_CONFIG_HOME="$bad_relay_config" AIC_HOME="$ROOT" \
 fi
 [ "$before_sync" = "$(cat "$TMP/one/api/.devcontainer/devcontainer.json")" ] \
   || fail "symlinked status-relay marker left a half-applied managed template"
+# Diagnostics must not disagree with the mutating commands: a marker that makes
+# init/sync/up refuse is a blocker, so doctor has to name it and exit nonzero.
+set +e
+out=$(cd "$TMP/one/api" && XDG_CONFIG_HOME="$bad_relay_config" AIC_HOME="$ROOT" \
+  "$ROOT/aic" doctor 2>&1)
+doctor_relay_rc=$?
+set -e
+echo "$out" | grep -q 'host status-relay marker is invalid' \
+  || fail "doctor reported ready for a marker every mutating command refuses"
+[ "$doctor_relay_rc" -ne 0 ] || fail "doctor exited zero on a status-relay blocker"
 
 # The copied guide and ignore file are managed security/UX artifacts too: the
 # former tells an in-container agent which paths it must not edit, while the

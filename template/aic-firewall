@@ -513,7 +513,9 @@ cmd_status() {
     echo
     echo "## active host status-relay ipset (TCP $STATUS_RELAY_PORT only)"
     status_set="aic-status-v4-$suffix"
-    ipset list "$status_set"
+    # The set is created unconditionally by cmd_enable, so this is defensive
+    # only: never let a diagnostic read turn `status` into a failure.
+    ipset list "$status_set" 2>/dev/null || echo "(not created yet)"
   else
     echo "(not created yet — run: sudo aic-firewall enable)"
   fi

@@ -10,7 +10,7 @@ import re
 import sys
 import urllib.request
 from collections.abc import Mapping
-from typing import Any, TextIO
+from typing import Any, BinaryIO
 
 
 ENDPOINT = "http://host.docker.internal:8787/events"
@@ -139,13 +139,16 @@ def post_payload(payload: Mapping[str, object], opener: Any | None = None) -> No
 def main(
     argv: list[str] | None = None,
     environ: Mapping[str, str] | None = None,
-    stdin: TextIO | None = None,
+    stdin: BinaryIO | None = None,
     opener: Any | None = None,
 ) -> int:
     """Never delay or change the agent's behavior when telemetry fails."""
     args = argv if argv is not None else sys.argv[1:]
     env = environ if environ is not None else os.environ
-    source = stdin if stdin is not None else sys.stdin
+    # Read the binary stream, not the decoded one: `read(n)` on a text stream
+    # counts characters, so multibyte input would sail past a limit named in
+    # bytes. json.loads() decodes UTF-8 itself.
+    source = stdin if stdin is not None else sys.stdin.buffer
     try:
         if env.get("AIC_STATUS_RELAY") != "1" or len(args) != 1:
             return 0

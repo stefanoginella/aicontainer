@@ -3320,7 +3320,7 @@ cmd_doctor () {
   local doctor_failures=0 doctor_warnings=0 node_raw node_version
   local context endpoint endpoint_path server_raw server_version
   local compose_raw compose_version compose_probe devcontainer_path devcontainer_version
-  local git_root path_error identity_error
+  local git_root path_error identity_error relay_error
 
   printf 'aic doctor\n'
 
@@ -3467,6 +3467,18 @@ YAML
           doctor_ok "managed host runtime environment matches the Docker context and relay mode"
         else
           doctor_fail ".devcontainer/.env is stale or modified — run 'aic sync' or 'aic initialize'"
+        fi
+      else
+        # A refused status-relay marker blocks init/sync/up/initialize but has
+        # no check of its own, so without this branch doctor reports ready for a
+        # state every mutating command rejects. The Docker context is already
+        # covered by its own check above.
+        relay_error="$( (status_relay_mode >/dev/null) 2>&1)" || true
+        if [ -n "$relay_error" ]; then
+          relay_error="${relay_error#aic: }"
+          doctor_fail "host status-relay marker is invalid: $relay_error"
+        else
+          doctor_fail "could not generate the managed host runtime environment from the selected Docker context"
         fi
       fi
       if ! compose_has_project_name; then

@@ -17,6 +17,7 @@ assert SPEC is not None and SPEC.loader is not None
 STATUS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(STATUS)
 
+STATUS_SOURCE = HOOK_PATH.read_text()
 DOCKERFILE = (ROOT / "template" / "Dockerfile").read_text()
 FIREWALL = (ROOT / "template" / "aic-firewall").read_text()
 
@@ -143,7 +144,7 @@ class DeliveryTests(unittest.TestCase):
         rc = STATUS.main(
             ["codex"],
             ENV,
-            io.StringIO('{"session_id":"session-1","hook_event_name":"Stop"}'),
+            io.BytesIO(b'{"session_id":"session-1","hook_event_name":"Stop"}'),
             opener,
         )
         self.assertEqual(rc, 0)
@@ -158,23 +159,36 @@ class DeliveryTests(unittest.TestCase):
 
     def test_disabled_invalid_and_network_failure_are_silent_successes(self) -> None:
         cases = (
-            ({**ENV, "AIC_STATUS_RELAY": "0"}, "not json", RecordingOpener()),
-            (ENV, "not json", RecordingOpener()),
+            ({**ENV, "AIC_STATUS_RELAY": "0"}, b"not json", RecordingOpener()),
+            (ENV, b"not json", RecordingOpener()),
             (
                 ENV,
-                '{"session_id":"session-1","hook_event_name":"Stop"}',
+                b'{"session_id":"session-1","hook_event_name":"Stop"}',
                 RecordingOpener(OSError("listener offline")),
             ),
         )
         for env, raw, opener in cases:
             with self.subTest(raw=raw, enabled=env["AIC_STATUS_RELAY"]):
-                self.assertEqual(STATUS.main(["codex"], env, io.StringIO(raw), opener), 0)
+                self.assertEqual(STATUS.main(["codex"], env, io.BytesIO(raw), opener), 0)
 
     def test_oversized_hook_input_is_not_posted(self) -> None:
-        opener = RecordingOpener()
-        raw = "{" + ("x" * STATUS.MAX_INPUT_BYTES) + "}"
-        self.assertEqual(STATUS.main(["claude"], ENV, io.StringIO(raw), opener), 0)
-        self.assertEqual(opener.calls, [])
+        for label, raw in (
+            ("ascii", b"{" + (b"x" * STATUS.MAX_INPUT_BYTES) + b"}"),
+            ("multibyte", ("\U0001f600" * ((STATUS.MAX_INPUT_BYTES // 4) + 1)).encode()),
+        ):
+            with self.subTest(label):
+                self.assertLessEqual(STATUS.MAX_INPUT_BYTES, len(raw))
+                opener = RecordingOpener()
+                self.assertEqual(STATUS.main(["claude"], ENV, io.BytesIO(raw), opener), 0)
+                self.assertEqual(opener.calls, [])
+
+    def test_real_stdin_is_read_as_bytes(self) -> None:
+        # MAX_INPUT_BYTES is a byte budget, but `read(n)` on a text stream counts
+        # characters, so multibyte input would pass a limit ~4x its stated size.
+        # Every other test injects its own stream, so none of them reach the
+        # default — assert the default itself.
+        source = STATUS_SOURCE.split("source = stdin if stdin is not None else ", 1)[1]
+        self.assertEqual(source.split("\n", 1)[0], "sys.stdin.buffer")
 
 
 class ManagedWiringTests(unittest.TestCase):
@@ -239,6 +253,11 @@ class ManagedWiringTests(unittest.TestCase):
             '-m set --match-set "$status_set" dst --dport "$STATUS_RELAY_PORT" -j ACCEPT',
             FIREWALL,
         )
+        # Pin the constants too: the rule assertions above only prove the
+        # variables are used, so a changed host or port would widen the one
+        # strict-firewall exception while still passing them.
+        self.assertIn('\nSTATUS_RELAY_HOST="host.docker.internal"\n', FIREWALL)
+        self.assertIn("\nSTATUS_RELAY_PORT=8787\n", FIREWALL)
 
 
 if __name__ == "__main__":
