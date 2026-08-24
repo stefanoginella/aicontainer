@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tecnativa/docker-socket-proxy` image that fronts the host socket moves to
   v0.5.0 (newer HAProxy base). No change to the endpoint allowlist.
 
+- **Refreshed bundled tools and base image.** uv 0.12 and fzf 0.74.3, plus a
+  current Ubuntu 24.04 base-image digest. (template/Dockerfile)
+
 ### Fixed
 
 - **Releases are marked "Latest" again on GitHub and GHCR.** The release
