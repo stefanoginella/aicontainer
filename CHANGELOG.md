@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   marketplace is back at the repo root: `/plugin marketplace add
   stefanoginella/aicontainer`, then `/plugin install aicontainer@aicontainer`.
 
+- **Refreshed bundled tools and base image.** fzf 0.74.4 and delta 0.20.1,
+  plus current uv 0.12 and Ubuntu 24.04 base-image digests. (template/Dockerfile)
+
+- **Dev Container CLI dependency updated to 0.89.** The npm package now
+  installs `@devcontainers/cli` ^0.89.0. (package.json)
+
 ## [0.9.0] - 2026-08-24
 
 ### Added
