@@ -52,6 +52,14 @@ it.
   generates content.
 - `.githooks/pre-push` — local mirror of the CI changelog gate; opt-in via
   `git config core.hooksPath .githooks`.
+- `.claude-plugin/marketplace.json` — Claude Code marketplace (`aicontainer`).
+  It must stay at the repo root (`/plugin marketplace add
+  stefanoginella/aicontainer` reads it from there) and lists the one plugin by
+  relative source `./tools/claude-plugin`. Not shipped in the npm package.
+- `tools/claude-plugin/` — the `aicontainer` Claude Code plugin (the host-side
+  `/aicontainer:setup` skill). Bump its `plugin.json` `version` when the skill
+  changes. Validate both with `claude plugin validate .` and `claude plugin
+  validate tools/claude-plugin`.
 
 ## Image tag pinning (read before editing the CLI)
 

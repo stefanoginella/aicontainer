@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Install the Claude Code plugin straight from this repository.** The
+  marketplace is back at the repo root: `/plugin marketplace add
+  stefanoginella/aicontainer`, then `/plugin install aicontainer@aicontainer`.
+
 ## [0.9.0] - 2026-08-24
 
 ### Added
