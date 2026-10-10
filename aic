@@ -244,6 +244,73 @@ compose_has_project_name () {
     grep -qE '^name[[:space:]]*:' .devcontainer/docker-compose.yml
 }
 
+# The Dev Containers CLI does not always use the Compose `name:` validated
+# above. It takes the first non-empty name from:
+#   1. COMPOSE_PROJECT_NAME in its own environment;
+#   2. the first `COMPOSE_PROJECT_NAME=` line of the repository-root .env
+#      (<workspace>/.env, which app stacks often commit);
+#   3. the Compose `name:`.
+# Sources 1 and 2 would move this checkout into another Compose project: the
+# containers and session volumes of another checkout, or the user's own app
+# stack. aic's own CLI calls pin the managed name (source 1), so the root .env
+# never takes effect there.
+pin_compose_project_name () {
+  COMPOSE_PROJECT_NAME="$(project_name)" || exit 1
+  export COMPOSE_PROJECT_NAME
+}
+
+# Return 1, with an actionable message, when a direct Dev Containers start
+# (the generated VS Code initializer cannot pin the name for its parent) would
+# not use this project's managed name. The node block mirrors the CLI's lookup
+# and normalization (@devcontainers/cli, Compose >= 1.21). It prints only the
+# source that conflicts, never a value read from the environment or .env.
+check_devcontainer_project_name () {
+  local expected conflict
+  expected="$(project_name)" || return 1
+  conflict="$(node -e '
+    const fs = require("fs");
+    const expected = process.argv[1];
+    const normalize = (value) => String(value).toLowerCase().replace(/[^-_a-z0-9]/g, "");
+    const fromEnv = normalize(process.env.COMPOSE_PROJECT_NAME || "");
+    if (fromEnv) {
+      if (fromEnv !== expected) process.stdout.write("environment");
+      process.exit(0);
+    }
+    let text;
+    try {
+      const stat = fs.statSync(".env");
+      if (stat.isDirectory()) process.exit(0);
+      // The CLI reads any file here. Refuse what could hang it or is too
+      // large to be a plausible .env, rather than guess the name it picks.
+      if (!stat.isFile() || stat.size > 1048576) {
+        process.stdout.write("unreadable");
+        process.exit(0);
+      }
+      text = fs.readFileSync(".env").toString();
+    } catch (error) {
+      if (error && (error.code === "ENOENT" || error.code === "EISDIR")) process.exit(0);
+      process.stdout.write("unreadable");
+      process.exit(0);
+    }
+    const match = /^COMPOSE_PROJECT_NAME=(.+)$/m.exec(text);
+    const fromFile = normalize((match && match[1].trim()) || "");
+    if (fromFile && fromFile !== expected) process.stdout.write("dotenv");
+  ' "$expected")" || conflict=unreadable
+  case "$conflict" in
+    "") return 0 ;;
+    environment)
+      err "COMPOSE_PROJECT_NAME in the environment would replace this project's Compose name ($expected) — unset it, or start with 'aic up'"
+      ;;
+    dotenv)
+      err "the repository-root .env sets COMPOSE_PROJECT_NAME, which would replace this project's Compose name ($expected) — remove that line (an app stack can set a top-level 'name:' in its own Compose file), or start with 'aic up'"
+      ;;
+    *)
+      err "the repository-root .env is not a readable regular file, and the Dev Containers CLI reads it to choose the Compose project name — fix or remove it, or start with 'aic up'"
+      ;;
+  esac
+  return 1
+}
+
 # Paths under .devcontainer are either aic-managed outputs or project-owned
 # control inputs. Never follow a repository-provided symlink at this boundary:
 # `aic init --force` / `aic sync` run as the host user, so following one could
@@ -1276,7 +1343,7 @@ firewall_live_state () {
   [ -n "$cid" ] || { echo unknown; return; }
   [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] || { echo unknown; return; }
   devcontainer="$(resolve_devcontainer 2>/dev/null)" || { echo unknown; return; }
-  out="$("$devcontainer" exec --workspace-folder . sudo aic-firewall status 2>/dev/null)" || { echo unknown; return; }
+  out="$(COMPOSE_PROJECT_NAME="$project" "$devcontainer" exec --workspace-folder . sudo aic-firewall status 2>/dev/null)" || { echo unknown; return; }
   if grep -q 'policy DROP' <<<"$out"; then echo on; else echo off; fi
 }
 
@@ -2799,6 +2866,7 @@ cmd_signing () {
   # Mutating actions run inside the container (as vscode) — needs it up.
   # devcontainer exec consumes the repository configuration, so gate it before
   # the running-container probe or any key operation.
+  pin_compose_project_name
   write_runtime_environment_file
   validate_project_security gate 0
   if ! signing_container_running; then
@@ -3181,6 +3249,7 @@ stop_owned_legacy_stack () {
 
 cmd_up () {
   require_in_project
+  pin_compose_project_name
   write_runtime_environment_file
   local allow_unsafe=0 arg
   local -a args=()
@@ -3210,6 +3279,7 @@ cmd_preflight () {
   require_in_project
   # Review-only: surface all findings without prompting, persisting trust, or
   # failing before the boundary summary. `aic validate` is the strict CI gate.
+  check_devcontainer_project_name || true
   validate_project_security warn 0 || true
   print_boundary_summary preflight
 }
@@ -3228,6 +3298,9 @@ cmd_check_drift () {
   # its always-zero contract while refusing to read any symlinked control file.
   (validate_devcontainer_paths optional) || return 0
   warn_compose_drift
+  # Old templates cannot refuse a startup; warn that the root .env or an
+  # inherited COMPOSE_PROJECT_NAME moves this checkout to another project.
+  (check_devcontainer_project_name) || true
   # Same host-side entry point surfaces the override scan (print-only) so a
   # VS Code "Reopen/Rebuild in Container" gets it in the Dev Containers output
   # channel. Never prompts, always exits 0 (initializeCommand must not abort).
@@ -3247,6 +3320,11 @@ cmd_check_drift () {
 # still has to be regenerated/reviewed before a direct editor bootstrap.
 cmd_initialize () {
   require_in_project
+  # The parent Dev Containers process has already chosen where it reads the
+  # project name, and this child cannot change its environment. Refuse before
+  # any Docker state changes if that name is not this project's managed one.
+  check_devcontainer_project_name \
+    || die "refusing to start this checkout under another Compose project name"
   # Refresh the host-specific, gitignored socket path before either our own
   # resolved-Compose validation or the parent Dev Containers process uses it.
   write_runtime_environment_file
@@ -3260,6 +3338,7 @@ cmd_initialize () {
 
 cmd_rebuild () {
   require_in_project
+  pin_compose_project_name
   write_runtime_environment_file
   local allow_unsafe=0 arg
   local -a args=()
@@ -3306,6 +3385,7 @@ cmd_rebuild () {
 
 cmd_shell () {
   require_in_project
+  pin_compose_project_name
   write_runtime_environment_file
   # devcontainer exec parses repository control files even for an already-
   # running container. Revalidate them before handing them to the CLI.
@@ -3338,6 +3418,7 @@ cmd_shell () {
 
 cmd_run () {
   require_in_project
+  pin_compose_project_name
   write_runtime_environment_file
   validate_project_security gate 0
   local devcontainer; devcontainer="$(resolve_devcontainer)"
@@ -3472,7 +3553,7 @@ cmd_doctor () {
   local doctor_failures=0 doctor_warnings=0 node_raw node_version
   local context endpoint endpoint_path server_raw server_version
   local compose_raw compose_version compose_probe devcontainer_path devcontainer_version
-  local git_root path_error identity_error relay_error
+  local git_root path_error identity_error name_error relay_error
 
   printf 'aic doctor\n'
 
@@ -3642,6 +3723,13 @@ YAML
           doctor_fail "managed project identity is invalid: $identity_error"
         else
           doctor_ok "managed project identity matches this canonical path"
+          name_error="$( (check_devcontainer_project_name) 2>&1)" || true
+          if [ -n "$name_error" ]; then
+            name_error="${name_error#aic: }"
+            doctor_fail "a direct Dev Containers start (VS Code) would be refused: $name_error"
+          else
+            doctor_ok "Dev Containers will use the managed Compose project name"
+          fi
         fi
       fi
     fi
@@ -3771,6 +3859,9 @@ cmd_status () {
 cmd_validate () {
   [ "$#" -eq 0 ] || die "usage: aic validate"
   require_in_project
+  # Same refusal as the VS Code initializer, so CI predicts a direct start.
+  check_devcontainer_project_name \
+    || die "configuration is invalid for a direct Dev Containers start"
   validate_project_security validate 0
   echo "aic: configuration valid — managed files and resolved Compose model are accepted."
 }

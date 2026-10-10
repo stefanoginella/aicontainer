@@ -136,6 +136,29 @@ written as the top-level Compose `name:` and must exactly match
 back to the old basename when a top-level name is present but malformed —
 `down`/`destroy` could otherwise target another checkout's resources.
 
+The Dev Containers CLI reads that `name:` last. It first takes
+`COMPOSE_PROJECT_NAME` from its own environment, then from the first
+`COMPOSE_PROJECT_NAME=` line of `<workspace>/.env` (the repository-root `.env`
+that app stacks commit). Either one silently moves the checkout into another
+stack and its `_aic-sessions` volume. Two rules close this:
+
+- Every aic command that runs the CLI (`up`, `rebuild`, `shell`, `run`, mutating
+  `signing`, the firewall-status exec) calls `pin_compose_project_name()`
+  **before** validation, so validation and the CLI see the same name and the
+  `initialize` child inherits it.
+- The generated initializer cannot set its parent's environment.
+  `check_devcontainer_project_name()` mirrors the CLI's lookup and
+  normalization and refuses before any Docker state changes. `validate` and
+  `doctor` fail on it; `preflight` and the legacy `check-drift` warn. Never
+  print a value read from the environment or `.env`, and re-check the mirror
+  against the CLI source when `@devcontainers/cli` changes its project-name
+  lookup.
+
+Do not pin the name in `validate`, `initialize`, or `trust`: without the pin
+they still see a repository override's top-level `name:`, which a direct start
+would use. Guarded by the root-`.env` cases in
+`tests/test-aic-host-security.sh` and the proj-b smoke in both workflows.
+
 Projects created before this scheme have no top-level name. `aic sync`, the
 next `up`, or VS Code's generated `initializeCommand` copies their transcript
 volume automatically only when a container has exact canonical-workspace and
@@ -218,8 +241,8 @@ them when the model changes.
 **Diagnostics stay read-only.** `aic doctor` checks host versions, the selected
 local Unix-socket Docker context, Compose subpath schema support (stdin-only
 parse; no probe volume), Dev Container CLI, conventional Git-root shape,
-install completeness, control-path types, and project identity.
-Warnings exit 0; blockers exit nonzero. `aic status` reports identity/mode/
+install completeness, control-path types, project identity, and the
+Dev Containers project-name source. Warnings exit 0; blockers exit nonzero. `aic status` reports identity/mode/
 tools/shell/Docker consent/status-relay mode/image/runtime, credential-bridge
 health, and volume metadata without mutating it.
 `aic validate` runs the full gate noninteractively, honors existing exact

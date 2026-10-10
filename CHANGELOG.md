@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bare carriage return ended a comment for Dev Containers but not for aic; such
   files are now rejected. (aic)
 
+- **A repository-root `.env` can no longer move a project's Compose stack.**
+  Dev Containers preferred its `COMPOSE_PROJECT_NAME` (or an exported one) to
+  the path-unique name, so checkouts could share containers and session
+  volumes. `aic up`/`rebuild`/`shell`/`run` now pass the managed name, and a
+  direct VS Code start that would use another name is refused. (aic)
+
 ## [0.9.1] - 2026-10-05
 
 ### Changed

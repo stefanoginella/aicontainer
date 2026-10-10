@@ -167,8 +167,9 @@ aic validate   # managed provenance + fully resolved Compose security model
 
 `doctor` can run before `init`; it checks Node 18+, Docker Engine 25+ and
 Compose 2.24+ (needed for volume subpaths), the selected local Unix socket,
-the Dev Container CLI, Git/project-root shape, install integrity, and
-control-path safety. Warnings remain exit 0; blockers exit nonzero. Standard,
+the Dev Container CLI, Git/project-root shape, install integrity,
+control-path safety, and whether a direct editor start would use the managed
+Compose project name. Warnings remain exit 0; blockers exit nonzero. Standard,
 rootless, Colima, OrbStack, and Docker Desktop Unix-socket contexts are
 discovered automatically; remote TCP/SSH contexts, subdirectories below the
 Git root, and worktree-style checkouts are reported explicitly rather than
@@ -177,7 +178,8 @@ failing later with an opaque Compose error.
 `status` is a quick factual snapshot (including credential-bridge health) and
 tolerates a stopped daemon. `validate` is suitable for CI: it never prompts or
 records trust, honors an existing exact approval, and exits nonzero for managed
-drift or an untrusted boundary expansion.
+drift, an untrusted boundary expansion, or a `COMPOSE_PROJECT_NAME` (root `.env`
+or environment) that a direct start would use instead of the managed name.
 
 ### Choosing tools per project
 
@@ -222,6 +224,15 @@ terminal. `claude`, `codex`, and `opencode` are available immediately. The host
 prints one install command if a GUI-launched editor cannot find it. Step 2 is
 the host-control-plane boundary: do not directly reopen a devcontainer supplied
 by an untrusted repository before aic has replaced and you have reviewed it.
+
+If the repository root has a `.env` that sets `COMPOSE_PROJECT_NAME` (common in
+app repositories), Dev Containers prefers that name to the project's
+path-unique one, which would share containers and session volumes with any
+stack of that name. The initializer refuses that start. Remove the line (an app
+stack can set a top-level `name:` in its own Compose file), or start from a
+terminal with `aic up`, which passes the managed name to Dev Containers. A
+`COMPOSE_PROJECT_NAME` exported in the editor's environment is refused the same
+way.
 
 You can still use `aic` from a separate terminal at the same time — `aic rebuild`, `aic destroy`, etc. operate on the same compose project as the editor, so the two paths don't conflict.
 
@@ -1047,10 +1058,11 @@ there is no live unlock/update primitive.
   verify every managed artifact, resolve all Compose layers without trusting a
   grep, and check services, mounts, builds, capabilities, namespaces, devices,
   ports, networks/volumes, includes/providers, configs/secrets, lifecycle hooks,
-  and protected path overlays before invoking Dev Containers. Validation
-  enables every Compose profile, so a profile-gated service cannot hide.
-  `devcontainer.json` keys and Compose keys are allow-lists: a key aic does not
-  review is a finding, not a silent pass. The generated initializer
+  and protected path overlays before invoking Dev Containers, and pass the
+  managed Compose project name so a repository-root `.env` cannot redirect the
+  stack. Validation enables every Compose profile, so a profile-gated service
+  cannot hide. `devcontainer.json` keys and Compose keys are allow-lists: a key
+  aic does not review is a finding, not a silent pass. The generated initializer
   repeats this gate before Compose creation. Managed drift requires `aic sync`;
   an intentional boundary expansion needs `aic trust` or one-run
   `--allow-unsafe`, and repository edits cannot write either approval.

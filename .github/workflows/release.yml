@@ -623,7 +623,26 @@ jobs:
           mkdir -p /tmp/proj-b
           git -C /tmp/proj-b init -q
           (cd /tmp/proj-b && AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build)
-          devcontainer up --workspace-folder /tmp/proj-b
+          # App repositories often commit a root .env with COMPOSE_PROJECT_NAME.
+          # The Dev Containers CLI prefers it to the managed Compose name, so a
+          # direct start (the VS Code path) must stop before Compose creates
+          # anything, and `aic up` must start under the managed name instead.
+          printf 'COMPOSE_PROJECT_NAME=aic-smoke-collision\n' > /tmp/proj-b/.env
+          if out=$(devcontainer up --workspace-folder /tmp/proj-b 2>&1); then
+            echo "FAIL: direct start accepted a root .env Compose project name"; exit 1
+          fi
+          echo "$out" | grep -q 'repository-root .env sets COMPOSE_PROJECT_NAME' \
+            || { echo "FAIL: direct start did not explain the root .env refusal"; echo "$out"; exit 1; }
+          (cd /tmp/proj-b && AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" up)
+          rm /tmp/proj-b/.env
+          proj_b_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
+            /tmp/proj-b/.devcontainer/docker-compose.yml)
+          [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$proj_b_name" \
+              --filter label=com.docker.compose.service=devcontainer)" ] \
+            || { echo "FAIL: aic up did not start proj-b under its managed Compose name"; exit 1; }
+          [ -z "$(docker ps -aq --filter label=com.docker.compose.project=aic-smoke-collision)" ] \
+            || { echo "FAIL: a container joined the root .env Compose project"; exit 1; }
+          echo "OK: root .env project name refused for direct starts; aic up pins the managed name"
           devcontainer exec --workspace-folder /tmp/proj-b bash -lc '
             set -euo pipefail
             marker=AIC_PROJECT_A_INJECTION

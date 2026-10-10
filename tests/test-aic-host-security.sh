@@ -12,6 +12,9 @@ mkdir -p "$HOME"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# A developer's exported name would make every direct-start check below refuse.
+unset COMPOSE_PROJECT_NAME
+
 help=$(AIC_NO_UPDATE_CHECK=1 "$ROOT/aic" help)
 [ "$(printf '%s\n' "$help" | grep -c '^  AIC_NO_OVERRIDE_SCAN')" = "1" ] \
   || fail "help duplicated or dropped AIC_NO_OVERRIDE_SCAN"
@@ -1110,6 +1113,9 @@ if [ "$tool" = docker ]; then
     "system df") exit 0 ;;
   esac
 fi
+if [ "$tool" = devcontainer ] && [ -n "${AIC_TEST_ENV_LOG:-}" ]; then
+  printf 'COMPOSE_PROJECT_NAME=%s\n' "${COMPOSE_PROJECT_NAME-<unset>}" >> "$AIC_TEST_ENV_LOG"
+fi
 log_call "$@"
 SH
 chmod +x "$fakebin/tool"
@@ -1403,6 +1409,96 @@ fi
 grep -q '<volume> <inspect>.*<aic-auth-global>' "$log" \
   || fail "initialize did not inspect the physical auth volume"
 grep -q '<run>' "$log" && fail "root helper ran after unsafe volume detection"
+
+# The Dev Containers CLI takes COMPOSE_PROJECT_NAME from its environment, then
+# from the repository-root .env, before the managed Compose `name:`. Either one
+# would move this checkout into another Compose project (another checkout's
+# containers and session volumes, or the user's app stack). aic's own CLI calls
+# pin the managed name; a direct start that cannot pin it is refused before
+# Docker is touched, and the refusal never prints the value it read.
+new_project "$TMP/root-env"
+root_env_name=$(sed -n 's/^name:[[:space:]]*//p' "$TMP/root-env/.devcontainer/docker-compose.yml")
+printf 'APP_PORT=3000\nCOMPOSE_PROJECT_NAME="Root-Env-Value"\n' > "$TMP/root-env/.env"
+env_log="$TMP/devcontainer-env.log"
+for command in up rebuild shell run; do
+  case "$command" in
+    run) args=(run true) ;;
+    *) args=("$command") ;;
+  esac
+  : > "$env_log"
+  (cd "$TMP/root-env" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
+    AIC_TEST_ENV_LOG="$env_log" COMPOSE_PROJECT_NAME=inherited-other \
+    AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+    AIC_HOME="$ROOT" "$ROOT/aic" "${args[@]}" >/dev/null 2>&1) \
+    || fail "$command refused a project whose root .env sets COMPOSE_PROJECT_NAME"
+  [ "$(cat "$env_log")" = "COMPOSE_PROJECT_NAME=$root_env_name" ] \
+    || fail "$command did not pin the managed Compose name for the Dev Containers CLI"
+done
+
+: > "$log"
+set +e
+out=$(cd "$TMP/root-env" && PATH="$fakebin:$PATH" HOME="$seed_home" \
+  DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" \
+  AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" initialize 2>&1)
+root_env_rc=$?
+set -e
+[ "$root_env_rc" -ne 0 ] || fail "initialize accepted a root .env that renames the Compose project"
+echo "$out" | grep -q 'repository-root .env sets COMPOSE_PROJECT_NAME' \
+  || fail "initialize did not name the root .env as the project-name source"
+echo "$out" | grep -qi 'root-env-value' && fail "initialize printed a value read from the root .env"
+[ ! -s "$log" ] || fail "initialize reached Docker before refusing the root .env project name"
+
+# `aic up` exports the managed name to the CLI, so its initializeCommand child
+# inherits it. That source wins over the root .env and must be accepted.
+(cd "$TMP/root-env" && PATH="$fakebin:$PATH" HOME="$seed_home" \
+  COMPOSE_PROJECT_NAME="$root_env_name" \
+  DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" \
+  AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" initialize >/dev/null 2>&1) \
+  || fail "initialize refused the managed name inherited from aic up"
+
+# The fake Docker context above rewrote .devcontainer/.env; restore the real one.
+(cd "$TMP/root-env" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+set +e
+out=$(cd "$TMP/root-env" && AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)
+root_env_rc=$?
+set -e
+[ "$root_env_rc" -ne 0 ] || fail "validate accepted a root .env that renames the Compose project"
+echo "$out" | grep -q 'repository-root .env sets COMPOSE_PROJECT_NAME' \
+  || fail "validate did not report the root .env project name"
+out=$(cd "$TMP/root-env" && AIC_HOME="$ROOT" "$ROOT/aic" doctor 2>&1) \
+  && fail "doctor reported ready while a direct start would be refused"
+echo "$out" | grep -q '^FAIL  a direct Dev Containers start (VS Code) would be refused' \
+  || fail "doctor did not report the root .env project name"
+out=$(cd "$TMP/root-env" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1) \
+  || fail "legacy check-drift initializer stopped a startup"
+echo "$out" | grep -q 'repository-root .env sets COMPOSE_PROJECT_NAME' \
+  || fail "legacy check-drift initializer did not warn about the root .env project name"
+
+# Mirror the CLI's lookup: commented, exported, indented, and empty lines are
+# not project names; neither is an .env directory. A FIFO could hang the CLI.
+printf '%s\n' '# COMPOSE_PROJECT_NAME=a' 'export COMPOSE_PROJECT_NAME=b' \
+  ' COMPOSE_PROJECT_NAME=c' 'COMPOSE_PROJECT_NAME=' > "$TMP/root-env/.env"
+(cd "$TMP/root-env" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null 2>&1) \
+  || fail "validate treated a line the Dev Containers CLI ignores as a project name"
+rm "$TMP/root-env/.env"
+mkdir "$TMP/root-env/.env"
+(cd "$TMP/root-env" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null 2>&1) \
+  || fail "validate refused an .env directory, which the Dev Containers CLI ignores"
+rmdir "$TMP/root-env/.env"
+mkfifo "$TMP/root-env/.env"
+(cd "$TMP/root-env" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null 2>&1) \
+  && fail "validate accepted a root .env that is not a regular file"
+rm "$TMP/root-env/.env"
+set +e
+out=$(cd "$TMP/root-env" && COMPOSE_PROJECT_NAME=inherited-other \
+  AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)
+root_env_rc=$?
+set -e
+[ "$root_env_rc" -ne 0 ] || fail "validate accepted an inherited COMPOSE_PROJECT_NAME"
+echo "$out" | grep -q 'COMPOSE_PROJECT_NAME in the environment' \
+  || fail "validate did not report the inherited COMPOSE_PROJECT_NAME"
+(cd "$TMP/root-env" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null) \
+  || fail "validate refused a project without a root .env project name"
 
 # `aic signing` creates the signing/ dir as vscode (0700, owned by the runtime
 # UID) inside the container. The host-side signing_state probe runs busybox as
