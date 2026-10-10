@@ -22,6 +22,10 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 
 AIC_HOME="${AIC_HOME:-$SCRIPT_DIR}"
 TEMPLATE_DIR="$AIC_HOME/template"
+# Per-process cache of export_runtime_environment()'s bind-source probe. Set
+# here so a value in the environment can never seed it.
+aic_bind_source=""
+aic_bind_source_for=""
 
 err()  { echo "aic: $*" >&2; }
 die()  { err "$*"; exit 1; }
@@ -102,10 +106,12 @@ runtime_user_id () {
 # is always derived from Docker's selected context here.
 resolve_docker_socket () {
   local endpoint="" context="" socket
-  if [ -n "${DOCKER_CONTEXT:-}" ] && command -v docker >/dev/null 2>&1; then
-    endpoint="$(docker context inspect "$DOCKER_CONTEXT" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null || true)"
-  elif [ -n "${DOCKER_HOST:-}" ]; then
+  # Same order as the Docker CLI and Compose: DOCKER_HOST beats DOCKER_CONTEXT.
+  # Otherwise aic would inspect one daemon while Compose starts on another.
+  if [ -n "${DOCKER_HOST:-}" ]; then
     endpoint="$DOCKER_HOST"
+  elif [ -n "${DOCKER_CONTEXT:-}" ] && command -v docker >/dev/null 2>&1; then
+    endpoint="$(docker context inspect "$DOCKER_CONTEXT" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null || true)"
   elif command -v docker >/dev/null 2>&1; then
     context="$(docker context show 2>/dev/null || true)"
     [ -n "$context" ] || context="default"
@@ -133,8 +139,106 @@ resolve_docker_socket () {
   printf '%s\n' "$socket"
 }
 
+# The daemon resolves a bind source in its own filesystem, not the host's. A
+# VM-based runtime runs the daemon in a Linux VM, where the context's host path
+# (for example ~/.docker/run/docker.sock) is a forwarded socket the daemon
+# cannot bind: Docker Desktop refuses it, and in a Colima/Lima VM it is not the
+# daemon's socket. Their daemon's own socket in the VM is /var/run/docker.sock.
+# Print the runtime that serves the host socket $1:
+#   docker-desktop, colima, lima, rancher-desktop
+#             rootful daemon in a VM: bind /var/run/docker.sock
+#   orbstack  maps the host path into its VM itself
+#   rootless  rootless daemon: /var/run/docker.sock in its namespace can be a
+#             different, rootful daemon, so the host path is kept
+#   other     any other daemon that answered (native Linux, unknown runtimes)
+#   unknown   no answer and no runtime's default path
+# The daemon's own `docker info` answer decides. The default paths are used
+# only while it cannot answer (aic init/sync with Docker stopped), so that
+# state matches what the next start writes. aic never reads the bind source
+# from the environment or from `docker info`: it is the host path or the one
+# fixed VM path.
+docker_runtime_kind () {
+  local socket="$1" info os="" name="" security="" kind="" path_kind
+  if info="$(docker -H "unix://$socket" info \
+        --format '{{.OperatingSystem}}|{{.Name}}|{{json .SecurityOptions}}' 2>/dev/null)" \
+      && [ -n "$info" ]; then
+    os="${info%%|*}"; info="${info#*|}"
+    name="${info%%|*}"; security="${info#*|}"
+  fi
+  # A CLI that cannot connect can still print the empty template ("||null"),
+  # and an answer without the security options cannot prove a rootful daemon.
+  # Only a complete answer counts; anything else is "no answer".
+  case "$security" in '['*']'|null) ;; *) os="" ;; esac
+  if [ -n "$os" ] && [ -n "$name" ]; then
+    case "$security" in *'"name=rootless"'*) printf 'rootless\n'; return 0 ;; esac
+    case "$os" in
+      "Docker Desktop") printf 'docker-desktop\n'; return 0 ;;
+      OrbStack) printf 'orbstack\n'; return 0 ;;
+    esac
+    # Lima-based VMs report their VM hostname.
+    case "$name" in
+      lima-rancher-desktop) kind="rancher-desktop" ;;
+      colima|colima-*) kind="colima" ;;
+      lima-*) kind="lima" ;;
+    esac
+    path_kind="$(docker_default_socket_runtime "$socket")"
+    if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
+      # macOS has no native daemon, so this one runs in a VM. `colima
+      # --hostname` changes the name but not the default socket path.
+      if [ -z "$kind" ]; then
+        case "$path_kind" in colima|lima|rancher-desktop) kind="$path_kind" ;; esac
+      fi
+    elif [ "$path_kind" != "$kind" ]; then
+      # A Linux host can have a Lima-style hostname, so on Linux the socket
+      # must also be that runtime's default path.
+      kind=""
+    fi
+    printf '%s\n' "${kind:-other}"
+    return 0
+  fi
+  kind="$(docker_default_socket_runtime "$socket")"
+  case "$kind" in
+    # Lima's default docker template is rootless; only the daemon can tell.
+    ''|lima) printf 'unknown\n' ;;
+    *) printf '%s\n' "$kind" ;;
+  esac
+}
+
+# The runtime that creates this host socket path by default, or nothing.
+docker_default_socket_runtime () {
+  case "$1" in
+    "$HOME/.docker/run/docker.sock"|"$HOME/.docker/desktop/docker.sock") printf 'docker-desktop\n' ;;
+    "$HOME/.orbstack/run/docker.sock") printf 'orbstack\n' ;;
+    "$HOME/.colima/"*/docker.sock|"$HOME/.config/colima/"*/docker.sock) printf 'colima\n' ;;
+    "$HOME/.rd/docker.sock") printf 'rancher-desktop\n' ;;
+    "$HOME/.lima/"*/sock/docker.sock) printf 'lima\n' ;;
+  esac
+}
+
+# The bind source for the managed socket mounts: the VM daemon's socket for a
+# rootful VM runtime, the host socket $1 otherwise. $2 is a kind that the
+# caller already detected.
+docker_socket_bind_source () {
+  local kind="${2:-}"
+  [ -n "$kind" ] || kind="$(docker_runtime_kind "$1")"
+  case "$kind" in
+    docker-desktop|colima|lima|rancher-desktop) printf '/var/run/docker.sock\n' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+# AIC_DOCKER_SOCKET is the bind source for the daemon, not the host socket that
+# the Docker CLI talks to.
 export_runtime_environment () {
-  AIC_DOCKER_SOCKET="$(resolve_docker_socket)"
+  local socket
+  socket="$(resolve_docker_socket)" || return 1
+  # Ask the daemon once per process. A daemon that starts between the .env
+  # write and the validation would otherwise flip the answer and fail the gate.
+  if [ "$aic_bind_source_for" != "$socket" ]; then
+    aic_bind_source="$(docker_socket_bind_source "$socket")"
+    aic_bind_source_for="$socket"
+  fi
+  AIC_DOCKER_SOCKET="$aic_bind_source"
   AIC_RUNTIME_USER="$(runtime_user_id)"
   AIC_STATUS_RELAY="$(status_relay_mode)" || return 1
   AIC_STATUS_PROJECT="$(expected_project_label)"
@@ -3665,7 +3769,7 @@ doctor_fail () {
 cmd_doctor () {
   [ "$#" -eq 0 ] || die "usage: aic doctor"
   local doctor_failures=0 doctor_warnings=0 node_raw node_version
-  local context endpoint endpoint_path server_raw server_version
+  local context endpoint endpoint_path runtime_kind bind_source server_raw server_version
   local compose_raw compose_version compose_probe devcontainer_path devcontainer_version
   local git_root git_problems line path_error identity_error name_error relay_error
 
@@ -3689,10 +3793,11 @@ cmd_doctor () {
     context="$(docker context show 2>/dev/null)" || context="${DOCKER_CONTEXT:-default}"
     [ -n "$context" ] || context="default"
     endpoint=""
-    if [ -n "${DOCKER_CONTEXT:-}" ]; then
-      endpoint="$(docker context inspect "$DOCKER_CONTEXT" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null)" || endpoint=""
-    elif [ -n "${DOCKER_HOST:-}" ]; then
+    # The Docker CLI's order, as in resolve_docker_socket().
+    if [ -n "${DOCKER_HOST:-}" ]; then
       endpoint="$DOCKER_HOST"
+    elif [ -n "${DOCKER_CONTEXT:-}" ]; then
+      endpoint="$(docker context inspect "$DOCKER_CONTEXT" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null)" || endpoint=""
     else
       endpoint="$(docker context inspect "$context" --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null)" || endpoint=""
     fi
@@ -3715,7 +3820,18 @@ cmd_doctor () {
         endpoint_path="${endpoint#unix://}"
         if [ -S "$endpoint_path" ]; then
           doctor_ok "Docker context socket is available ($endpoint_path)"
-          doctor_ok "managed helpers will bind the selected local socket"
+          runtime_kind="$(docker_runtime_kind "$endpoint_path")"
+          bind_source="$(docker_socket_bind_source "$endpoint_path" "$runtime_kind")"
+          if [ "$bind_source" != "$endpoint_path" ]; then
+            doctor_ok "Docker runtime $runtime_kind: managed helpers will bind the VM daemon socket $bind_source"
+          elif [ "$(uname -s 2>/dev/null || true)" = Darwin ] \
+              && { [ "$runtime_kind" = other ] || [ "$runtime_kind" = rootless ]; }; then
+            # macOS has no native daemon, so this daemon runs in a VM that aic
+            # cannot map. Its daemon cannot bind the macOS socket path.
+            doctor_warn "Docker runtime $runtime_kind runs in a VM that aic does not recognize; the managed socket mount may fail — use Docker Desktop, OrbStack, Colima, Rancher Desktop, or a rootful Lima VM"
+          else
+            doctor_ok "Docker runtime $runtime_kind: managed helpers will bind the selected local socket"
+          fi
         else
           doctor_fail "Docker context socket is missing ($endpoint_path) — fix the selected context"
         fi
@@ -3886,13 +4002,18 @@ cmd_status () {
   local consent="n/a" cli_version pinned image_summary
   local daemon=0 cid="" auth_cid="" runtime_state="unavailable" running_image=""
   local auth_state sessions_state bridge_state="unknown (Docker unavailable)" bridge_health=""
-  local host_socket="unavailable" runtime_identity
+  local host_socket="unavailable" host_runtime="" bind_source="" runtime_identity
   project="$(project_name)"
   mode="pull"; [ -f .devcontainer/Dockerfile ] && mode="build"
   tools="$(read_aic_tools)"; [ -n "$tools" ] || tools="claude-code,codex,opencode"
   shell="$(read_aic_shell)"; [ -n "$shell" ] || shell="$DEFAULT_SHELL"
   runtime_identity="$(runtime_user_id)"
-  if host_socket="$(resolve_docker_socket 2>/dev/null)"; then :; else host_socket="unavailable"; fi
+  if host_socket="$(resolve_docker_socket 2>/dev/null)"; then
+    host_runtime="$(docker_runtime_kind "$host_socket")"
+    bind_source="$(docker_socket_bind_source "$host_socket" "$host_runtime")"
+  else
+    host_socket="unavailable"
+  fi
   docker_mode="$(read_compose_docker_mode)"
   case "$docker_mode" in
     none) docker_mode="none (ping/version only)" ;;
@@ -3967,7 +4088,9 @@ cmd_status () {
   printf '  mode:     %s; tools: %s; shell: %s\n' "$mode" "$tools" "$shell"
   printf '  Docker:   %s\n' "$docker_mode"
   printf '  relay:    %s\n' "$relay_mode"
-  printf '  host:     socket %s; runtime uid:gid %s\n' "$host_socket" "$runtime_identity"
+  printf '  host:     socket %s' "$host_socket"
+  [ -n "$host_runtime" ] && printf ' (%s; mounts bind %s)' "$host_runtime" "$bind_source"
+  printf '; runtime uid:gid %s\n' "$runtime_identity"
   printf '  image:    %s\n' "$image_summary"
   printf '  runtime:  %s' "$runtime_state"
   [ -n "$running_image" ] && printf ' (%s)' "$running_image"

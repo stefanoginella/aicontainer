@@ -76,6 +76,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Submodules, nested repositories, and hook scripts kept in the repository
   (husky, lefthook, pre-commit) run files the agent can write. (README)
 
+- **Every command that starts or validates a project refuses a remote Docker
+  context.** `aic init`, `sync`, and `doctor` already did; `up`, `rebuild`,
+  `shell`, `run`, `signing`, `validate`, and VS Code starts printed an error and
+  went on. (aic)
+
+### Fixed
+
+- **Projects start again on Docker Desktop, Colima, and Rancher Desktop.**
+  The managed socket mounts used the context's host path, which a daemon in a
+  VM cannot mount. They now mount the VM daemon's `/var/run/docker.sock`
+  (rootful Lima too); `aic doctor` and `aic status` show the detected runtime.
+  (aic)
+
+- **`DOCKER_HOST` now wins over `DOCKER_CONTEXT`, as in the Docker CLI.**
+  Before, aic could inspect one daemon while Compose started the project on
+  another. (aic)
+
 ## [0.9.1] - 2026-10-05
 
 ### Changed

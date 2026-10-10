@@ -276,11 +276,12 @@ Compose creation, subject to the bootstrap limit above. Guarded by
 them when the model changes.
 
 **Diagnostics stay read-only.** `aic doctor` checks host versions, the selected
-local Unix-socket Docker context, Compose subpath schema support (stdin-only
+local Unix-socket Docker context and its runtime/bind source (warning on an
+unrecognized macOS VM), Compose subpath schema support (stdin-only
 parse; no probe volume), Dev Container CLI, conventional Git-root shape,
 install completeness, control-path types, project identity, and the
 Dev Containers project-name source. Warnings exit 0; blockers exit nonzero. `aic status` reports identity/mode/
-tools/shell/Docker consent/status-relay mode/image/runtime, credential-bridge
+tools/shell/Docker consent/status-relay mode/socket bind source/image/runtime, credential-bridge
 health, and volume metadata without mutating it.
 `aic validate` runs the full gate noninteractively, honors existing exact
 trust, never prompts, and never writes trust. Keep help/completions/tests in
@@ -295,6 +296,44 @@ work without flags or machine-specific diffs. Never trust `AIC_DOCKER_SOCKET`
 from the environment or repository, accept a remote TCP/SSH endpoint, broaden
 the dotenv grammar, or remove `.env`/`.gitignore` from the control-path checks
 and template copies.
+
+`AIC_DOCKER_SOCKET` is the bind source as the **daemon** resolves it, not the
+host socket the Docker CLI talks to. A VM daemon cannot mount the context's
+macOS path (Docker Desktop refuses it; in Colima/Lima it is a forwarded socket),
+so `docker_runtime_kind()` asks the selected socket itself (`docker -H
+unix://<socket> info`) and `docker_socket_bind_source()` returns the fixed
+`/var/run/docker.sock` only for a rootful Docker Desktop, Colima, Lima, or
+Rancher Desktop daemon. Everything else keeps the host path. Load-bearing,
+don't undo:
+
+- **The choice is binary.** The bind source is the resolved host path or the
+  one fixed VM path. Never take a path from `docker info`, the environment, or
+  a template.
+- **Rootless is never remapped.** In a rootless daemon's namespace,
+  `/var/run/docker.sock` can be another, rootful daemon; remapping would give
+  the socket proxy and `aic-chown-volumes` more authority than the user
+  selected.
+- **Docker Desktop is the exact `OperatingSystem` string.** Colima/Lima/Rancher
+  are identified by the VM hostname (`Name`), which a Linux host can share, so
+  on Linux the socket must also be that runtime's default path (so Colima with
+  `--hostname` on Linux is not detected). macOS has no native daemon, so there
+  the name or the Colima/Lima/Rancher default socket path is enough.
+- **Only a complete answer counts.** The answer must have the OS, the name,
+  and the security-options list; otherwise it is "no answer". A cut-off
+  answer cannot prove the daemon is rootful.
+- **One probe per process.** `export_runtime_environment()` caches the bind
+  source (initialized at script start, never from the environment), so a
+  daemon that starts between the `.env` write and the validation cannot make
+  the gate fail.
+- **Same daemon as Compose.** `resolve_docker_socket()` and `doctor` follow
+  the Docker CLI order: `DOCKER_HOST` beats `DOCKER_CONTEXT`.
+- **Default paths decide only while the daemon cannot answer** (`aic
+  init`/`sync` with Docker stopped). Every start path rewrites `.env` with the
+  daemon's answer before validation. Lima is excluded from that fallback
+  because its default template is rootless.
+
+Guarded by `tests/test-aic-docker-runtime.sh`, which fakes each runtime's
+`docker info` and host OS.
 
 **The agent-status relay is generated host consent too.** It defaults off and
 only the exact, non-symlinked `$HOME/.config/aicontainer/status-relay` marker

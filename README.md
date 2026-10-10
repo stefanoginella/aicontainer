@@ -50,8 +50,15 @@ one most worth your attention.
 - Docker Engine 25+ with Compose 2.24+ (volume-subpath support): [Docker
   Desktop](https://docker.com/products/docker-desktop),
   [OrbStack](https://orbstack.dev/), or
-  [Colima](https://github.com/abiosoft/colima), or rootless Docker Engine,
-  using a local Unix socket. aic discovers the selected context automatically.
+  [Colima](https://github.com/abiosoft/colima), [Rancher
+  Desktop](https://rancherdesktop.io/), a rootful
+  [Lima](https://lima-vm.io/) VM, or rootless Docker Engine, using a local
+  Unix socket. aic discovers the selected context automatically, and
+  `DOCKER_HOST` wins over `DOCKER_CONTEXT`, as in the Docker CLI.
+  A rootless daemon inside a VM (for example Lima's default `docker`
+  template) does not work: its socket in the VM is unknown to aic. Use Lima's
+  `docker-rootful` template instead. On Linux, Colima started with
+  `--hostname` is not detected; keep its default hostname.
 - Node.js 18+ (for npm and the bundled `@devcontainers/cli`).
 - A conventional Git checkout opened at its repository root. `.git` must be a
   real directory (not a symlink, and not the `.git` file of a linked worktree
@@ -127,10 +134,13 @@ opencode           # runs with permissions set to allow (guardrail still on)
 
 `aic init` defaults to **pull mode**: it writes `devcontainer.json`,
 `docker-compose.yml`, a managed guide/ignore file, and a gitignored `.env` with
-the selected host socket, runtime UID/GID, project identity, and host-owned
+the Docker socket to mount, runtime UID/GID, project identity, and host-owned
 status-relay mode. `aic initialize` refreshes that host-only file automatically,
 so rootless Docker, Docker Desktop, Colima, and OrbStack need no
-aicontainer-specific flags. `aic up` pulls the prebuilt image
+aicontainer-specific flags. The socket to mount is the selected context's
+socket, except when the daemon runs in a VM that cannot mount that host path
+(Docker Desktop, Colima, Rancher Desktop, a rootful Lima VM): there aic mounts
+the VM daemon's own `/var/run/docker.sock`. `aic up` pulls the prebuilt image
 from GHCR (≈30s on a warm runtime, vs. several minutes to build from scratch).
 Everything else — the Dockerfile, `post-create.py`, firewall, and hooks — is
 baked into the image.
@@ -178,7 +188,9 @@ remain exit 0; blockers exit nonzero. Standard, rootless, Colima, OrbStack,
 and Docker Desktop Unix-socket contexts are discovered automatically; remote
 TCP/SSH contexts, subdirectories below the Git root, and worktree-style
 checkouts are reported explicitly rather than failing later with an opaque
-Compose error.
+Compose error. `doctor` and `status` also show the detected Docker runtime and
+the socket that the managed mounts use. On macOS, `doctor` warns when the
+daemon runs in a VM that aic does not recognize.
 
 `status` is a quick factual snapshot (including credential-bridge health) and
 tolerates a stopped daemon. `validate` is suitable for CI: it never prompts or
@@ -1187,6 +1199,8 @@ agent *inside* it. Run both.
 ## Troubleshooting
 
 **Docker not running.** Start Docker Desktop / OrbStack / Colima. `aic up` won't even try without it.
+
+**`error while creating mount source path …docker.sock`.** The daemon runs in a VM and cannot mount the host path of the Docker socket. Run `aic doctor`: it shows the detected runtime and the socket that the managed mounts use. Docker Desktop, Colima, Rancher Desktop, and rootful Lima VMs get `/var/run/docker.sock` automatically on the next `aic up` or VS Code start. A runtime that `doctor` does not recognize keeps the context's socket path.
 
 **`devcontainer: command not found`.** Normally bundled with `npm install -g aicontainer`. If you installed via git checkout, run `npm install -g @devcontainers/cli`.
 

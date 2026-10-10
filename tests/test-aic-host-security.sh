@@ -1052,6 +1052,8 @@ if [ "$tool" = docker ]; then
   case "${1:-} ${2:-}" in
     "context show") printf '%s\n' default; exit 0 ;;
     "context inspect") printf '%s\n' unix:///var/run/docker.sock; exit 0 ;;
+    # Socket runtime detection is a read-only query; answer "no daemon".
+    "-H unix://"*) [ "${3:-}" = info ] && exit 1 ;;
     "ps -aq")
       if [ -n "${AIC_FAKE_LEGACY_CONTAINER:-}" ]; then
         log_call "$@"
