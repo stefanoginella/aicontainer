@@ -92,25 +92,12 @@ services:
       - aic-sanitized-seed:/host-seed:ro
 
       # Persistence — see README "Multi-project model". All Claude/Codex/
-      # OpenCode config, prompts, plugins, and sessions live below this one
-      # per-project volume. Only the credential-sync sidecar sees the global
+      # OpenCode/gh/npm config, prompts, plugins, and sessions live below this
+      # one per-project volume (~/.config/gh and ~/.config/npm are image-baked
+      # symlinks into it). Only the credential-sync sidecar sees the global
       # tool-auth directories.
       - aic-shell-history:/home/vscode/.shell-history
       - aic-sessions:/home/vscode/.aic-sessions
-      - type: volume
-        source: aic-auth-global
-        target: /home/vscode/.config/gh
-        volume:
-          subpath: gh
-      # NPM_CONFIG_USERCONFIG (set in devcontainer.json) points npm at
-      # /home/vscode/.config/npm/npmrc, so `npm login` tokens land in this
-      # volume subpath and survive rebuild. Same atomic-rename consideration
-      # as claude/codex above — we mount the parent dir, not the file.
-      - type: volume
-        source: aic-auth-global
-        target: /home/vscode/.config/npm
-        volume:
-          subpath: npm
       # Expose only the two fixed shared helper-data subpaths here. Mounting the
       # auth volume root would give every project an alternate path to every
       # other tool's credentials and auto-loaded prompt/code directories.
@@ -127,8 +114,9 @@ services:
 
   # Credential bridge: the only service that sees both the shared tool-login
   # dirs and this project's sessions volume. It validates and atomically syncs
-  # four exact JSON files; no config/prompt/plugin path is shared. The main
-  # container waits for its initial newer-wins reconciliation before starting.
+  # four exact JSON files, plus only the login entries of gh's hosts.yml and
+  # npm's npmrc; no config/prompt/plugin path is shared. The main container
+  # waits for its initial newer-wins reconciliation before starting.
   aic-auth-sync:
     build: *aic-build
     user: *aic-runtime-user
@@ -167,6 +155,16 @@ services:
         target: /auth-global/opencode
         volume:
           subpath: opencode
+      - type: volume
+        source: aic-auth-global
+        target: /auth-global/gh
+        volume:
+          subpath: gh
+      - type: volume
+        source: aic-auth-global
+        target: /auth-global/npm
+        volume:
+          subpath: npm
     healthcheck:
       test: ["CMD", "/usr/bin/test", "-f", "/run/aic-auth-sync.ready"]
       interval: 1s

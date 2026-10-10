@@ -143,6 +143,22 @@ for compose in "$ROOT/template/docker-compose.pull.yml" \
     '../.git/commondir:/workspace/.git/commondir:ro' '../.git/hooks:/workspace/.git/hooks:ro'; do
     grep -Fqx "      - $mount" "$compose" || fail "$(basename "$compose") lost the Git control mount $mount"
   done
+  # gh and npm config is per-project. Only the credential bridge may see the
+  # global gh/npm subpaths; a writable shared mount in the devcontainer lets
+  # one project plant pager/registry/script-shell config for every other one.
+  for target in /home/vscode/.config/gh /home/vscode/.config/npm; do
+    grep -Fq "target: $target" "$compose" \
+      && fail "$(basename "$compose") mounts shared $target into the devcontainer"
+  done
+  for target in /auth-global/gh /auth-global/npm; do
+    [ "$(grep -Fxc "        target: $target" "$compose")" = "1" ] \
+      || fail "$(basename "$compose") does not give the credential bridge $target"
+  done
+done
+for tool in gh npm; do
+  grep -Fq "ln -s /home/vscode/.aic-sessions/tool-homes/$tool /home/vscode/.config/$tool" \
+    "$ROOT/template/Dockerfile" \
+    || fail "image does not link ~/.config/$tool into the per-project sessions volume"
 done
 for workflow in "$ROOT/.github/workflows/rebuild.yml" \
   "$ROOT/.github/workflows/release.yml"; do
@@ -1398,7 +1414,8 @@ grep -q '<rm> <-sf> <aic-seed-sanitizer>' "$log" || fail "initialize did not for
 grep -q 'busybox@sha256:fd8d9aa' "$log" || fail "initialize helper image was not digest-pinned"
 for placeholder in \
   tool-homes/claude tool-homes/codex tool-homes/opencode-config \
-  tool-homes/opencode-data /v/claude /v/codex /v/opencode signing semgrep
+  tool-homes/opencode-data tool-homes/gh tool-homes/npm \
+  /v/claude /v/codex /v/opencode /v/gh /v/npm signing semgrep
 do
   grep -q "$placeholder" "$log" \
     || fail "initialize did not seed managed nested-mount placeholder: $placeholder"

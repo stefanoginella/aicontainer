@@ -623,7 +623,9 @@ jobs:
               "$HOME/.claude:$HOME/.aic-sessions/tool-homes/claude" \
               "$HOME/.codex:$HOME/.aic-sessions/tool-homes/codex" \
               "$HOME/.config/opencode:$HOME/.aic-sessions/tool-homes/opencode-config" \
-              "$HOME/.local/share/opencode:$HOME/.aic-sessions/tool-homes/opencode-data"; do
+              "$HOME/.local/share/opencode:$HOME/.aic-sessions/tool-homes/opencode-data" \
+              "$HOME/.config/gh:$HOME/.aic-sessions/tool-homes/gh" \
+              "$HOME/.config/npm:$HOME/.aic-sessions/tool-homes/npm"; do
               link=${mapping%%:*}
               target=${mapping#*:}
               [ -L "$link" ] || { echo "FAIL: canonical tool home is not a symlink: $link"; exit 1; }
@@ -635,7 +637,9 @@ jobs:
               "$HOME/.aic-sessions/tool-homes/claude" \
               "$HOME/.aic-sessions/tool-homes/codex" \
               "$HOME/.aic-sessions/tool-homes/opencode-config" \
-              "$HOME/.aic-sessions/tool-homes/opencode-data"; do
+              "$HOME/.aic-sessions/tool-homes/opencode-data" \
+              "$HOME/.aic-sessions/tool-homes/gh" \
+              "$HOME/.aic-sessions/tool-homes/npm"; do
               [ "$(stat -c %a "$private_dir")" = 700 ] \
                 || { echo "FAIL: private tool-home directory is not mode 0700: $private_dir"; exit 1; }
             done
@@ -705,6 +709,18 @@ jobs:
               "{\"aic_auth_sync\":\"opencode-auth-smoke\"}"
             atomic_login "$HOME/.local/share/opencode/account.json" \
               "{\"aic_auth_sync\":\"opencode-account-smoke\"}"
+            # gh and npm rewrite their files in place and mix login state with
+            # settings that run code. Only the login entries may leave project A.
+            marker=AIC_PROJECT_A_INJECTION
+            printf "%s\n" "registry=https://registry.invalid/$marker/" \
+              "script-shell=/tmp/$marker" \
+              "//registry.npmjs.org/:_authToken=npm_aicSmokeToken" \
+              > "$HOME/.config/npm/npmrc"
+            printf "%s\n" "github.com:" "    pager: /tmp/$marker" \
+              "    oauth_token: gho_aicSmokeToken" "    user: aic-smoke" \
+              > "$HOME/.config/gh/hosts.yml"
+            printf "%s\n" "aliases:" "    co: \"!/tmp/$marker\"" \
+              > "$HOME/.config/gh/config.yml"
           '
           devcontainer exec --workspace-folder /tmp/proj-b bash -lc '
             set -euo pipefail
@@ -729,6 +745,27 @@ jobs:
               225ae61218074d03262901bc5c0e73ede6978b99e6453c3b9ccf26117420864f
             wait_for_auth "$HOME/.local/share/opencode/account.json" \
               86efbd793af74336046205a631e6c3c7c59e46bd4d28c15ea5adae2a2f37c0bb
+            wait_for_line() {
+              local path=$1 line=$2
+              for _ in $(seq 1 30); do
+                [ -f "$path" ] && grep -Fqx -- "$line" "$path" && return 0
+                sleep 1
+              done
+              echo "FAIL: login entry did not synchronize: $path" >&2
+              return 1
+            }
+            wait_for_line "$HOME/.config/npm/npmrc" \
+              "//registry.npmjs.org/:_authToken=npm_aicSmokeToken"
+            wait_for_line "$HOME/.config/gh/hosts.yml" \
+              "    oauth_token: \"gho_aicSmokeToken\""
+            for path in "$HOME/.config/npm/npmrc" "$HOME/.config/gh/hosts.yml"; do
+              [ "$(stat -c %a "$path")" = 600 ] \
+                || { echo "FAIL: synchronized login file is not mode 0600: $path"; exit 1; }
+            done
+            if grep -R -Fq AIC_PROJECT_A_INJECTION "$HOME/.config/npm/" "$HOME/.config/gh/"; then
+              echo "FAIL: project A gh/npm settings reached project B"; exit 1
+            fi
+            echo "OK: only gh/npm login entries reached project B; their settings stayed in A"
 
             atomic_login() {
               local destination=$1 payload=$2 temp="${1}.tmp"
@@ -790,9 +827,13 @@ jobs:
           done
           forbidden=$(docker exec "$sync_id" find /auth-global -mindepth 2 \
             \( -name settings.json -o -name config.toml -o -name CLAUDE.md \
-               -o -name AGENTS.md -o -name skills -o -name plugins \) -print -quit)
+               -o -name AGENTS.md -o -name skills -o -name plugins \
+               -o -name config.yml \) -print -quit)
           [ -z "$forbidden" ] \
             || { echo "FAIL: project config/prompt/plugin reached global auth: $forbidden"; exit 1; }
+          if docker exec "$sync_id" grep -R -Fq AIC_PROJECT_A_INJECTION /auth-global; then
+            echo "FAIL: project gh/npm settings reached the global auth volume"; exit 1
+          fi
           echo "OK: auth-sync is networkless, read-only, capability-free, healthy, and credential-only"
 
       - name: Smoke test - missing git identity is flagged loudly at create time

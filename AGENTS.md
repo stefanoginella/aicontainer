@@ -342,12 +342,13 @@ the sanitizer itself. Every one of those names is a literal in `sanitize_seeds()
 the seed dir is never globbed. Do not mount a raw input into main, add a
 non-JSON output beyond that overlay, or make sanitizer failure soft.
 
-All Claude/Codex/OpenCode config, memory, skills/plugins, prompt history, and
-sessions live in one path-unique `aic-sessions` volume below
-`~/.aic-sessions/tool-homes/{claude,codex,opencode-config,opencode-data}`.
-Canonical tool paths are image-baked symlinks into those whole per-project
-homes. There are no symlinks stored in the global auth volume and no global
-tool parent mounted in main.
+All Claude/Codex/OpenCode/gh/npm config, memory, skills/plugins, prompt
+history, and sessions live in one path-unique `aic-sessions` volume below
+`~/.aic-sessions/tool-homes/{claude,codex,opencode-config,opencode-data,gh,npm}`.
+Canonical tool paths (including `~/.config/gh` and `~/.config/npm`, which
+`NPM_CONFIG_USERCONFIG` points into) are image-baked symlinks into those whole
+per-project homes. There are no symlinks stored in the global auth volume and no
+global tool parent mounted in main.
 
 `setup_claude()` and `setup_codex()` precreate every known writable prompt/code
 root (skills, agents/commands, rules/prompts, plugins) inside those project
@@ -356,24 +357,60 @@ project-isolated" smoke test: an empty new project must expose the same
 inspectable isolated surface as one where a CLI has already used the feature.
 
 Login-once behavior comes from `aic-auth-sync`, not shared tool homes. It is the
-only service that sees both the per-project sessions root and the three global
-tool-auth subpaths. It runs continuously as the exact runtime UID:GID
-interpolated through the generated gitignored `.env`; tracked Compose remains
-byte-identical across hosts. The sidecar is networkless, has a read-only rootfs
+only service that sees both the per-project sessions root and the five global
+tool-auth subpaths (`claude`, `codex`, `opencode`, `gh`, `npm`). It runs
+continuously as the exact runtime UID:GID interpolated through the generated
+gitignored `.env`; tracked Compose remains byte-identical across hosts. The sidecar is networkless, has a read-only rootfs
 and `no-new-privileges`, drops all capabilities, and has PID 32. Its credential
 volume mounts remain writable by design. It synchronizes only:
 
 - Claude `.credentials.json`
 - Codex `auth.json`
 - OpenCode `auth.json` and `account.json`
+- the login entries of gh `hosts.yml` and npm `npmrc` (see below)
 
-Files must be same-owner, single-link regular JSON objects, 1 byte–1 MiB, inside
+Files must be same-owner, single-link regular files, at most 1 MiB, inside
 canonical `0700` dirs; reads use no-follow/inode checks and writes are atomic
-`0600`. Initial reconciliation is newer-wins and its healthcheck gates main;
-subsequent login/logout/token-refresh changes flow both ways. Never add a glob,
-unknown filename, config, prompt, plugin, or directory sync. GitHub, npm,
-signing, and Semgrep retain separate fixed global subpath mounts in main; the
-broad auth root is absent.
+`0600`. JSON files must be non-empty objects. Initial reconciliation is
+newer-wins and its healthcheck gates main; subsequent login/logout/token-refresh
+changes flow both ways. Never add a glob, unknown filename, config, prompt,
+plugin, or directory sync. Signing and Semgrep retain separate fixed global
+subpath mounts in main; the broad auth root, `gh`, and `npm` are absent there.
+
+gh `hosts.yml` and npm `npmrc` mix login state with settings that run code
+(per-host gh `pager`/`editor`/`browser`/`http_unix_socket`/`api_host`; npm
+`registry`, `script-shell`, `node-options`, `git`, `prefix`, …), so they are
+never copied whole. Load-bearing, don't undo:
+
+1. **Only strict-grammar login entries cross.** gh: per host, `oauth_token`,
+   `user`, `git_protocol` (`https`/`ssh`), and `users.<name>.oauth_token`. npm:
+   top-level (before any `[section]`) `//host[:port][/path]/:` +
+   `_authToken`/`_auth`/`username`/`_password` with a literal value — no `$`,
+   quotes (except npm's own `"…"` around a value with `=`), `;`, `#`, or `\`,
+   because npm expands `${VAR}` in keys and values. Widen a grammar only for a
+   value the tool itself writes, never for a setting.
+2. **The global copy is canonical login entries only** (`_canonical_login()`),
+   and the gh writer quotes every value. Project B therefore never receives a
+   byte that project A wrote outside those grammars.
+3. **The project copy keeps its own settings.** A project npmrc write replaces
+   only its login lines and puts them first, so no `[section]` captures them; a
+   gh write replaces `hosts.yml` with login entries (gh `config.yml` is never
+   touched).
+4. **A project gh/npm file is never "repaired".** gh and npm rewrite these files
+   in place and the npmrc holds project settings, so an unparsable, oversized,
+   or symlinked project file is left alone and not shared
+   (`_CredentialPair.repairs_project`). JSON keeps its repair-from-peer rule.
+5. **Settle before reading.** Both tools truncate, then write. A gh/npm pair is
+   skipped while either file is younger than `AUTH_SYNC_SETTLE_NS`, so a
+   half-written file is never read as a logout or a cut-off token.
+6. The gh YAML reader accepts only plain block mappings; lists, anchors, flow or
+   multi-line values, tabs, and duplicate keys make the file unreadable. Do not
+   swap in a general YAML parser (the image has none, and wider input means
+   wider ambiguity).
+
+Guarded by `tests/test-aic-auth-sync.py`, the template/Dockerfile assertions in
+`tests/test-aic-host-security.sh`, and the "prompt/code persistence is
+project-isolated" smoke in both workflows.
 
 `initialize_managed_volumes()` must precreate every volume/subpath/file safely
 and validate all existing volume metadata before Compose subpath resolution.

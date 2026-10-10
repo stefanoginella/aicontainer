@@ -89,11 +89,12 @@ Then reopen your shell. You'll get tab-completion for subcommands (`init`,
 ## First-time auth
 
 Authenticate once. A networkless credential bridge synchronizes only the four
-known tool credential JSON files into fixed subpaths of the global
-`aic-auth-global` volume; GitHub, npm, signing, and Semgrep use their own fixed
-subpaths. Prompt-bearing config, instructions, skills, plugins, and transcripts
-stay in the current project's volume, so login convenience does not turn one
-project's persistent instructions into another project's.
+known tool credential JSON files, plus the login entries of `gh`'s `hosts.yml`
+and npm's `npmrc`, into fixed subpaths of the global `aic-auth-global` volume;
+signing and Semgrep use their own fixed subpaths. Prompt-bearing config,
+instructions, skills, plugins, transcripts, and `gh`/npm settings stay in the
+current project's volume, so login convenience does not turn one project's
+persistent instructions or settings into another project's.
 
 ```bash
 mkdir -p ~/sandbox/scratch && cd ~/sandbox/scratch
@@ -880,7 +881,11 @@ checkouts with the same folder name no longer collide. The legacy container-side
 > resets once to `none`; only users who need it re-enable it with `aic sync
 > --docker-read` or `aic sync --docker`. An ambiguous historical basename
 > volume adds the other one-time decision; clean generated projects add no
-> prompt.
+> prompt. `gh` and npm logins carry forward too, but settings in their old
+> shared files (`gh` aliases/pager, npm `registry`, …) do not, because any
+> project could have written them; set them again per project if you need
+> them. Until every project is synced, an older one still mounts that shared
+> config, so sync them all.
 
 ## Multi-project model
 
@@ -893,28 +898,40 @@ checkouts with the same folder name no longer collide. The legacy container-side
 
 | Data | Scope | Storage |
 |---|---|---|
-| Claude/Codex/OpenCode login state; `gh`, npm and Semgrep login; sandbox signing key | **Global** | Fixed subpaths of `aic-auth-global` |
+| Claude/Codex/OpenCode login state; `gh` and npm login entries; Semgrep login; sandbox signing key | **Global** | Fixed subpaths of `aic-auth-global` |
 | Shell command history entered inside aicontainer | **Global** | `aic-shell-history` (host history is never mounted) |
 | Claude/Codex transcripts and prompt history | **Per-project** | `<path-unique-project>_aic-sessions` |
 | Claude/Codex user config, memory, skills, agents/commands, rules/prompts, plugins | **Per-project** | Whole tool homes below the same sessions volume |
 | OpenCode config/instructions, session db, storage, and snapshots | **Per-project** | Same sessions volume; its two credential files are synchronized globally |
+| `gh` config (`config.yml`: aliases, pager, editor, …) and npm settings (`npmrc`: registry, `script-shell`, …) | **Per-project** | Same sessions volume; only the login entries are synchronized globally |
 | Sanitized host preferences | **Per-project, regenerated** | `<path-unique-project>_aic-sanitized-seed`, read-only to the agent |
 | Project source | Host bind | The current canonical project root at `/workspace` |
 
-The unrestricted devcontainer never mounts the global Claude, Codex, or
-OpenCode directories. Instead, each canonical tool home is a symlink into
-`~/.aic-sessions/tool-homes/` in the current project's volume. A dedicated
-networkless, capability-free sidecar is the only service that sees both those
-homes and the three global tool-auth subpaths. It continuously reconciles four
-exact files — Claude `.credentials.json`, Codex `auth.json`, and OpenCode
-`auth.json` / `account.json` — so login, logout, and token refresh propagate
-without sharing any other filename.
+The unrestricted devcontainer never mounts the global Claude, Codex, OpenCode,
+`gh`, or npm directories. Instead, each canonical tool home (`~/.claude`,
+`~/.codex`, the two OpenCode homes, `~/.config/gh`, `~/.config/npm`) is a
+symlink into `~/.aic-sessions/tool-homes/` in the current project's volume. A
+dedicated networkless, capability-free sidecar is the only service that sees
+both those homes and the five global tool-auth subpaths. It continuously
+reconciles four exact files — Claude `.credentials.json`, Codex `auth.json`,
+and OpenCode `auth.json` / `account.json` — so login, logout, and token refresh
+propagate without sharing any other filename.
 
-The bridge accepts only owner-matched, single-link, bounded JSON objects,
-copies them atomically as mode `0600`, and ignores unsafe/malformed paths. Its
-initial newer-wins reconciliation completes before the devcontainer starts.
-GitHub/npm/signing/Semgrep use their own fixed global subpath mounts; the broad
-auth-volume root is never exposed.
+`gh`'s `hosts.yml` and npm's `npmrc` mix login state with settings that run
+code (a per-host `gh` pager/editor/browser; an npm `registry`, `script-shell`,
+or `node-options`). For these two files the bridge copies only the login
+entries: per host, the `gh` token, user, account tokens, and `git_protocol`;
+for npm, the `//registry/:_authToken`, `_auth`, `username`, and `_password`
+lines, with literal values only (no `${VAR}` expansion). The global copy holds
+nothing else. A project copy keeps its own settings, except that a login change
+from another project rewrites `hosts.yml` with login entries only. A file the
+bridge cannot parse safely is never overwritten and never shared.
+
+The bridge accepts only owner-matched, single-link, bounded files, copies them
+atomically as mode `0600`, and ignores unsafe/malformed paths. Its initial
+newer-wins reconciliation completes before the devcontainer starts. Signing and
+Semgrep use their own fixed global subpath mounts; the broad auth-volume root
+is never exposed.
 
 This preserves the easy part — log in once, work on twenty projects — while
 removing cross-project prompt and transcript bleed. The deliberate remaining

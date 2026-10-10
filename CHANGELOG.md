@@ -60,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.git/config`, or `.git/hooks` mounted a host file from outside the checkout
   into the container, while validation reported it valid. (aic)
 
+- **One project can no longer plant `gh` or npm settings in another.** `gh` and
+  npm config is now per-project; only login tokens are shared, so `gh auth
+  login` and `npm login` still work once for all projects. Old shared settings
+  (aliases, pager, `registry`, `script-shell`, …) are not carried over.
+  (docker-compose, Dockerfile, post-create.py)
+
 ### Changed
 
 - **`aic up` and VS Code starts now require a `.git` directory.** Without

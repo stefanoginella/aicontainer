@@ -2671,7 +2671,7 @@ print_boundary_summary () {
   printf "\n  %sSecrets%s\n" "$b" "$rst"
   printf "    .env* reads/writes blocked by the PreToolUse hook (fires even in bypass mode)\n"
   printf "    %syour project's own .env still lives in /workspace: the hook gates the agent, not the file%s\n" "$dim" "$rst"
-  printf "    tool login: only four validated JSON credential files cross projects via a networkless sidecar\n"
+  printf "    tool login: only four validated JSON credential files and gh/npm login entries cross projects via a networkless sidecar\n"
   printf "    git credentials: none forwarded (you auth fresh inside); global Git config is root-owned under /etc\n"
 
   # Commit signing: the host signing key is never forwarded, so signing only
@@ -3197,9 +3197,10 @@ initialize_managed_volumes () {
   assert_safe_docker_volume_if_present "$seed"
 
   # Only exact credential directories remain global. Whole Claude/Codex/
-  # OpenCode homes now live in the per-project sessions volume; a networkless
-  # sidecar reconciles four validated credential files between the two. Create
-  # the volume.subpath roots before Compose resolves them, and align ownership
+  # OpenCode/gh/npm homes now live in the per-project sessions volume; a
+  # networkless sidecar reconciles four validated credential files and the
+  # login entries of gh hosts.yml and npm npmrc between the two. Create the
+  # volume.subpath roots before Compose resolves them, and align ownership
   # with Dev Containers' host-UID mapping.
   if ! docker run --rm --network none --read-only --cap-drop ALL \
     --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
@@ -3276,7 +3277,8 @@ initialize_managed_volumes () {
 
       for p in \
         /v/tool-homes /v/tool-homes/claude /v/tool-homes/codex \
-        /v/tool-homes/opencode-config /v/tool-homes/opencode-data
+        /v/tool-homes/opencode-config /v/tool-homes/opencode-data \
+        /v/tool-homes/gh /v/tool-homes/npm
       do
         ensure_dir "$p"
       done

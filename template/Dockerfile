@@ -91,16 +91,17 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
 # ---------------------------------------------------------------------------
 # `.aic-sessions` is the tool-neutral, per-project state root. Each tool keeps
 # its complete home below `tool-homes/`; the separate auth bridge shares only
-# the four explicitly allowlisted credential JSON files between projects.
+# the four explicitly allowlisted credential JSON files and the login entries
+# of gh's hosts.yml and npm's npmrc between projects.
 RUN mkdir -p /workspace \
              /project-sessions \
              /home/vscode/.aic-sessions/tool-homes/claude \
              /home/vscode/.aic-sessions/tool-homes/codex \
              /home/vscode/.aic-sessions/tool-homes/opencode-config \
              /home/vscode/.aic-sessions/tool-homes/opencode-data \
+             /home/vscode/.aic-sessions/tool-homes/gh \
+             /home/vscode/.aic-sessions/tool-homes/npm \
              /home/vscode/.semgrep \
-             /home/vscode/.config/gh \
-             /home/vscode/.config/npm \
              /home/vscode/.config/aic-auth/signing \
              /home/vscode/.config/aic-auth/semgrep \
              /home/vscode/.local/share \
@@ -110,9 +111,11 @@ RUN mkdir -p /workspace \
     && ln -s /home/vscode/.aic-sessions/tool-homes/codex /home/vscode/.codex \
     && ln -s /home/vscode/.aic-sessions/tool-homes/opencode-config /home/vscode/.config/opencode \
     && ln -s /home/vscode/.aic-sessions/tool-homes/opencode-data /home/vscode/.local/share/opencode \
+    && ln -s /home/vscode/.aic-sessions/tool-homes/gh /home/vscode/.config/gh \
+    && ln -s /home/vscode/.aic-sessions/tool-homes/npm /home/vscode/.config/npm \
     && chown -R vscode:vscode /workspace /project-sessions /home/vscode/.local /home/vscode/.semgrep /home/vscode/.config /home/vscode/.config/aic-auth /home/vscode/.aic-sessions /home/vscode/.shell-history /opt \
     && chmod 0700 /project-sessions /home/vscode/.aic-sessions /home/vscode/.aic-sessions/tool-homes /home/vscode/.aic-sessions/tool-homes/* \
-    && chown -h vscode:vscode /home/vscode/.claude /home/vscode/.codex /home/vscode/.config/opencode /home/vscode/.local/share/opencode
+    && chown -h vscode:vscode /home/vscode/.claude /home/vscode/.codex /home/vscode/.config/opencode /home/vscode/.local/share/opencode /home/vscode/.config/gh /home/vscode/.config/npm
 
 # Reserved root-helper namespace. The host Docker socket is mounted read-only at
 # the nested path by Compose; vscode cannot traverse this directory, while the
