@@ -1325,6 +1325,9 @@ scan_project_overrides () {
     if grep -qE '^[[:space:]]*devices:' "$ov"; then
       findings+=("override: devices — maps host devices into the container")
     fi
+    if grep -qE '^[[:space:]]*(post_start|pre_stop):' "$ov"; then
+      findings+=("override: post_start/pre_stop — lifecycle hooks can run commands as privileged root")
+    fi
   fi
 
   if [ -f "$df" ]; then
@@ -1502,6 +1505,13 @@ const volatile = msg => process.stdout.write(`VOLATILE\t${safeDiagnostic(msg)}\n
 
 function parseJsonc(file) {
   const source = fs.readFileSync(file, 'utf8');
+  // The Dev Containers CLI scanner also ends a // comment at a bare carriage
+  // return, and other JSONC scanners treat U+2028/U+2029 as line breaks. Text
+  // after one is a comment to one parser and live keys to the other, so refuse
+  // the file instead of guessing which reading the CLI will act on.
+  if (/\r(?!\n)|[\u2028\u2029]/.test(source)) {
+    throw new Error('contains a bare carriage return or a Unicode line separator');
+  }
   let out = '', string = false, escape = false;
   for (let i = 0; i < source.length; i++) {
     const c = source[i], n = source[i + 1];
@@ -1563,35 +1573,51 @@ try {
   templateDev = { value: {}, source: '' };
 }
 
-const dc = actualDev.value;
-const td = templateDev.value;
-if (!dc || Array.isArray(dc) || typeof dc !== 'object') managed('devcontainer.json must be an object');
+const isPlainObject = value => !!value && typeof value === 'object' && !Array.isArray(value);
+if (!isPlainObject(actualDev.value)) managed('devcontainer.json must be an object');
+const dc = isPlainObject(actualDev.value) ? actualDev.value : {};
+const td = isPlainObject(templateDev.value) ? templateDev.value : {};
 const wantedCompose = hasOverride
   ? ['docker-compose.yml', 'docker-compose.override.yml']
   : ['docker-compose.yml'];
 if (JSON.stringify(dc.dockerComposeFile) !== JSON.stringify(wantedCompose)) {
   managed(`dockerComposeFile must be exactly ${JSON.stringify(wantedCompose)}; run aic sync`);
 }
-for (const key of ['service', 'workspaceFolder', 'remoteUser', 'updateRemoteUserUID', 'init', 'overrideCommand', 'initializeCommand', 'postCreateCommand']) {
-  if (JSON.stringify(dc[key]) !== JSON.stringify(td[key])) {
+// Top-level keys are an allow-list taken from the pristine template, never a
+// deny-list. The Dev Containers CLI acts on keys aic does not write:
+// runServices starts extra Compose services, features and lifecycle commands
+// run code, and the spec keeps adding keys. aic rewrites only these merge
+// targets on sync; every other template key must match exactly.
+const devMergeTargets = new Set(['name', 'dockerComposeFile', 'containerEnv', 'customizations']);
+for (const key of Object.keys(dc)) {
+  if (!Object.prototype.hasOwnProperty.call(td, key)) {
+    managed(`devcontainer.json must not define unmanaged ${key}; run aic sync and use a documented project-owned extension point`);
+  }
+}
+for (const key of Object.keys(td)) {
+  if (!devMergeTargets.has(key) && JSON.stringify(dc[key]) !== JSON.stringify(td[key])) {
     managed(`devcontainer.json managed anchor ${key} differs from the template; run aic sync`);
   }
 }
-for (const key of [
-  'mounts', 'runArgs', 'workspaceMount', 'containerUser',
-  'features', 'overrideFeatureInstallOrder', 'privileged', 'capAdd',
-  'securityOpt', 'build', 'image', 'dockerFile', 'context', 'remoteEnv',
-  'onCreateCommand', 'updateContentCommand', 'postStartCommand',
-  'postAttachCommand', 'userEnvProbe', 'appPort',
-]) {
-  if (Object.prototype.hasOwnProperty.call(dc, key)) {
-    managed(`devcontainer.json must not define unmanaged ${key}; run aic sync and use a documented project-owned extension point`);
-  }
+if (typeof dc.name !== 'string') managed('devcontainer.json name must be a string; run aic sync');
+// aic merges only VS Code extension ids and settings into customizations.
+const vscodeCustomizations = isPlainObject(dc.customizations) ? dc.customizations.vscode : undefined;
+if (!isPlainObject(dc.customizations) || Object.keys(dc.customizations).join() !== 'vscode'
+    || !isPlainObject(vscodeCustomizations)
+    || Object.keys(vscodeCustomizations).some(key => key !== 'extensions' && key !== 'settings')
+    || !Array.isArray(vscodeCustomizations.extensions)
+    || vscodeCustomizations.extensions.some(id => typeof id !== 'string')
+    || !isPlainObject(vscodeCustomizations.settings)) {
+  managed('devcontainer.json customizations may contain only vscode.extensions and vscode.settings; run aic sync');
 }
 if (!actualDev.source.includes('aic:vscode-extensions') || !actualDev.source.includes('aic:vscode-settings')) {
   managed('devcontainer.json is missing managed VS Code merge anchors; run aic sync');
 }
-const actualEnv = dc.containerEnv || {}, templateEnv = td.containerEnv || {};
+if (dc.containerEnv !== undefined && !isPlainObject(dc.containerEnv)) {
+  managed('devcontainer.json containerEnv must be an object; run aic sync');
+}
+const actualEnv = isPlainObject(dc.containerEnv) ? dc.containerEnv : {};
+const templateEnv = isPlainObject(td.containerEnv) ? td.containerEnv : {};
 for (const [key, value] of Object.entries(templateEnv)) {
   if (actualEnv[key] !== value) managed(`containerEnv.${key} differs from the managed template; run aic sync`);
 }
@@ -1966,7 +1992,109 @@ for (const [networkName, spec] of Object.entries(final.networks || {})) {
   }
 }
 
+// Compose top-level and service keys are allow-lists too. A key below is
+// either inspected by a dedicated check in this validator or only changes the
+// service's own container (resource limits, names, DNS, restart and stop
+// behavior). Any other key -- lifecycle hooks, annotations, cgroup placement,
+// or a key a later Compose release adds -- must equal the managed base or
+// needs exact trust.
+const reviewedTopLevelKeys = new Set(['name', 'services', 'networks', 'volumes', 'configs', 'secrets', 'include']);
+for (const key of new Set([...Object.keys(final), ...Object.keys(base)])) {
+  if (reviewedTopLevelKeys.has(key) || key.startsWith('x-')) continue;
+  if (!equal(final[key], base[key])) unsafe(`Compose top-level ${key} is not a reviewed key and may expand host access`);
+}
+const reviewedServiceKeys = new Set([
+  // Inspected by dedicated checks.
+  'build', 'cap_add', 'cap_drop', 'cgroup', 'command', 'configs', 'credential_spec',
+  'depends_on', 'deploy', 'develop', 'device_cgroup_rules', 'devices', 'entrypoint',
+  'env_file', 'environment', 'extends', 'gpus', 'group_add', 'healthcheck', 'image',
+  'ipc', 'label_file', 'labels', 'models', 'network_mode', 'networks', 'pid', 'ports',
+  'privileged', 'provider', 'runtime', 'secrets', 'security_opt', 'tmpfs',
+  'use_api_socket', 'user', 'userns_mode', 'uts', 'volumes', 'volumes_from',
+  // Limited to the service's own container.
+  'attach', 'blkio_config', 'container_name', 'cpu_count', 'cpu_percent', 'cpu_period',
+  'cpu_quota', 'cpu_shares', 'cpus', 'cpuset', 'dns', 'dns_opt', 'dns_search',
+  'domainname', 'expose', 'extra_hosts', 'hostname', 'init', 'links', 'mac_address',
+  'mem_limit', 'mem_reservation', 'mem_swappiness', 'memswap_limit', 'pids_limit',
+  'platform', 'profiles', 'pull_policy', 'read_only', 'restart', 'scale', 'shm_size',
+  'stdin_open', 'stop_grace_period', 'stop_signal', 'tty', 'ulimits', 'working_dir',
+]);
+const lifecycleHookKeys = ['post_start', 'pre_stop'];
+const containerLocalLogDrivers = new Set(['json-file', 'local', 'none']);
+// Compose tags a build with the service image name (or <project>-<service>).
+const normalizeImageRef = ref => {
+  let value = String(ref).trim().toLowerCase().replace(/@.*$/, '');
+  value = value.replace(/^docker\.io\//, '').replace(/^library\//, '');
+  return /:[^/]*$/.test(value) ? value : `${value}:latest`;
+};
+const managedImageOwners = new Map();
+for (const [name, managedService] of Object.entries(baseServices)) {
+  const refs = managedService.image
+    ? [managedService.image]
+    : [`${expectedName}-${name}`, `${expectedName}_${name}`];
+  for (const ref of refs.map(normalizeImageRef)) {
+    managedImageOwners.set(ref, [...(managedImageOwners.get(ref) || []), name]);
+  }
+}
+const labelMap = labels => Array.isArray(labels)
+  ? Object.fromEntries(labels.map(entry => {
+    const text = String(entry), eq = text.indexOf('=');
+    return eq === -1 ? [text, ''] : [text.slice(0, eq), text.slice(eq + 1)];
+  }))
+  : (isPlainObject(labels) ? labels : {});
+
 for (const [serviceName, service] of Object.entries(services)) {
+  const baseService = baseServices[serviceName] || {};
+  for (const key of new Set([...Object.keys(service), ...Object.keys(baseService)])) {
+    if (reviewedServiceKeys.has(key) || lifecycleHookKeys.includes(key) || key.startsWith('x-')) continue;
+    if (key === 'logging' || key === 'sysctls') continue; // dedicated checks below
+    if (!equal(service[key], baseService[key])) {
+      unsafe(`service ${serviceName}: ${key} is not a reviewed Compose service key and may expand host access`);
+    }
+  }
+  // Compose runs lifecycle hooks with docker exec semantics: each hook may set
+  // its own user and privileged flag, so one can run as privileged root even
+  // when the service itself is unprivileged.
+  for (const hook of lifecycleHookKeys) {
+    if (!equal(service[hook] || [], baseService[hook] || [])) {
+      const escalated = (service[hook] || []).some(entry => entry && entry.privileged === true);
+      unsafe(`service ${serviceName}: ${hook} lifecycle hook runs commands${escalated ? ' with privileged: true' : ''} outside the reviewed service command`);
+    }
+  }
+  const reservedDevices = (((service.deploy || {}).resources || {}).reservations || {}).devices || [];
+  if (reservedDevices.length) unsafe(`service ${serviceName}: deploy reserves host devices (GPUs/CDI)`);
+  // The Dev Containers CLI reads devcontainer.* container labels as config
+  // metadata, and aic's legacy ownership checks trust the Compose labels.
+  const baseLabels = labelMap(baseService.labels);
+  for (const [label, value] of Object.entries(labelMap(service.labels))) {
+    if (/^(devcontainer\.|com\.docker\.compose\.)/.test(label) && baseLabels[label] !== value) {
+      unsafe(`service ${serviceName}: sets reserved label ${label} that Dev Containers or aic ownership checks trust`);
+    }
+  }
+  // Every project-owned build runs a Dockerfile as root. With pull_policy:
+  // missing, a build tagged like an image that another managed service (or
+  // another aic project) runs silently replaces that image, so such a tag is
+  // refused outright rather than offered for trust.
+  if (service.build && !equal(service.build, baseService.build)) {
+    if (serviceName !== 'devcontainer') unsafe(`service ${serviceName}: build executes a project-owned Dockerfile as root`);
+    const builtTags = [service.image || `${expectedName}-${serviceName}`, ...((service.build || {}).tags || [])];
+    for (const tag of builtTags) {
+      const ref = normalizeImageRef(tag);
+      const owners = (managedImageOwners.get(ref) || []).filter(owner => owner !== serviceName);
+      if (owners.length || ref.startsWith('ghcr.io/stefanoginella/aicontainer:')) {
+        managed(`service ${serviceName}: build would tag ${tag}, replacing an image that managed aicontainer services run; give the build its own image: tag`);
+      }
+    }
+  }
+  if (service.logging && !equal(service.logging, baseService.logging)
+      && !containerLocalLogDrivers.has(service.logging.driver)) {
+    unsafe(`service ${serviceName}: logging driver ${service.logging.driver || '<daemon default>'} can send container output to a host or network endpoint`);
+  }
+  // Docker accepts only namespaced sysctls, so on an added service they stay in
+  // that container. On a managed service they need review.
+  if (baseServices[serviceName] && !equal(service.sysctls || {}, baseService.sysctls || {})) {
+    unsafe(`service ${serviceName}: sysctls change kernel settings of a managed service`);
+  }
   if (service.privileged === true) unsafe(`service ${serviceName}: privileged: true — full host device access`);
   if (baseServices[serviceName] && !equal(service.user, baseServices[serviceName].user)) {
     unsafe(`service ${serviceName}: changes the managed runtime user to ${service.user || '<image default>'}`);
@@ -2106,6 +2234,11 @@ for (const [serviceName, service] of Object.entries(noenv.services || {})) {
   }
   for (const watch of (((service.develop || {}).watch) || [])) {
     if (watch.path && !withinRoot(watch.path)) unsafe(`service ${serviceName}: develop.watch path is outside the project: ${watch.path}`);
+    // Compose emits exec: {command: null} for every entry; only a command runs.
+    const execCommand = watch.exec && watch.exec.command;
+    if (execCommand != null && [].concat(execCommand).length) {
+      unsafe(`service ${serviceName}: develop.watch exec hook runs commands that may set their own user or privileged flag`);
+    }
   }
   if (service.extends) unsafe(`service ${serviceName}: extends imports additional Compose configuration`);
 }
@@ -2190,33 +2323,37 @@ validate_project_security () {
     expected_compose="$TEMPLATE_DIR/docker-compose.pull.yml"
   fi
 
-  if ! docker compose -f .devcontainer/docker-compose.yml config --format json > "$base_json" 2>/dev/null; then
+  # Resolve every model with all profiles active. Plain `config` omits a
+  # profiled service, but `up` still starts one that devcontainer.json
+  # runServices names or COMPOSE_PROFILES enables, so the gate must see every
+  # service any startup path can create.
+  if ! docker compose --profile '*' -f .devcontainer/docker-compose.yml config --format json > "$base_json" 2>/dev/null; then
     printf 'MANAGED\t%s\n' 'docker-compose.yml could not be resolved; run docker compose config for details' >> "$findings"
   fi
-  if ! docker compose -f "$expected_compose" config --format json > "$expected_json" 2>/dev/null; then
+  if ! docker compose --profile '*' -f "$expected_compose" config --format json > "$expected_json" 2>/dev/null; then
     printf 'MANAGED\tinstalled aic Compose template could not be resolved; reinstall aic\n' >> "$findings"
   fi
   if [ -f .devcontainer/docker-compose.override.yml ]; then
-    if ! docker compose -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.override.yml config --format json > "$final_json" 2>/dev/null; then
+    if ! docker compose --profile '*' -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.override.yml config --format json > "$final_json" 2>/dev/null; then
       printf 'MANAGED\tmanaged + override Compose configuration could not be resolved\n' >> "$findings"
     fi
-    if ! docker compose -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.override.yml \
+    if ! docker compose --profile '*' -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.override.yml \
         config --format json --no-env-resolution > "$noenv_json" 2>/dev/null; then
       printf 'MANAGED\tCompose configuration could not be inspected without env-file resolution\n' >> "$findings"
     fi
     # Resolve a second pair without interpolation only when an override exists.
     # Normal generated projects pay no extra Compose-process cost.
-    if ! docker compose -f .devcontainer/docker-compose.yml \
+    if ! docker compose --profile '*' -f .devcontainer/docker-compose.yml \
         config --format json --no-env-resolution --no-interpolate > "$raw_base_json" 2>/dev/null; then
       printf 'MANAGED\tmanaged Compose interpolation model could not be inspected\n' >> "$findings"
     fi
-    if ! docker compose -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.override.yml \
+    if ! docker compose --profile '*' -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.override.yml \
         config --format json --no-env-resolution --no-interpolate > "$raw_final_json" 2>/dev/null; then
       printf 'MANAGED\tmerged Compose interpolation model could not be inspected\n' >> "$findings"
     fi
   else
     cp "$base_json" "$final_json"
-    if ! docker compose -f .devcontainer/docker-compose.yml config --format json --no-env-resolution > "$noenv_json" 2>/dev/null; then
+    if ! docker compose --profile '*' -f .devcontainer/docker-compose.yml config --format json --no-env-resolution > "$noenv_json" 2>/dev/null; then
       printf 'MANAGED\tCompose configuration could not be inspected without env-file resolution\n' >> "$findings"
     fi
     printf '{}\n' > "$raw_base_json"

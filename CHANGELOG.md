@@ -13,6 +13,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Profile-gated Compose services no longer bypass validation.** Validation
+  now resolves every Compose profile, so a service hidden behind `profiles:` is
+  checked before startup. (aic)
+
+- **`devcontainer.json` now accepts only the keys aic generates.** Keys such
+  as `runServices`, which starts extra Compose services, fail validation until
+  `aic sync`. (aic)
+
+- **Compose lifecycle hooks now need `aic trust`.** A `post_start`, `pre_stop`,
+  or `develop.watch` `exec` hook can run commands as privileged root, on the
+  devcontainer or on any added service. (aic)
+
+- **Unreviewed Compose keys now need `aic trust`.** Keys the validator does not
+  check, such as `cgroup_parent`, network logging drivers, or reserved
+  `devcontainer.*` labels, no longer pass silently. (aic)
+
+- **Project builds on added services now need `aic trust`.** A build tagged like
+  the shared aicontainer image is refused, because it would replace the image
+  the sandbox helpers and other projects run. (aic)
+
+- **`devcontainer.json` comments can no longer hide keys from validation.** A
+  bare carriage return ended a comment for Dev Containers but not for aic; such
+  files are now rejected. (aic)
+
 ## [0.9.1] - 2026-10-05
 
 ### Changed

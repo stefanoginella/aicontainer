@@ -411,6 +411,181 @@ echo "$out" | grep -q 'changes managed command' \
 echo "$out" | grep -q 'writable bind exposes protected project control paths' \
   || fail "nested .devcontainer bind escaped writable-control detection"
 
+# A plain `docker compose config` omits profile-gated services, but Compose
+# still starts one that devcontainer.json runServices names. Validation must
+# resolve every profile, and runServices (like any key the template does not
+# define) is outside the devcontainer.json allow-list.
+new_project "$TMP/profiles"
+cat > "$TMP/profiles/.devcontainer/docker-compose.override.yml" <<'YAML'
+services:
+  hidden:
+    image: busybox
+    profiles: ["never-active"]
+    privileged: true
+    volumes:
+      - /:/host
+YAML
+(cd "$TMP/profiles" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+out=$(cd "$TMP/profiles" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -q 'service hidden: privileged: true' \
+  || fail "profile-gated privileged service was hidden from validation"
+echo "$out" | grep -q 'service hidden: binds a sensitive host path outside the project: /' \
+  || fail "profile-gated host-root bind was hidden from validation"
+if (cd "$TMP/profiles" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+    "$ROOT/aic" validate </dev/null >/dev/null 2>&1); then
+  fail "validate accepted an untrusted profile-gated service"
+fi
+sed 's|^  "customizations": {|  "runServices": ["devcontainer", "hidden"],\
+  "waitFor": "onCreateCommand",\
+  "customizations": {|' \
+  "$TMP/profiles/.devcontainer/devcontainer.json" \
+  > "$TMP/profiles/.devcontainer/devcontainer.json.tmp"
+mv "$TMP/profiles/.devcontainer/devcontainer.json.tmp" \
+  "$TMP/profiles/.devcontainer/devcontainer.json"
+out=$(cd "$TMP/profiles" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -q 'must not define unmanaged runServices' \
+  || fail "devcontainer.json runServices bypassed managed validation"
+echo "$out" | grep -q 'must not define unmanaged waitFor' \
+  || fail "devcontainer.json top-level keys are not an allow-list"
+(cd "$TMP/profiles" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+sed 's|^    "vscode": {|    "codespaces": {},\
+    "vscode": {|' \
+  "$TMP/profiles/.devcontainer/devcontainer.json" \
+  > "$TMP/profiles/.devcontainer/devcontainer.json.tmp"
+mv "$TMP/profiles/.devcontainer/devcontainer.json.tmp" \
+  "$TMP/profiles/.devcontainer/devcontainer.json"
+out=$(cd "$TMP/profiles" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -q 'customizations may contain only vscode.extensions and vscode.settings' \
+  || fail "devcontainer.json customizations accepted an unmanaged section"
+# The Dev Containers CLI scanner ends a // comment at a bare carriage return,
+# while a \n-only reading keeps the rest of the line as comment. Keys after it
+# would be live for Dev Containers but invisible to validation.
+(cd "$TMP/profiles" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+node -e '
+  const fs = require("fs"), file = process.argv[1];
+  const source = fs.readFileSync(file, "utf8");
+  const patched = source.replace(/("postCreateCommand": "[^"]*")/,
+    "$1 // hidden\r, \"runServices\": [\"devcontainer\", \"hidden\"]");
+  if (patched === source) process.exit(2);
+  fs.writeFileSync(file, patched);
+' "$TMP/profiles/.devcontainer/devcontainer.json"
+out=$(cd "$TMP/profiles" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -q 'contains a bare carriage return' \
+  || fail "a bare carriage return hid devcontainer.json keys from validation"
+
+# Compose lifecycle hooks run with exec semantics: each entry may set its own
+# user and privileged flag, on the devcontainer or on any added service. Keys
+# the validator does not review, and labels that Dev Containers or the legacy
+# ownership checks trust, need exact trust as well.
+new_project "$TMP/service-keys"
+cat > "$TMP/service-keys/.devcontainer/docker-compose.override.yml" <<'YAML'
+services:
+  devcontainer:
+    post_start:
+      - command: ["sh", "-c", "id > /workspace/hook-ran"]
+        user: root
+        privileged: true
+    labels:
+      devcontainer.metadata: '[{"remoteUser":"root"}]'
+    logging:
+      driver: syslog
+    cgroup_parent: agent.slice
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+  helper:
+    image: busybox
+    command: sleep infinity
+    pre_stop:
+      - command: ["true"]
+    develop:
+      watch:
+        - action: sync+exec
+          path: ./hooks
+          target: /hooks
+          exec:
+            command: ["id"]
+            privileged: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+YAML
+(cd "$TMP/service-keys" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+out=$(cd "$TMP/service-keys" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -q 'service devcontainer: post_start lifecycle hook runs commands with privileged: true' \
+  || fail "privileged post_start hook bypassed validation"
+echo "$out" | grep -q 'service helper: pre_stop lifecycle hook runs commands' \
+  || fail "pre_stop hook on an added service bypassed validation"
+echo "$out" | grep -q 'service helper: develop.watch exec hook runs commands' \
+  || fail "develop.watch exec hook bypassed validation"
+echo "$out" | grep -q 'service devcontainer: cgroup_parent is not a reviewed Compose service key' \
+  || fail "Compose service keys are not an allow-list"
+echo "$out" | grep -q 'service devcontainer: logging driver syslog can send container output' \
+  || fail "network logging driver bypassed validation"
+echo "$out" | grep -q 'service devcontainer: sysctls change kernel settings of a managed service' \
+  || fail "managed-service sysctls bypassed validation"
+echo "$out" | grep -q 'sets reserved label devcontainer.metadata' \
+  || fail "reserved Dev Containers label bypassed validation"
+echo "$out" | grep -q 'service helper: deploy reserves host devices' \
+  || fail "deploy device reservation bypassed validation"
+if (cd "$TMP/service-keys" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+    "$ROOT/aic" validate </dev/null >/dev/null 2>&1); then
+  fail "validate accepted untrusted lifecycle hooks"
+fi
+
+# The allow-lists must not add friction to the documented override examples or
+# an ordinary database sidecar.
+cat > "$TMP/service-keys/.devcontainer/docker-compose.override.yml" <<'YAML'
+services:
+  devcontainer:
+    environment:
+      DATABASE_URL: postgresql://user:pass@host.docker.internal:5432/mydb
+      AIC_FREEZE_TOOLS: "1"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    pids_limit: 8192
+    mem_limit: 8g
+    cpus: 4
+    volumes:
+      - myproject-venv:/workspace/.venv
+      - myproject-uv-cache:/home/vscode/.cache/uv
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: dev
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+    ulimits:
+      nofile: 65536
+    labels:
+      app.example/role: database
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+    sysctls:
+      net.core.somaxconn: 1024
+    develop:
+      watch:
+        - path: ./hooks
+          action: restart
+volumes:
+  myproject-venv:
+  myproject-uv-cache:
+YAML
+(cd "$TMP/service-keys" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+out=$(cd "$TMP/service-keys" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null 2>&1) \
+  || { printf '%s\n' "$out" >&2; fail "documented override examples no longer validate"; }
+
 # Host-shell interpolation is a separate boundary from literal project
 # environment. A checkout must not be able to forward an exported token into
 # its container/build simply by spelling ${TOKEN}; Compose's escaped $${TOKEN}
@@ -764,9 +939,10 @@ echo "$out" | grep -q 'configs mount masks protected managed path /etc/codex/req
 new_project "$TMP/project-build"
 printf 'FROM ghcr.io/stefanoginella/aicontainer:v%s\nRUN true\n' "$version" \
   > "$TMP/project-build/.devcontainer/Dockerfile.project"
-cat > "$TMP/project-build/.devcontainer/docker-compose.override.yml" <<'YAML'
+cat > "$TMP/project-build/.devcontainer/docker-compose.override.yml" <<YAML
 services:
   devcontainer:
+    image: myproject-devcontainer:v$version
     build:
       context: .
       dockerfile: Dockerfile.project
@@ -778,6 +954,49 @@ echo "$out" | grep -q 'project-owned Dockerfile as root' \
 if (cd "$TMP/project-build" && AIC_HOME="$ROOT" "$ROOT/aic" up </dev/null >/dev/null 2>&1); then
   fail "project-owned root build did not fail closed non-interactively"
 fi
+
+# Compose tags a build with the service image name, and the managed services
+# use pull_policy: missing. A build tagged like the shared aicontainer image
+# (the devcontainer without its own image: line, or any added service) would
+# silently replace what the root sanitizer, the credential bridge, and other
+# projects run. That is refused outright, not offered for trust.
+cat > "$TMP/project-build/.devcontainer/docker-compose.override.yml" <<'YAML'
+services:
+  devcontainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.project
+YAML
+out=$(cd "$TMP/project-build" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -q 'service devcontainer: build would tag ghcr.io/stefanoginella/aicontainer' \
+  || fail "devcontainer build without its own tag could replace the shared image"
+mkdir -p "$TMP/project-build/tools"
+printf 'FROM busybox\n' > "$TMP/project-build/tools/Dockerfile"
+cat > "$TMP/project-build/.devcontainer/docker-compose.override.yml" <<YAML
+services:
+  shadow:
+    image: ghcr.io/stefanoginella/aicontainer:v$version
+    build:
+      context: ../tools
+  retag:
+    build:
+      context: ../tools
+      tags: ["ghcr.io/stefanoginella/aicontainer:v0.1.0"]
+YAML
+out=$(cd "$TMP/project-build" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -q 'service shadow: build would tag ghcr.io/stefanoginella/aicontainer' \
+  || fail "added service build could replace the managed image"
+echo "$out" | grep -q 'service retag: build would tag ghcr.io/stefanoginella/aicontainer:v0.1.0' \
+  || fail "added service build tags could replace another project's pinned image"
+cat > "$TMP/project-build/.devcontainer/docker-compose.override.yml" <<'YAML'
+services:
+  app:
+    build:
+      context: ../tools
+YAML
+out=$(cd "$TMP/project-build" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -q 'service app: build executes a project-owned Dockerfile as root' \
+  || fail "added service build was not trust-gated"
 
 # Destructive automation must spell out --yes.
 new_project "$TMP/destroy"

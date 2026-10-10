@@ -177,9 +177,27 @@ The host CLI treats `.devcontainer/` as a control boundary:
 file provenance, resolves the base and merged Compose models to JSON, and
 checks every service plus volumes, networks, mounts, builds, ports,
 capabilities, namespaces, devices, configs/secrets, include/extends/provider,
-environment-file indirections, and protected managed mount targets. Any
-managed mismatch is untrustable and requires `aic sync`. An intentional
-host-boundary expansion requires one of:
+lifecycle hooks, environment-file indirections, and protected managed mount
+targets. Any managed mismatch is untrustable and requires `aic sync`.
+
+Two rules keep the validated model equal to what Dev Containers can start:
+
+- Every validation `docker compose config` runs with `--profile '*'`. A plain
+  `config` omits profiled services, but `up` still starts one that is named by
+  `runServices` or enabled by `COMPOSE_PROFILES`.
+- Keys are allow-lists, never deny-lists. `devcontainer.json` may hold only
+  the template's top-level keys (anchors equal to the template; `name`,
+  `dockerComposeFile`, `containerEnv`, `customizations` are the only merge
+  targets), so `runServices` and future spec keys fail. Compose top-level and
+  service keys outside `reviewedTopLevelKeys`/`reviewedServiceKeys` must equal
+  the managed base or are trust findings. Add a key to those sets only together
+  with a dedicated check, or when it cannot reach past its own container.
+- `parseJsonc()` must read `devcontainer.json` exactly as the Dev Containers
+  CLI does. Its scanner also ends a `//` comment at a bare `\r`, so the
+  validator refuses a bare `\r` and U+2028/U+2029 instead of parsing them;
+  otherwise keys after one are live for the CLI but hidden from validation.
+
+An intentional host-boundary expansion requires one of:
 
 - `aic trust`: interactive approval stored under
   `$XDG_STATE_HOME/aicontainer/trust` for the exact relevant hash; any change
@@ -362,7 +380,12 @@ socket proxy. Keep the protected-key list and host-security test aligned.
 Every project-owned Dockerfile build is unsafe by definition, even when its
 final `FROM` is aicontainer: build steps execute as root and can replace
 helpers, policy, hooks, or the runtime user. It therefore requires exact-config
-trust; checking only the base image is insufficient. Additional mounts on the
+trust on any service, not only the devcontainer; checking only the base image
+is insufficient. A build tag (the service `image:`, the `<project>-<service>`
+default, or `build.tags`) that names an image another managed service runs, or
+any `ghcr.io/stefanoginella/aicontainer` tag, is refused outright: with
+`pull_policy: missing` it would replace the sanitizer, credential-bridge, or
+other projects' image. Additional mounts on the
 devcontainer are frictionless only at `/workspace/**` (excluding `.git` and
 `.devcontainer`) or `/home/vscode/.cache/**`; other targets and any masking of
 `/run`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, or `/opt` are findings.
@@ -373,7 +396,11 @@ Compose values for comparison, prove managed build contexts resolve to
 checkout, and per-project network/volume names retain the path-hashed Compose
 name. Unmanaged Dev Container features/lifecycle hooks/environment and changes
 to the main service command/entrypoint/healthcheck are pre-post-create code
-execution surfaces and must fail or require explicit trust. Keep the matching
+execution surfaces and must fail or require explicit trust. So are Compose
+`post_start`/`pre_stop` and `develop.watch` `exec` hooks on any service: each
+hook entry may set its own `user` and `privileged`. Reserved `devcontainer.*`/`com.docker.compose.*`
+labels are trust findings because Dev Containers and the legacy ownership
+checks read them. Keep the matching
 host tests; these checks close real validator bypasses.
 
 **`chown-paths`** — companion to override-declared named volumes. Docker

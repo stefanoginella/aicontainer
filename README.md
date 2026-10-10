@@ -371,7 +371,8 @@ services:
     # after whatever `image:` resolves to, and the managed Compose file
     # resolves it to the SHARED ghcr.io/stefanoginella/aicontainer:vX.Y.Z —
     # so without this line the build silently re-tags the base image on your
-    # machine and hands this project's image to every other aic project.
+    # machine and hands this project's image to every other aic project. aic
+    # refuses a build tagged like the shared image.
     image: myproject-devcontainer:vX.Y.Z
     build:
       context: .
@@ -446,9 +447,14 @@ Instead, drop a **`.devcontainer/docker-compose.override.yml`**. It's
 project-owned: aic never overwrites it, automatically re-wires it on sync, and
 validates the fully resolved result before any startup command. Ordinary env
 and named-volume data mounts under `/workspace` or `/home/vscode/.cache` remain
-frictionless. Host binds, bounded custom images/builds, devices, capabilities,
-namespaces, external resources, or non-loopback published ports require an
-exact-config `aic trust` approval stored outside the repo. A build context
+frictionless, as do extra image-based services, resource limits, and
+`extra_hosts`. Host binds, bounded custom images, project builds on any
+service, devices, capabilities, namespaces, external resources, non-loopback
+published ports, `post_start`/`pre_stop` lifecycle hooks, or a Compose key the
+validator does not review (for example `cgroup_parent`, a network logging
+driver, or `sysctls` on the devcontainer) require an exact-config `aic trust`
+approval stored outside the repo. Services behind a Compose `profiles:` entry
+are validated too. A build context
 outside `.devcontainer/` is unbounded and instead requires `--allow-unsafe` on
 each reviewed `up`/`rebuild`.
 
@@ -1040,8 +1046,11 @@ there is no live unlock/update primitive.
 - **Untrusted-repo guard**: aic-launched paths reject symlinked control inputs,
   verify every managed artifact, resolve all Compose layers without trusting a
   grep, and check services, mounts, builds, capabilities, namespaces, devices,
-  ports, networks/volumes, includes/providers, configs/secrets, and protected
-  path overlays before invoking Dev Containers. The generated initializer
+  ports, networks/volumes, includes/providers, configs/secrets, lifecycle hooks,
+  and protected path overlays before invoking Dev Containers. Validation
+  enables every Compose profile, so a profile-gated service cannot hide.
+  `devcontainer.json` keys and Compose keys are allow-lists: a key aic does not
+  review is a finding, not a silent pass. The generated initializer
   repeats this gate before Compose creation. Managed drift requires `aic sync`;
   an intentional boundary expansion needs `aic trust` or one-run
   `--allow-unsafe`, and repository edits cannot write either approval.
