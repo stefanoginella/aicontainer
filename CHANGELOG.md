@@ -45,6 +45,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   volumes. `aic up`/`rebuild`/`shell`/`run` now pass the managed name, and a
   direct VS Code start that would use another name is refused. (aic)
 
+- **The agent can no longer redirect host Git to its own config and hooks.**
+  `.git/commondir` and `.git/config.worktree` are now read-only in the
+  container, and aic creates them before startup. A planted `commondir` is
+  refused. (aic, docker-compose)
+
+- **The agent can no longer replace `.git` from inside the container.**
+  Renaming `.git` and creating a new one bypassed the read-only `.git/config`
+  and hooks; `.git` is now a mount point that cannot be moved. Review
+  `.git/config` and `.git/config.worktree` once in checkouts where an agent
+  could have been compromised. (docker-compose)
+
+- **Symlinked `.git` control paths are refused.** A symlinked `.git`,
+  `.git/config`, or `.git/hooks` mounted a host file from outside the checkout
+  into the container, while validation reported it valid. (aic)
+
+### Changed
+
+- **`aic up` and VS Code starts now require a `.git` directory.** Without
+  one, Docker created root-owned placeholder directories in its place. `aic
+  init` only warns, so `git init` can follow it. (aic)
+
+- **The README lists what host Git can still run from an agent's changes.**
+  Submodules, nested repositories, and hook scripts kept in the repository
+  (husky, lefthook, pre-commit) run files the agent can write. (README)
+
 ## [0.9.1] - 2026-10-05
 
 ### Changed

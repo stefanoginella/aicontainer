@@ -4,7 +4,8 @@
 # =============================================================================
 # Shared by Claude Code and Codex CLI. Fires even with bypass / auto-approve
 # enabled. Defense-in-depth — the real boundaries are filesystem isolation,
-# the socket-proxy, and read-only mounts of .devcontainer/.git/{config,hooks}.
+# the socket-proxy, and read-only mounts of .devcontainer/ and the Git control
+# files (.git/{config,config.worktree,commondir,hooks}).
 #
 # Receives a JSON event on stdin. Exit 0 = allow. Exit 2 = block (the AI sees
 # the message on stderr and surfaces it to the user).

@@ -29,7 +29,7 @@ shown automatically at the end of every `aic up`).
 
 | Surface | Crosses the boundary? |
 |---|---|
-| Project directory | **Yes, read-write** (`/workspace`) — the one writable host path. |
+| Project directory | **Yes, read-write** (`/workspace`) — the one writable host path. `.devcontainer/` and the repository's own Git control files (config, hooks) are read-only. Submodules and nested repositories are not: see [Threat model](#threat-model). |
 | Host Git / Claude / Codex / OpenCode config | The raw files are visible only to a fixed, root-only, networkless one-shot sanitizer. The agent receives root-owned JSON containing allowlisted preferences; executable Git config, inline credentials, MCP env/header secrets, and security-policy fields are removed. See [Config seeding](#config-seeding-from-the-host). |
 | Host shell startup files (`.zshrc`, `.bashrc`, fish config, p10k) and Claude `statusLine` | **Not automatically.** Shells start from root-managed aicontainer profiles and the host `statusLine` command is dropped, so nothing host-side plants startup code. You can opt in per file by copying it into `~/.config/aicontainer/` (`rc.zsh`, `p10k.zsh`, `statusline.*`); those cross verbatim and land root-locked. See [Personal shell config](#personal-shell-config) and [statusline](#personal-claude-code-statusline). |
 | Host home, `~/.ssh`, SSH-agent socket | **No** — not mounted, not forwarded. |
@@ -53,8 +53,10 @@ one most worth your attention.
   [Colima](https://github.com/abiosoft/colima), or rootless Docker Engine,
   using a local Unix socket. aic discovers the selected context automatically.
 - Node.js 18+ (for npm and the bundled `@devcontainers/cli`).
-- A conventional Git checkout opened at its repository root (`.git` must be a
-  directory so its config/hooks can be protected with exact read-only mounts).
+- A conventional Git checkout opened at its repository root. `.git` must be a
+  real directory (not a symlink, and not the `.git` file of a linked worktree
+  or submodule checkout) so its control files can be protected with exact
+  read-only mounts.
 
 Run `aic doctor` for an exact, non-mutating compatibility check.
 
@@ -95,6 +97,7 @@ project's persistent instructions into another project's.
 
 ```bash
 mkdir -p ~/sandbox/scratch && cd ~/sandbox/scratch
+git init
 aic init
 aic up
 aic shell
@@ -168,18 +171,20 @@ aic validate   # managed provenance + fully resolved Compose security model
 `doctor` can run before `init`; it checks Node 18+, Docker Engine 25+ and
 Compose 2.24+ (needed for volume subpaths), the selected local Unix socket,
 the Dev Container CLI, Git/project-root shape, install integrity,
-control-path safety, and whether a direct editor start would use the managed
-Compose project name. Warnings remain exit 0; blockers exit nonzero. Standard,
-rootless, Colima, OrbStack, and Docker Desktop Unix-socket contexts are
-discovered automatically; remote TCP/SSH contexts, subdirectories below the
-Git root, and worktree-style checkouts are reported explicitly rather than
-failing later with an opaque Compose error.
+control-path safety (including `.git` and its control files), and whether a
+direct editor start would use the managed Compose project name. Warnings
+remain exit 0; blockers exit nonzero. Standard, rootless, Colima, OrbStack,
+and Docker Desktop Unix-socket contexts are discovered automatically; remote
+TCP/SSH contexts, subdirectories below the Git root, and worktree-style
+checkouts are reported explicitly rather than failing later with an opaque
+Compose error.
 
 `status` is a quick factual snapshot (including credential-bridge health) and
 tolerates a stopped daemon. `validate` is suitable for CI: it never prompts or
 records trust, honors an existing exact approval, and exits nonzero for managed
-drift, an untrusted boundary expansion, or a `COMPOSE_PROJECT_NAME` (root `.env`
-or environment) that a direct start would use instead of the managed name.
+drift, an unsafe `.git` control path, an untrusted boundary expansion, or a
+`COMPOSE_PROJECT_NAME` (root `.env` or environment) that a direct start would
+use instead of the managed name.
 
 ### Choosing tools per project
 
@@ -1045,11 +1050,17 @@ there is no live unlock/update primitive.
   reachable only below a root-owned `0700` directory and is used by the fixed
   ownership helper for bounded GET-only mount/volume inspection. The
   unrestricted user uses the proxy, never that socket.
-- **Control plane**: `.devcontainer/`, `.git/config`, and `.git/hooks` are
-  read-only inside. Managed hooks, tool policy, Git config, and shell startup
-  live under root-owned system paths. Scoped sudo exposes only fixed-purpose
-  wrappers with hardcoded destinations; the volume helper additionally proves
-  each target is an ordinary named volume on the current container.
+- **Control plane**: `.devcontainer/` and the repository's Git control files
+  (`.git/config`, `.git/config.worktree`, `.git/commondir`, `.git/hooks`) are
+  read-only inside, and `.git` is mounted onto itself so the agent cannot
+  rename it and plant a new one. aic creates `.git/commondir` (content `.`) and
+  an empty `.git/config.worktree` for these mounts and refuses a symlink at any
+  of these paths; one side effect is that `git rev-parse --git-common-dir`
+  prints an absolute path. Managed hooks, tool policy, Git config, and shell
+  startup live under root-owned system paths. Scoped sudo exposes only
+  fixed-purpose wrappers with hardcoded destinations; the volume helper
+  additionally proves each target is an ordinary named volume on the current
+  container.
 - **Cloud metadata / link-local**: every create adds strengthen-only drops for
   IPv4 link-local (`169.254.0.0/16`), Alibaba metadata
   (`100.100.100.200`), IPv6 link-local (`fe80::/10`), and AWS IMDSv6
@@ -1074,6 +1085,27 @@ there is no live unlock/update primitive.
   initializer. Generate/review the managed files first; for an untrusted clone,
   start with `aic init --force`, inspect overrides, and prefer `aic up` for the
   first launch.
+- **Host Git in a checkout that an agent changed**: only the top-level
+  repository's Git control files are read-only. Treat host Git there like a
+  fresh untrusted clone, because these paths still run files the agent can
+  write:
+  - *Submodules and nested repositories.* The agent can change a submodule's
+    Git directory (`.git/modules/…`), or create a nested repository and add
+    it to the index. Host `git status`, `git diff`, and `git commit` enter
+    each populated submodule and load its config, so a planted
+    `core.fsmonitor` or hook runs on the host. Editors that open nested
+    repositories (the VS Code Git extension does by default) do the same.
+    `git ls-files --stage | grep '^160000'` lists them without entering them;
+    if there are any, add `--ignore-submodules=all` to host `git status` and
+    `git diff`, or use Git inside the container.
+  - *Hook scripts kept in the repository.* A hook that runs project files
+    (husky's `.husky/`, `lefthook.yml`, `.pre-commit-config.yaml`, or a
+    `core.hooksPath` inside the worktree) runs what the agent wrote on your
+    next host commit. Review those files first, or commit with `--no-verify`.
+  - *Earlier versions.* Up to 0.9.1, the agent could replace `.git`
+    entirely and write `.git/config.worktree`. If an agent could have been
+    compromised in a checkout, review `.git/config` and
+    `.git/config.worktree` on the host once.
 - **Network**: outbound is otherwise open by default — anything inside the container can reach `api.openai.com`, `api.anthropic.com`, and your LAN (cloud metadata excepted, see above). To restrict the rest, opt in to the [iptables allowlist](#opt-in-network-allowlist) below.
 - **Git identity**: safe identity/workflow preferences are copied from the host,
   so the agent can commit as that identity and push with credentials you log

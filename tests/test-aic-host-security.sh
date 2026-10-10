@@ -136,6 +136,13 @@ for compose in "$ROOT/template/docker-compose.pull.yml" \
     || fail "managed Docker socket mounts are not both long-form"
   grep -Fq '${AIC_DOCKER_SOCKET:-/var/run/docker.sock}:' "$compose" \
     && fail "managed Docker socket mount regressed to Compose-2.38-incompatible short syntax"
+  # The template is the baseline that every override is compared with, so a
+  # dropped Git control mount would pass validation silently.
+  for mount in '../.git:/workspace/.git' '../.git/config:/workspace/.git/config:ro' \
+    '../.git/config.worktree:/workspace/.git/config.worktree:ro' \
+    '../.git/commondir:/workspace/.git/commondir:ro' '../.git/hooks:/workspace/.git/hooks:ro'; do
+    grep -Fqx "      - $mount" "$compose" || fail "$(basename "$compose") lost the Git control mount $mount"
+  done
 done
 for workflow in "$ROOT/.github/workflows/rebuild.yml" \
   "$ROOT/.github/workflows/release.yml"; do
@@ -1499,6 +1506,153 @@ echo "$out" | grep -q 'COMPOSE_PROJECT_NAME in the environment' \
   || fail "validate did not report the inherited COMPOSE_PROJECT_NAME"
 (cd "$TMP/root-env" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null) \
   || fail "validate refused a project without a root .env project name"
+
+# Host Git runs code named in .git/config, config.worktree, and hooks, and it
+# loads them from the directory .git/commondir names. These paths are mounted
+# read-only over the writable workspace, so aic creates the two files Git does
+# not make for a main checkout (Docker would create root-owned directories)
+# and refuses any state that would mount a host file or a planted redirect.
+# Every startup refusal happens before Docker is touched.
+git_paths_run() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$fakebin:$PATH" HOME="$seed_home" AIC_TEST_LOG="$log" \
+    AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+    AIC_HOME="$ROOT" "$ROOT/aic" "$@" </dev/null 2>&1)
+}
+# Read-only commands use the real Docker context, which wrote .devcontainer/.env.
+git_paths_check() {
+  local dir="$1"; shift
+  (cd "$dir" && AIC_HOME="$ROOT" "$ROOT/aic" "$@" </dev/null 2>&1)
+}
+git_paths_refused() {
+  local dir="$1" expected="$2" command rc out
+  for command in validate up initialize; do
+    : > "$log"
+    set +e
+    if [ "$command" = validate ]; then
+      out=$(git_paths_check "$dir" validate)
+    else
+      out=$(git_paths_run "$dir" "$command")
+    fi
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$command accepted unsafe Git control paths ($expected)"
+    echo "$out" | grep -Fq "$expected" \
+      || { printf '%s\n' "$out" >&2; fail "$command did not report: $expected"; }
+    [ ! -s "$log" ] || fail "$command reached Docker or Dev Containers before refusing: $expected"
+  done
+}
+
+new_project "$TMP/git-paths"
+[ "$(cat "$TMP/git-paths/.git/commondir")" = "." ] && [ "$(wc -c < "$TMP/git-paths/.git/commondir" | tr -d ' ')" = 2 ] \
+  || fail "init did not create .git/commondir with the self-referencing value"
+[ -f "$TMP/git-paths/.git/config.worktree" ] && [ ! -s "$TMP/git-paths/.git/config.worktree" ] \
+  || fail "init did not create an empty .git/config.worktree"
+[ "$(git -C "$TMP/git-paths" rev-parse --is-inside-work-tree)" = true ] \
+  || fail "the managed .git/commondir broke host Git"
+
+# A fresh clone has neither file. Read-only commands accept that and create
+# nothing; every startup path creates both (and a missing hooks/) itself.
+rm "$TMP/git-paths/.git/commondir" "$TMP/git-paths/.git/config.worktree"
+rm -rf "$TMP/git-paths/.git/hooks"
+out=$(git_paths_check "$TMP/git-paths" validate) \
+  || { printf '%s\n' "$out" >&2; fail "validate refused a fresh clone without the aic-created Git control files"; }
+[ ! -e "$TMP/git-paths/.git/commondir" ] || fail "validate wrote into .git"
+git_paths_run "$TMP/git-paths" initialize >/dev/null \
+  || fail "initialize refused a fresh clone without the aic-created Git control files"
+[ "$(cat "$TMP/git-paths/.git/commondir")" = "." ] && [ -f "$TMP/git-paths/.git/config.worktree" ] \
+  && [ -d "$TMP/git-paths/.git/hooks" ] \
+  || fail "initialize did not create the Git control files before Compose"
+rm "$TMP/git-paths/.git/commondir"
+git_paths_run "$TMP/git-paths" up >/dev/null || fail "up refused a missing .git/commondir"
+[ "$(cat "$TMP/git-paths/.git/commondir")" = "." ] || fail "up did not create .git/commondir"
+# The fake Docker context rewrote .devcontainer/.env; restore the real one.
+git_paths_check "$TMP/git-paths" sync >/dev/null
+
+# A main checkout never has commondir. Another value is planted: refuse it
+# everywhere, including sync, and never rewrite it.
+printf '../evil\n' > "$TMP/git-paths/.git/commondir"
+git_paths_refused "$TMP/git-paths" ".git/commondir must contain only '.'"
+git_paths_check "$TMP/git-paths" sync >/dev/null && fail "sync accepted a planted .git/commondir"
+[ "$(cat "$TMP/git-paths/.git/commondir")" = "../evil" ] || fail "aic rewrote a planted .git/commondir"
+out=$(git_paths_check "$TMP/git-paths" doctor) && fail "doctor reported ready with a planted .git/commondir"
+echo "$out" | grep -q "^FAIL  .git/commondir must contain only '.'" \
+  || fail "doctor did not report a planted .git/commondir"
+printf '.\n\n' > "$TMP/git-paths/.git/commondir"
+git_paths_refused "$TMP/git-paths" ".git/commondir must contain only '.'"
+: > "$TMP/git-paths/.git/commondir"
+git_paths_refused "$TMP/git-paths" ".git/commondir must contain only '.'"
+
+# O_EXCL creation never writes through a symlink planted at a missing path.
+rm "$TMP/git-paths/.git/commondir"
+ln -s "$TMP/commondir-target" "$TMP/git-paths/.git/commondir"
+git_paths_refused "$TMP/git-paths" '.git/commondir must be a regular file, not a symlink'
+[ ! -e "$TMP/commondir-target" ] || fail "aic created .git/commondir through a symlink"
+rm "$TMP/git-paths/.git/commondir"; printf '.\n' > "$TMP/git-paths/.git/commondir"
+git_paths_check "$TMP/git-paths" validate >/dev/null || fail "validate refused restored Git control files"
+
+# Docker resolves bind sources on the host: a symlinked control path would
+# mount a host file from outside the checkout. Resolving the expected path too
+# used to compare the symlink with itself and report the project valid.
+mkdir -p "$TMP/host-secrets/hooks"
+printf 'host secret\n' > "$TMP/host-secrets/id_ed25519"
+mv "$TMP/git-paths/.git/config" "$TMP/git-paths/.git/config.real"
+ln -s "$TMP/host-secrets/id_ed25519" "$TMP/git-paths/.git/config"
+git_paths_refused "$TMP/git-paths" '.git/config must be a regular file, not a symlink'
+out=$(git_paths_check "$TMP/git-paths" validate) || true
+echo "$out" | grep -q 'managed mount source for /workspace/.git/config escaped this project' \
+  || fail "resolved-config validation accepted a symlinked .git/config mount source"
+rm "$TMP/git-paths/.git/config"; mv "$TMP/git-paths/.git/config.real" "$TMP/git-paths/.git/config"
+mv "$TMP/git-paths/.git/hooks" "$TMP/git-paths/.git/hooks.real"
+ln -s "$TMP/host-secrets/hooks" "$TMP/git-paths/.git/hooks"
+git_paths_refused "$TMP/git-paths" '.git/hooks must be a real directory, not a symlink'
+rm "$TMP/git-paths/.git/hooks"; mv "$TMP/git-paths/.git/hooks.real" "$TMP/git-paths/.git/hooks"
+mv "$TMP/git-paths/.git/config.worktree" "$TMP/git-paths/.git/config.worktree.real"
+ln -s "$TMP/host-secrets/id_ed25519" "$TMP/git-paths/.git/config.worktree"
+git_paths_refused "$TMP/git-paths" '.git/config.worktree must be a regular file, not a symlink'
+rm "$TMP/git-paths/.git/config.worktree"
+mv "$TMP/git-paths/.git/config.worktree.real" "$TMP/git-paths/.git/config.worktree"
+
+mv "$TMP/git-paths/.git" "$TMP/host-secrets/repo.git"
+ln -s "$TMP/host-secrets/repo.git" "$TMP/git-paths/.git"
+git_paths_refused "$TMP/git-paths" '.git must be a real directory, not a symlink'
+git_paths_check "$TMP/git-paths" sync >/dev/null && fail "sync accepted a symlinked .git"
+rm "$TMP/git-paths/.git"; mv "$TMP/host-secrets/repo.git" "$TMP/git-paths/.git"
+
+# Linked worktrees and submodule checkouts have a .git file; the read-only
+# mounts need a directory. A missing .git is refused at startup but only warned
+# about by init, so 'git init' can still follow 'aic init'.
+mv "$TMP/git-paths/.git" "$TMP/git-paths.git"
+printf 'gitdir: %s\n' "$TMP/git-paths.git" > "$TMP/git-paths/.git"
+git_paths_refused "$TMP/git-paths" '.git is not a directory'
+rm "$TMP/git-paths/.git"
+git_paths_refused "$TMP/git-paths" 'there is no .git directory here'
+[ ! -e "$TMP/git-paths/.git" ] || fail "aic created a .git directory"
+mkdir "$TMP/no-git"
+out=$(cd "$TMP/no-git" && AIC_HOME="$ROOT" "$ROOT/aic" init --with codex --shell zsh 2>&1) \
+  || fail "init refused a directory that has no .git yet"
+echo "$out" | grep -q "or 'git init' before 'aic up'" \
+  || fail "init did not warn that the directory has no .git"
+[ ! -e "$TMP/no-git/.git" ] || fail "init created a .git directory"
+mv "$TMP/git-paths.git" "$TMP/git-paths/.git"
+
+# The self-bind keeps .git a mount point that cannot be renamed. An override
+# that drops or masks any Git control mount reopens the bypass.
+cat > "$TMP/git-paths/.devcontainer/docker-compose.override.yml" <<'YAML'
+services:
+  devcontainer:
+    volumes:
+      - ./README.md:/workspace/.git/commondir:ro
+      - ../.git/objects:/workspace/.git
+YAML
+git_paths_check "$TMP/git-paths" sync >/dev/null
+out=$(git_paths_check "$TMP/git-paths" validate) && fail "validate accepted an override over the Git control mounts"
+for target in /workspace/.git /workspace/.git/commondir; do
+  echo "$out" | grep -Fq "devcontainer override removes managed protection for $target" \
+    || { printf '%s\n' "$out" >&2; fail "override over $target was not flagged"; }
+done
+rm "$TMP/git-paths/.devcontainer/docker-compose.override.yml"
+git_paths_check "$TMP/git-paths" sync >/dev/null
 
 # `aic signing` creates the signing/ dir as vscode (0700, owned by the runtime
 # UID) inside the container. The host-side signing_state probe runs busybox as

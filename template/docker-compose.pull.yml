@@ -65,7 +65,15 @@ services:
 
       # Self-protection: AI cannot rewrite its own runArgs / hook script.
       - ../.devcontainer:/workspace/.devcontainer:ro
+      # Host Git runs code named by these files (core.fsmonitor, hooks, ...).
+      # .git is bound onto itself: a mount point cannot be renamed or removed,
+      # so the agent cannot swap in another .git. commondir (".") and
+      # config.worktree are created by aic; a writable commondir would point
+      # host Git at agent-written config and hooks.
+      - ../.git:/workspace/.git
       - ../.git/config:/workspace/.git/config:ro
+      - ../.git/config.worktree:/workspace/.git/config.worktree:ro
+      - ../.git/commondir:/workspace/.git/commondir:ro
       - ../.git/hooks:/workspace/.git/hooks:ro
       # Reserved helper-only socket path. /run/aic-host is root:root 0700 in the
       # image, so vscode cannot traverse/open this mount.

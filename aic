@@ -358,6 +358,99 @@ require_in_project () {
   [ -f .devcontainer/devcontainer.json ] || die "no .devcontainer/devcontainer.json here — run 'aic init' first"
 }
 
+# The devcontainer mounts the checkout read-write at /workspace and these Git
+# control paths over it. Host Git runs code that they name (core.fsmonitor,
+# filters, hooks), so the agent must not change them:
+#   .git                  bound onto itself; a mount point cannot be renamed or
+#                         removed, so the agent cannot swap in another .git
+#   .git/config           read-only
+#   .git/config.worktree  read-only; Git reads it as config when
+#                         extensions.worktreeConfig is set (sparse-checkout)
+#   .git/commondir        read-only "."; Git loads config, hooks, refs, and
+#                         objects from the directory that this file names
+#   .git/hooks            read-only
+# Docker resolves each bind source on the host. A symlink here would mount a
+# host file from outside the checkout, and a missing source becomes a
+# root-owned directory. Print one problem per line. "--with-missing" also
+# prints the paths that ensure_git_control_paths() creates.
+git_control_path_problems () {
+  local with_missing="${1:-}" path bytes
+  if [ -L .git ]; then
+    printf '%s\n' ".git must be a real directory, not a symlink"
+    return 0
+  fi
+  if [ ! -e .git ]; then
+    printf '%s\n' "there is no .git directory here — run aic from the repository root, or 'git init' a new project (aicontainer mounts its Git control files read-only)"
+    return 0
+  fi
+  if [ ! -d .git ]; then
+    printf '%s\n' ".git is not a directory — aicontainer needs a conventional checkout at the repository root (linked worktrees and submodule checkouts are not supported)"
+    return 0
+  fi
+  for path in .git/config .git/config.worktree .git/commondir; do
+    if [ -L "$path" ]; then
+      printf '%s must be a regular file, not a symlink\n' "$path"
+    elif [ -e "$path" ] && [ ! -f "$path" ]; then
+      printf '%s exists but is not a regular file\n' "$path"
+    elif [ ! -e "$path" ] && [ "$path" = .git/config ]; then
+      printf '%s\n' ".git/config is missing — this is not a complete Git repository"
+    elif [ ! -e "$path" ] && [ "$with_missing" = --with-missing ]; then
+      printf '%s is missing — aic sync, aic up, and the VS Code initializer create it\n' "$path"
+    fi
+  done
+  path=.git/hooks
+  if [ -L "$path" ]; then
+    printf '%s must be a real directory, not a symlink\n' "$path"
+  elif [ -e "$path" ] && [ ! -d "$path" ]; then
+    printf '%s exists but is not a directory\n' "$path"
+  elif [ ! -e "$path" ] && [ "$with_missing" = --with-missing ]; then
+    printf '%s is missing — aic sync, aic up, and the VS Code initializer create it\n' "$path"
+  fi
+  # A main checkout never has commondir; aic writes "." so that Git keeps
+  # using this .git. Any other value is planted, not repaired: host Git
+  # already reads config and hooks from the directory it names.
+  path=.git/commondir
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    bytes="$(wc -c < "$path" | tr -d '[:space:]')"
+    case "$bytes" in 1|2) ;; *) bytes=bad ;; esac
+    if [ "$bytes" = bad ] || [ "$(cat "$path")" != "." ]; then
+      printf '%s\n' ".git/commondir must contain only '.' — Git takes this checkout's config and hooks from the directory it names; inspect it before you run Git here, then remove it"
+    fi
+  fi
+}
+
+# Create the control files that Git does not make for a main checkout, so the
+# read-only mounts have a regular-file source, then refuse every remaining
+# problem. Startup paths call this before Compose. "init"/"sync" only warn
+# when there is no .git yet, so 'git init' can still follow 'aic init'.
+ensure_git_control_paths () {
+  local mode="${1:-strict}" problems line
+  if [ -d .git ] && [ ! -L .git ]; then
+    if [ ! -e .git/hooks ] && [ ! -L .git/hooks ]; then
+      mkdir .git/hooks 2>/dev/null || true
+    fi
+    # O_EXCL never follows or replaces a path that already exists, including
+    # a symlink planted there; the check below reports what it found instead.
+    node -e '
+      const fs = require("fs");
+      for (const [file, content] of [[".git/commondir", ".\n"], [".git/config.worktree", ""]]) {
+        try { fs.writeFileSync(file, content, { flag: "wx" }); }
+        catch (error) { if (!error || error.code !== "EEXIST") throw error; }
+      }
+    ' 2>/dev/null || die "could not create the managed Git control files in .git"
+  fi
+  problems="$(git_control_path_problems --with-missing)"
+  [ -n "$problems" ] || return 0
+  if [ "$mode" = "lenient" ] && [ ! -e .git ] && [ ! -L .git ]; then
+    err "warning: there is no .git directory here — run aic from the repository root, or 'git init' before 'aic up'"
+    return 0
+  fi
+  while IFS= read -r line; do
+    err "$line"
+  done <<< "$problems"
+  die "refusing to mount this checkout's Git control paths"
+}
+
 # ---------------------------------------------------------------------------
 # Per-project tool selection (claude-code, codex, opencode).
 #
@@ -1026,6 +1119,7 @@ apply_template () {
   local mode="$1" src="$2" dst="$3" docker="${4:-$DEFAULT_DOCKER}"
   [ -d "$src" ] || die "template not found at $src (set AIC_HOME or reinstall aic)"
   validate_devcontainer_paths optional
+  ensure_git_control_paths lenient
   mkdir -p "$dst"
 
   atomic_copy_file "$src/devcontainer.json" "$dst/devcontainer.json"
@@ -1827,10 +1921,15 @@ if (hasOverride) {
 const canonical = value => {
   try { return fs.realpathSync(value); } catch (_) { return path.resolve(value); }
 };
+// root is canonical, so each source below is its own real path only when no
+// component under root is a symlink. Docker follows such a symlink on the host.
 const managedProjectSources = new Map([
   ['/workspace', root],
   ['/workspace/.devcontainer', path.join(root, '.devcontainer')],
+  ['/workspace/.git', path.join(root, '.git')],
   ['/workspace/.git/config', path.join(root, '.git', 'config')],
+  ['/workspace/.git/config.worktree', path.join(root, '.git', 'config.worktree')],
+  ['/workspace/.git/commondir', path.join(root, '.git', 'commondir')],
   ['/workspace/.git/hooks', path.join(root, '.git', 'hooks')],
 ]);
 
@@ -1892,8 +1991,10 @@ function normalizeManaged(model, actual) {
     }
     for (const volume of dev.volumes || []) {
       if (managedProjectSources.has(volume.target)) {
-        if (actual && (volume.type !== 'bind' || canonical(volume.source) !== canonical(managedProjectSources.get(volume.target)))) {
-          managed(`managed mount source for ${volume.target} escaped this project; run aic sync`);
+        // Compare with the symlink-free path. Resolving both sides would pass
+        // a symlinked .git or .git/config that points outside the checkout.
+        if (actual && (volume.type !== 'bind' || realpathLoose(volume.source) !== managedProjectSources.get(volume.target))) {
+          managed(`managed mount source for ${volume.target} escaped this project (a symlink, or a changed path); run aic sync`);
         }
         volume.source = `<managed-source:${volume.target}>`;
       }
@@ -2279,12 +2380,14 @@ for (const [serviceName, service] of Object.entries(services)) {
 }
 
 // The managed writable workspace mount is safe only because control-plane
-// paths are over-mounted read-only in the devcontainer service.
-const protectedTargets = ['/workspace/.devcontainer', '/workspace/.git/config', '/workspace/.git/hooks'];
+// paths are mounted over it in the devcontainer service: read-only, or (.git
+// itself) as a mount point that the agent cannot rename or replace.
+const protectedTargets = ['/workspace/.devcontainer', '/workspace/.git', '/workspace/.git/config',
+  '/workspace/.git/config.worktree', '/workspace/.git/commondir', '/workspace/.git/hooks'];
 for (const target of protectedTargets) {
-  const baseline = (baseServices.devcontainer.volumes || []).find(v => v.target === target && v.read_only);
+  const baseline = (baseServices.devcontainer.volumes || []).find(v => v.target === target);
   const current = (services.devcontainer.volumes || []).find(v => baseline && volumeKey(v) === volumeKey(baseline));
-  if (!current) unsafe(`devcontainer override removes managed read-only protection for ${target}`);
+  if (!current) unsafe(`devcontainer override removes managed protection for ${target}`);
 }
 
 for (const [serviceName, service] of Object.entries(noenv.services || {})) {
@@ -2384,6 +2487,11 @@ validate_project_security () {
     printf 'MANAGED\t%s\n' '.devcontainer/.env does not match this host runtime state; run aic sync or aic initialize' >> "$findings"
   fi
   validate_managed_build_files "$findings"
+  # Startup paths create a missing commondir/config.worktree/hooks first, so
+  # only a path that cannot be mounted safely is a finding here.
+  git_control_path_problems | while IFS= read -r line; do
+    printf 'MANAGED\t%s\n' "$line"
+  done >> "$findings"
   if [ -f .devcontainer/Dockerfile ]; then
     expected_compose="$TEMPLATE_DIR/docker-compose.build.yml"
   else
@@ -2556,7 +2664,8 @@ print_boundary_summary () {
   printf "  %sFilesystem%s\n" "$b" "$rst"
   printf "    rw   /workspace                               your project (the only writable host path)\n"
   printf "    ro   /host-seed/*.json                        root-sanitized, allowlisted preferences\n"
-  printf "    ro   .devcontainer/ .git/config .git/hooks     AI cannot rewrite its own sandbox\n"
+  printf "    ro   .devcontainer/, top-level .git controls  AI cannot rewrite its sandbox or this repo's Git config/hooks\n"
+  printf "    %s! host Git here can still run agent-written files%s: submodules, nested repos, hook scripts kept in the repo\n" "$y" "$rst"
   printf "    %s--   raw host config, host home, ~/.ssh, host credentials: NOT mounted%s\n" "$dim" "$rst"
 
   printf "\n  %sSecrets%s\n" "$b" "$rst"
@@ -3250,6 +3359,7 @@ stop_owned_legacy_stack () {
 cmd_up () {
   require_in_project
   pin_compose_project_name
+  ensure_git_control_paths strict
   write_runtime_environment_file
   local allow_unsafe=0 arg
   local -a args=()
@@ -3325,6 +3435,7 @@ cmd_initialize () {
   # any Docker state changes if that name is not this project's managed one.
   check_devcontainer_project_name \
     || die "refusing to start this checkout under another Compose project name"
+  ensure_git_control_paths strict
   # Refresh the host-specific, gitignored socket path before either our own
   # resolved-Compose validation or the parent Dev Containers process uses it.
   write_runtime_environment_file
@@ -3339,6 +3450,7 @@ cmd_initialize () {
 cmd_rebuild () {
   require_in_project
   pin_compose_project_name
+  ensure_git_control_paths strict
   write_runtime_environment_file
   local allow_unsafe=0 arg
   local -a args=()
@@ -3553,7 +3665,7 @@ cmd_doctor () {
   local doctor_failures=0 doctor_warnings=0 node_raw node_version
   local context endpoint endpoint_path server_raw server_version
   local compose_raw compose_version compose_probe devcontainer_path devcontainer_version
-  local git_root path_error identity_error name_error relay_error
+  local git_root git_problems line path_error identity_error name_error relay_error
 
   printf 'aic doctor\n'
 
@@ -3669,11 +3781,18 @@ YAML
     else
       doctor_warn "current directory is below the Git root; run aic from $git_root"
     fi
-    if [ -d .devcontainer ] && [ ! -d .git ]; then
-      doctor_fail "this checkout does not expose .git as a directory; managed .git/config and hooks mounts require a conventional checkout"
-    fi
   else
     doctor_warn "not in a Git project; cd to a project root before 'aic init'"
+  fi
+  if [ -d .devcontainer ]; then
+    git_problems="$(git_control_path_problems)"
+    if [ -n "$git_problems" ]; then
+      while IFS= read -r line; do
+        doctor_fail "$line"
+      done <<< "$git_problems"
+    else
+      doctor_ok "Git control paths are real files and directories in this checkout"
+    fi
   fi
 
   if [ ! -f "$AIC_HOME/package.json" ] || [ ! -f "$TEMPLATE_DIR/devcontainer.json" ]; then

@@ -529,6 +529,34 @@ jobs:
             echo "OK: managed git/shell config is locked and home startup replacements are ignored"
           '
 
+      - name: Smoke test - Git control paths are read-only mount points
+        working-directory: /tmp/proj
+        run: |
+          # Host Git runs code named in .git/config, config.worktree, and hooks,
+          # and loads them from the directory .git/commondir names. The agent
+          # must not change them, or rename .git and create a new one: a
+          # directory that only contains mount points can be renamed, so .git
+          # is bound onto itself. aic creates commondir/config.worktree first.
+          set -euo pipefail
+          [ "$(cat .git/commondir)" = "." ] || { echo "FAIL: aic did not create .git/commondir"; exit 1; }
+          [ -f .git/config.worktree ] || { echo "FAIL: aic did not create .git/config.worktree"; exit 1; }
+          devcontainer exec --workspace-folder . bash -c '
+            set -uo pipefail
+            cd /workspace
+            for f in .git/config .git/config.worktree .git/commondir; do
+              if printf x >> "$f" 2>/dev/null; then echo "FAIL: vscode can write $f"; exit 1; fi
+              if mv "$f" "$f.moved" 2>/dev/null; then echo "FAIL: vscode can move $f"; exit 1; fi
+            done
+            if touch .git/hooks/aic-smoke 2>/dev/null; then echo "FAIL: vscode can write .git/hooks"; exit 1; fi
+            if out=$(mv .git .git-moved 2>&1); then echo "FAIL: vscode can rename .git"; exit 1; fi
+            echo "$out" | grep -q "Device or resource busy" \
+              || { echo "FAIL: .git rename failed for an unexpected reason: $out"; exit 1; }
+            git hash-object -w --stdin </dev/null >/dev/null \
+              || { echo "FAIL: in-container Git cannot write objects"; exit 1; }
+            echo "OK: Git control paths are read-only and .git cannot be renamed"
+          '
+          [ "$(cat .git/commondir)" = "." ] || { echo "FAIL: .git/commondir changed"; exit 1; }
+
       - name: Smoke test - project post-create hook runs (vscode, /workspace, non-fatal, clean VIRTUAL_ENV)
         working-directory: /tmp/proj
         run: |

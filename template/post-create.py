@@ -225,19 +225,23 @@ INLINE_SECRET_FIELDS = frozenset({
 # (~/.claude/CLAUDE.md for Claude, ~/.codex/AGENTS.md for Codex,
 # ~/.config/opencode/AGENTS.md for OpenCode — all auto-loaded by their tool on
 # every session), so an agent doesn't burn tokens "fixing" the
-# read-only git internals. .git/config, .git/hooks, and .devcontainer/ are
-# bind-mounted read-only (see docker-compose.yml); the resulting write failures
-# are by-design, not bugs. These user-level instruction files are deliberately
-# reset on every create; intentional project instructions belong in the repo's
-# CLAUDE.md/AGENTS.md, where they remain project-owned and reviewable.
+# read-only git internals. .devcontainer/ and the Git control files
+# (.git/config, config.worktree, commondir, hooks) are bind-mounted read-only,
+# and .git itself is a mount point (see docker-compose.yml); the resulting
+# write failures are by-design, not bugs. These user-level instruction files
+# are deliberately reset on every create; intentional project instructions
+# belong in the repo's CLAUDE.md/AGENTS.md, where they remain project-owned and
+# reviewable.
 SANDBOX_MEMORY_BEGIN = "<!-- BEGIN aicontainer sandbox notes (managed) -->"
 SANDBOX_MEMORY_END = "<!-- END aicontainer sandbox notes (managed) -->"
 SANDBOX_MEMORY_NOTE = """\
 ## Sandbox: read-only git internals (don't try to "fix" this)
 
-This is an aicontainer sandbox. By design, `.git/config`, `.git/hooks`, and
-`.devcontainer/` are bind-mounted **read-only** so a tool can't rewrite its own
-sandbox or git's code-execution surface.
+This is an aicontainer sandbox. By design, `.devcontainer/` and the Git
+control files `.git/config`, `.git/config.worktree`, `.git/commondir`, and
+`.git/hooks` are bind-mounted **read-only**, and `.git` itself is a mount
+point. A tool can't rewrite its own sandbox or this repository's Git config
+and hooks.
 
 These are **expected, not bugs** — don't investigate, retry, remount, or `sudo`
 around them:
@@ -249,6 +253,9 @@ around them:
   Reading config and ordinary git (commit, push, pull, fetch, branch, switch) work.
 - Installing git hooks (`lefthook install`, `husky`, `pre-commit install`) fails
   writing to `.git/hooks/`.
+- `git sparse-checkout set` and `git config --worktree` fail writing to
+  `.git/config.worktree`.
+- Moving, renaming, or deleting `.git` fails: `Device or resource busy`.
 
 If a change to `.git/config` or `.git/hooks` is genuinely required, make it from
 the host, outside the container."""

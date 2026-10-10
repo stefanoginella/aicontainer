@@ -196,6 +196,43 @@ The host CLI treats `.devcontainer/` as a control boundary:
   so providers/includes in a repository override cannot execute during
   cleanup. Non-interactive `destroy` requires `--yes`.
 
+The checkout's Git control paths are a control boundary too. Host Git runs
+code named in `.git/config`, `.git/config.worktree` (read as config when
+`extensions.worktreeConfig` is set, which sparse-checkout does), and
+`.git/hooks`, and it loads all of them from the directory that
+`.git/commondir` names. So both Compose templates mount those four paths
+read-only over the writable workspace and bind `.git` onto itself. Load-bearing,
+don't undo:
+
+- The `.git` self-bind is what stops the agent from renaming `.git` and
+  creating a new one; nested read-only mounts alone do not (a directory that
+  only *contains* mount points can be renamed).
+- `ensure_git_control_paths()` creates `commondir` (`.`), an empty
+  `config.worktree`, and a missing `hooks/` with O_EXCL on `init`/`sync` and
+  before every Compose start (`up`, `rebuild`, `initialize`). Docker turns a
+  missing bind source into a root-owned directory, which breaks Git.
+- `git_control_path_problems()` refuses a symlink or wrong file type at `.git`
+  or any of the four paths (Docker resolves bind sources on the host, so a
+  symlink would mount a host file outside the checkout), a missing or
+  non-directory `.git`, and a `commondir` with any other content. A foreign
+  `commondir` is planted, so aic refuses it and never repairs it. `validate`
+  and `doctor` report the same problems; only a missing file that aic creates
+  is not a finding.
+- The validator compares each managed project source with the symlink-free
+  path below the canonical root, never with its own resolved value.
+- Like every bind-source check, these run on the host just before Docker
+  resolves the sources. Only a container started before this protection could
+  race that window; once a protected container runs, all five paths are
+  mount points the agent cannot replace.
+
+Submodule Git directories (`.git/modules`), nested repositories, and hook
+scripts kept in the worktree (husky, lefthook, pre-commit) stay
+agent-writable by design: a read-only `.git/modules` would break submodule
+work and still not stop the agent from adding a new nested repository to the
+index. The README documents these residual risks for host Git. Guarded by the
+Git-control cases in `tests/test-aic-host-security.sh` and the "Git control
+paths" smoke in both workflows.
+
 `validate_project_security()` is the real pre-Docker gate. It verifies managed
 file provenance, resolves the base and merged Compose models to JSON, and
 checks every service plus volumes, networks, mounts, builds, ports,
@@ -723,8 +760,9 @@ model; Earthly's floating-with-coupling is the documented anti-pattern.
   `none`), external read/write consent, resolved-config validation, path-unique
   identity/migration, metadata drops on IPv4+IPv6, the `.env` guardrail,
   sanitized seeds/auth sync, scoped volume ownership, the root-managed Git and
-  shell files, dropped capabilities, and the npm-quarantine sanity check
-  (`NPM_CONFIG_MIN_RELEASE_AGE` ≤ 30 days so npx-based MCPs stay installable).
+  shell files, the read-only `.git` control paths, dropped capabilities, and
+  the npm-quarantine sanity check (`NPM_CONFIG_MIN_RELEASE_AGE` ≤ 30 days so
+  npx-based MCPs stay installable).
   If a test fails legitimately, fix the regression, not the assertion.
 - **Don't put untrusted GitHub event fields in `run:` blocks** (issue/PR
   titles, commit messages, branch refs) — route through `env:` with proper
