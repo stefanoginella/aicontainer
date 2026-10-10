@@ -54,6 +54,15 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     needs: build
+    env:
+      # Buildx >= 0.37.2 enforces bake fs entitlements under Compose's
+      # `--progress rawjson`, but Compose only grants the build context. The
+      # Dev Containers CLI points `dockerfile:` at a temp Dockerfile-with-
+      # features outside it, so every build-mode `up` fails. CI-only; inputs
+      # are this repo's fixtures. Remove once docker/compose#14286 ships.
+      # https://github.com/docker/compose/issues/14285
+      # https://github.com/devcontainers/cli/issues/1320
+      BUILDX_BAKE_ENTITLEMENTS_FS: "0"
     steps:
       - uses: actions/checkout@v7
         with:
