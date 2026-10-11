@@ -37,10 +37,10 @@ shown automatically at the end of every `aic up`).
 | Host agent-status receiver | **No by default.** A host-global marker opts all projects into metadata-only Claude/Codex lifecycle callbacks at one fixed local URL. Repositories cannot enable or redirect it. See [Agent status relay](#agent-status-relay). |
 | Package-manager caches | **No** — container-local volumes, not your host caches. |
 | Clipboard / browser | **No** — nothing bridged. |
-| `.env*` files | Blocked from the agent by the [PreToolUse hook](#whats-in-the-box). Your project's own `.env` is physically in `/workspace`, but the hook stops the agent from reading it — defense-in-depth at the tool layer, not a missing file. |
+| `.env*` files | **Best-effort only.** Your project's own `.env` is physically in `/workspace`. The [PreToolUse hook](#whats-in-the-box) refuses the obvious reads, but it matches file names in the tool call, so it is not a boundary: keep secrets you cannot lose out of the project directory. |
 | Session transcripts, prompt history, user-level skills/plugins/instructions | Persist in a **path-unique per-project volume**, never written back to your host home or shared with another checkout. See [Multi-project model](#multi-project-model). |
 | Host Docker daemon | **Object APIs off by default**: only proxy ping/version remain. `--docker-read` opts into sensitive object/inspect/log/file APIs; `--docker` opts into read-write host-daemon control for testcontainers / in-container Compose. See [Threat model](#threat-model). |
-| **Outbound network** | **Mostly open by default.** Reaches the internet and your LAN; IPv4/IPv6 link-local and common cloud-provider metadata endpoints are blocked on every create. Opt in to the [allowlist](#opt-in-network-allowlist) to restrict the rest. |
+| **Outbound network** | **Mostly open by default.** Reaches the internet, your LAN, and services on your host machine (including ones bound to `127.0.0.1`, through `host.docker.internal` on Docker Desktop and OrbStack); IPv4/IPv6 link-local and common cloud-provider metadata endpoints are blocked on every create. Opt in to the [allowlist](#opt-in-network-allowlist) to restrict the rest. |
 
 The full reasoning is in [Threat model](#threat-model); the network row is the
 one most worth your attention.
@@ -317,8 +317,8 @@ Uninstall the plugin and drop the marketplace:
   The code those profiles load (oh-my-zsh, powerlevel10k, the plugins, fnm) is
   root-owned too, and startup finds commands in system directories only, so an
   agent cannot plant code that runs when you open a shell.
-- **PreToolUse hook** (Claude, Codex + OpenCode, fires even with bypass/auto-approve/allow on) blocks:
-  - reads of `.env*` files — via `Read`/`Edit`/`Write`/`Grep`/`Glob` and in Bash commands (allowing `.env.example|.sample|.template|.defaults`),
+- **PreToolUse hook** (Claude, Codex + OpenCode, fires even with bypass/auto-approve/allow on) is a best-effort check at the tool layer. It refuses:
+  - reads of `.env*` files — via `Read`/`Edit`/`Write`/`Grep`/`Glob` and in Bash commands (allowing `.env.example|.sample|.template|.defaults`). This is **not a boundary**: the hook matches the literal `.env` name in the file path a tool names and in the text of a Bash command. An obfuscated name, a shell glob, an interpreter one-liner, a symlink made first, or a `Grep` that names a directory and filters with `glob` all get around it. For real protection keep secrets out of `/workspace`,
   - `curl|sh` / `wget|bash` fetch-and-execute in Bash (including `| sudo bash`, `| tee | sh`, and `bash -c "$(curl …)"` variants),
   - writes to `/etc/aic/`, `/workspace/.devcontainer/`, and the login-shell rc files (`~/.zshrc` / `~/.bashrc` / fish config + their `.local` includes) — defense-in-depth on top of the RO mounts and root-locks above.
 
@@ -529,6 +529,11 @@ services:
 Run `aic sync` after first creating the override, inspect `git diff`, then `aic
 rebuild`. If the validator reports a deliberate boundary expansion, run `aic
 trust` after reviewing it.
+
+> `host.docker.internal` is a path to your host for the agent too, not only for
+> your code: without the [allowlist](#opt-in-network-allowlist) it can reach
+> every service on your host, including ones bound to `127.0.0.1` (databases,
+> admin panels, local model servers). Point it only at development data.
 
 > The same file is also the sync-safe place to point at a [`Dockerfile.project`](#b-persistent-in-a-project-dockerfile): put the `build:` block in the override instead of editing `docker-compose.yml`. Compose merges `build:` onto the base service; `aic rebuild` refreshes the base image, then rebuilds your layer on top.
 
@@ -1078,6 +1083,11 @@ there is no live unlock/update primitive.
 
 > **What this means for "Verified".** The signing key lives where the AI runs, so commits the agent makes will show as **Verified** on GitHub. That's exactly right if your goal is satisfying a branch-protection *"require signed commits"* rule — but it is *not* a statement that a human reviewed the commit. If you want sandbox commits to stay distinguishable and independently revocable, use a distinct signing key (and optionally a distinct committer identity) for it.
 
+> **The agent can read and copy this key.** The private key is a file owned by the same user the agent runs as, and the same key is mounted into **every** aicontainer project. A compromised agent in any project can copy it out (the network is open unless you enable the [allowlist](#opt-in-network-allowlist), and even then an allowed host such as GitHub accepts the upload). Once the public key is registered on GitHub (`--register`, or by hand), whoever holds the copy can sign commits that show as **Verified** from anywhere, until you delete the key from your GitHub account. So:
+> - Register a key that exists only for the sandbox. Never register a key you also use on your host (this applies to `byok` too).
+> - Do not treat "Verified" on a commit as proof that it came from you or from a reviewed sandbox session. Keep human review (pull-request approval, protected branches) as the gate.
+> - If you suspect a leak, delete the key under *Settings → SSH and GPG keys* on GitHub first. `aic signing disable` only stops signing in the sandbox; the key file stays in the volume. To replace the key, delete `~/.config/aic-auth/signing/id_ed25519` and `id_ed25519.pub` in a running container, then run `aic signing auto` again.
+
 ## Threat model
 
 **Sandboxed:**
@@ -1174,11 +1184,18 @@ there is no live unlock/update primitive.
   server in the container, which the agent can change. Treat a shell in the
   container as running with the agent's authority: don't type secrets there
   that the agent must not see.
-- **Network**: outbound is otherwise open by default — anything inside the container can reach `api.openai.com`, `api.anthropic.com`, and your LAN (cloud metadata excepted, see above). To restrict the rest, opt in to the [iptables allowlist](#opt-in-network-allowlist) below.
+- **Network**: outbound is otherwise open by default — anything inside the container can reach `api.openai.com`, `api.anthropic.com`, and your LAN (cloud metadata excepted, see above).
+  - *Host services.* On Docker Desktop and OrbStack, `host.docker.internal` also reaches services on your host machine, **including ones bound to `127.0.0.1`**: local databases, admin panels, model servers, and anything else that listens on a port. (Verified on OrbStack with a listener bound to `127.0.0.1`.) The agent status receiver on port 8787 is one of these when it runs. On Linux Docker Engine the name exists only if you add `extra_hosts: host.docker.internal:host-gateway`, but services that listen on all host interfaces are reachable through the bridge gateway address either way.
+  - To restrict the rest, opt in to the [iptables allowlist](#opt-in-network-allowlist) below. With it on, the host is reachable only on TCP 8787, and only when the [status relay](#agent-status-relay) is enabled.
 - **Git identity**: safe identity/workflow preferences are copied from the host,
   so the agent can commit as that identity and push with credentials you log
   into inside. Host credential helpers and signing keys are not forwarded; use
   [`aic signing`](#commit-signing) for a sandbox-only key.
+- **Sandbox signing key**: the key `aic signing` creates is readable by the
+  agent in every project. See [Commit signing](#commit-signing).
+- **Secrets in the project directory**: the `.env*` check is a best-effort
+  hook, not a mount or a permission. Treat anything in `/workspace` as readable
+  by the agent.
 - **Host credentials**: nothing is auto-forwarded. The AI only has access to what you explicitly `claude /login`, `codex auth login`, `opencode auth login`, `gh auth login` for inside the container. Note these tokens live in the shared `aic-auth-global` volume, so a compromised session in **any** project can use every token you've logged in with — prefer a fine-grained `gh` PAT.
 - **Image build inputs**: the image pins git-delta, fzf, and fnm by sha256,
   the GitHub CLI and Docker apt keys by fingerprint, and the zsh theme and
@@ -1217,11 +1234,21 @@ The default allowlist covers Anthropic / OpenAI / OpenCode (`opencode.ai`,
 in `.devcontainer/firewall-allowlist` (one validated domain per line, `#`
 comments allowed). Re-run `sudo aic-firewall enable` after editing.
 
+**What the allowlist does not stop.** It limits where data can go; it does not make exfiltration impossible:
+- *Allowed hosts accept writes.* An agent can upload to `github.com` / `api.github.com` (gists, repositories, pull requests, with any token in the container), publish to `registry.npmjs.org` (with an npm login), and send data to `api.anthropic.com` / `api.openai.com` with a key of its own. Every host you add to `firewall-allowlist` is the same. There is no read-only profile: the default list is fixed, and the file can only add hosts.
+- *DNS stays open.* Queries to the configured resolvers (and Docker's embedded resolver) are accepted for any name, so data can leave inside DNS queries.
+- *Rules match IP addresses, resolved once.* `enable` resolves each name to the addresses it has at that moment. Anything that shares one of those addresses is allowed too, and a host whose addresses change later may need a new `sudo aic-firewall enable`.
+- *It applies from the moment you run it.* It does not undo what the agent already did: data it read or sent, code it installed. Run `enable` before you start the agent.
+
 Design notes:
 - The script is **enable-only**. Re-enabling builds inactive IPv4/IPv6 rule
   generations, rejects zero-result or prohibited metadata resolutions, and
   atomically switches them into use; the prior DROP policy remains active on
   any failure. Metadata chains are never flushed.
+- Connections the container opened **before** `enable` are cut too, unless
+  their destination is on the allowlist: the firewall accepts established
+  packets only as replies to sessions that started from outside, never as a
+  continuation of an outbound session.
 - To turn the firewall off, `aic rebuild` from the host (this script doesn't survive container recreation).
 - Only `NET_ADMIN` is needed for the firewall; `NET_RAW` remains dropped. If
   IPv6 is configured but cannot be filtered, `enable` refuses an

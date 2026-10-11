@@ -108,6 +108,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The README says the `.env` hook is best-effort, not a boundary.**
+  Obfuscated names, globs, interpreter one-liners, symlinks, and a `Grep`
+  `glob` filter get around it; keep secrets out of `/workspace`. (README)
+
+- **The README says the agent can read the sandbox signing key.** Every
+  project mounts the same key, so a copy registered on GitHub signs "Verified"
+  commits from anywhere. It also covers rotating the key. (README)
+
+- **The README lists what the network allowlist does not stop.** Open DNS,
+  uploads to allowed hosts, resolved-once IP addresses, and work done before
+  `enable`. (README)
+
+- **The README names host services as reachable by default.** On Docker
+  Desktop and OrbStack, `host.docker.internal` reaches services bound to
+  `127.0.0.1`; the allowlist leaves only the status-relay port. (README)
+
 - **`aic up` and VS Code starts now require a `.git` directory.** Without
   one, Docker created root-owned placeholder directories in its place. `aic
   init` only warns, so `git init` can follow it. (aic)
