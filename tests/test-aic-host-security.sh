@@ -196,13 +196,406 @@ for line in 'COPY .zshrc /etc/aic/shell/zsh/.zshrc' \
 done
 grep -Fq "sed -e '/^if \\[ -f ~\\/\\.bash_aliases \\]; then\$/,/^fi\$/d'" "$dockerfile" \
   || fail "managed bashrc still sources ~/.bash_aliases"
-# zsh-in-docker -a lines would land in a generated .zshrc that is discarded.
-grep -Eq "^[[:space:]]+-a '" "$dockerfile" \
-  && fail "Dockerfile passes rc lines to zsh-in-docker; edit template/.zshrc instead"
+# Image download integrity (AGENTS.md). `sh -c "$(curl …)"` exits 0 when curl
+# fails, and a pipe into a shell or an unpacker runs whatever arrived. Every
+# curl or git fetch must start with `set -eu`, use no `||` or `set +e`, and be
+# `curl -f --proto '=https' --tlsv1.2 -o FILE`. The first use of each pinned
+# file is its check: `echo "$SHA256  FILE" | sha256sum -c -;`, a fingerprint
+# allow-list for apt keys, or gpgv with a sha256-pinned keyring for Node. Git
+# sources are pinned commits on their upstream branch; only the named vendor
+# installers float. The --self-test run proves that each known bypass is
+# reported and that equivalent safe forms still pass.
+cat > "$TMP/check-dockerfile-downloads.js" <<'NODE'
+'use strict';
+// Usage: node check-dockerfile-downloads.js DOCKERFILE [--self-test]
+const fs = require('fs');
+
+// Dockerfile -> instructions. Continuation lines are joined; heredoc bodies are
+// kept apart; a `# renovate:` comment attaches to the next instruction.
+function parseDockerfile(source) {
+  const instructions = [];
+  let cur = null, heredoc = null, continued = false, renovate = null;
+  for (const line of source.split('\n')) {
+    if (heredoc) {
+      if (line === heredoc) heredoc = null; else cur.body += line + '\n';
+      continue;
+    }
+    const trimmed = line.trim();
+    if (!continued && trimmed.startsWith('#')) {
+      const r = trimmed.match(/^# renovate: (.*)$/);
+      renovate = r ? Object.fromEntries(r[1].trim().split(/\s+/).map(kv => kv.split('='))) : null;
+      continue;
+    }
+    if (!continued && trimmed === '') continue;
+    if (continued && trimmed.startsWith('#')) continue;
+    const endsWithBackslash = trimmed.endsWith('\\');
+    const piece = endsWithBackslash ? trimmed.slice(0, -1).trim() : trimmed;
+    if (continued) cur.text += ' ' + piece;
+    else { instructions.push(cur = { text: piece, body: '', renovate }); renovate = null; }
+    continued = endsWithBackslash;
+    const h = line.match(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/);
+    if (h) heredoc = h[1];
+  }
+  return instructions;
+}
+
+// Shell script -> top-level statements. ; ;; & && || and newlines separate
+// statements; a pipeline stays one statement. Quotes, $( ), ${ } and
+// backticks are respected, so separators inside them do not split.
+function statements(script) {
+  const out = [];
+  const stack = [];
+  let buf = '', pipe = false, prev = 'start';
+  const flush = sep => {
+    const text = buf.trim();
+    if (text) { out.push({ text, before: prev, after: sep, pipe }); prev = sep; }
+    else if (sep !== '\n') prev = sep;
+    buf = ''; pipe = false;
+  };
+  for (let i = 0; i < script.length; i++) {
+    const c = script[i], n = script[i + 1], ctx = stack[stack.length - 1];
+    const k = ctx && ctx.k;
+    if (k === 'sq') { buf += c; if (c === "'") stack.pop(); continue; }
+    if (c === '\\' && i + 1 < script.length) {
+      if (n === '\n') { if (!/ $/.test(buf)) buf += ' '; } else buf += c + n;
+      i++; continue;
+    }
+    if (k === 'bt') { buf += c; if (c === '`') stack.pop(); continue; }
+    // Unquoted blanks collapse to one space; quoted text stays exact.
+    if ((c === ' ' || c === '\t') && k !== 'dq') { if (!/ $/.test(buf)) buf += ' '; continue; }
+    if (c === '$' && n === '(') { stack.push({ k: 'cmd', depth: 1 }); buf += '$('; i++; continue; }
+    if (c === '$' && n === '{') { stack.push({ k: 'brace' }); buf += '${'; i++; continue; }
+    if (c === '`') { stack.push({ k: 'bt' }); buf += c; continue; }
+    if (k === 'dq') { buf += c; if (c === '"') stack.pop(); continue; }
+    if (c === "'") { stack.push({ k: 'sq' }); buf += c; continue; }
+    if (c === '"') { stack.push({ k: 'dq' }); buf += c; continue; }
+    if (k === 'brace') { buf += c; if (c === '}') stack.pop(); continue; }
+    if (k === 'cmd') {
+      buf += c;
+      if (c === '(') ctx.depth++;
+      else if (c === ')' && --ctx.depth === 0) stack.pop();
+      continue;
+    }
+    if (c === '#' && /(^|\s)$/.test(buf)) {
+      while (i + 1 < script.length && script[i + 1] !== '\n') i++;
+      continue;
+    }
+    if (c === ';') { if (n === ';') { flush(';;'); i++; } else flush(';'); continue; }
+    if (c === '&' && (/[<>]$/.test(buf) || n === '>')) { buf += c; continue; } // >&2, &>file
+    if (c === '&') { if (n === '&') { flush('&&'); i++; } else flush('&'); continue; }
+    if (c === '|') { if (n === '|') { flush('||'); i++; } else { pipe = true; buf += c; } continue; }
+    if (c === '\n') { flush('\n'); continue; }
+    buf += c;
+  }
+  flush('end');
+  return out;
+}
+
+const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const refersTo = (text, name) => new RegExp('\\$\\{?' + name + '\\b').test(text);
+const usesFile = (text, file) => new RegExp(esc(file) + '(?![\\w.\\-/])').test(text);
+// `git [-C dir] [-c k=v] [--opt] <sub>`: a subcommand behind global options.
+const gitCmd = sub => new RegExp('\\bgit\\s+(?:-[Cc]\\s+\\S+\\s+|--?[A-Za-z][\\w-]*(?:=\\S+)?\\s+)*' + sub + '\\b');
+const plainSep = s => [';', '\n', 'start', 'end'].includes(s);
+// The only accepted checksum form: a plain statement, `;` (or a newline) on
+// both sides, so `||`, `&&`, `if`, `!` or a pipe cannot swallow a mismatch.
+const shaCheck = (st, file) => {
+  const m = st.text.match(new RegExp('^echo "\\$\\{?([A-Za-z_]\\w*)\\}?  ' + esc(file) + '" \\| sha256sum -c -$'));
+  return m && plainSep(st.before) && plainSep(st.after) ? m[1] : null;
+};
+const assignment = text => text.replace(/^(?:[^\s()=]+\)|\*\))\s*/, '').match(/^([A-Za-z_]\w*)=(.*)$/);
+// Does variable `name` get its value (directly or through other variables)
+// from text that satisfies `source`?
+function derives(stmts, name, source) {
+  const rhs = new Map();
+  for (const st of stmts) {
+    const m = assignment(st.text);
+    if (m) rhs.set(m[1], (rhs.get(m[1]) || []).concat(m[2]));
+  }
+  const seen = new Set();
+  const visit = v => {
+    if (seen.has(v)) return false;
+    seen.add(v);
+    return (rhs.get(v) || []).some(r => source(r) || [...r.matchAll(/\$\{?([A-Za-z_]\w*)/g)].some(x => visit(x[1])));
+  };
+  return visit(name);
+}
+
+// Release assets and keys, matched by URL. `sha256`: checked against *_SHA256
+// ARGs; `fingerprints`: every primary key must be in a reviewed allow-list;
+// `signed`: a detached-signature file verified with gpgv against a sha256-pinned
+// keyring; `signed-sum`: checked against a sha256 taken from that verified text.
+const PINNED = [
+  { name: 'git-delta', kind: 'sha256', url: /^https:\/\/github\.com\/dandavison\/delta\/releases\/download\//, args: ['GIT_DELTA_SHA256_AMD64', 'GIT_DELTA_SHA256_ARM64'], perArch: true },
+  { name: 'fzf', kind: 'sha256', url: /^https:\/\/github\.com\/junegunn\/fzf\/releases\/download\//, args: ['FZF_SHA256_AMD64', 'FZF_SHA256_ARM64'], perArch: true },
+  { name: 'fnm', kind: 'sha256', url: /^https:\/\/github\.com\/Schniz\/fnm\/releases\/download\//, args: ['FNM_SHA256_AMD64', 'FNM_SHA256_ARM64'], perArch: true },
+  { name: 'Node release keyring', kind: 'sha256', url: /^https:\/\/raw\.githubusercontent\.com\/nodejs\/release-keys\/\$\{NODE_RELEASE_KEYS_COMMIT\}\/gpg-only-active-keys\/pubring\.kbx$/, args: ['NODE_RELEASE_KEYS_SHA256'] },
+  { name: 'Node SHASUMS256', kind: 'signed', url: /^https:\/\/nodejs\.org\/dist\/latest-v[^/]+\/SHASUMS256\.txt\.asc$/ },
+  { name: 'Node.js', kind: 'signed-sum', url: /^https:\/\/nodejs\.org\/dist\/v[^/]+\/node-v[^/]+\.tar\.xz$/, perArch: true },
+  { name: 'GitHub CLI apt key', kind: 'fingerprints', url: /^https:\/\/cli\.github\.com\/packages\/githubcli-archive-keyring\.gpg$/, args: ['GH_KEYRING_FINGERPRINTS'] },
+  { name: 'Docker apt key', kind: 'fingerprints', url: /^https:\/\/download\.docker\.com\/linux\/[a-z]+\/gpg$/, args: ['DOCKER_KEYRING_FINGERPRINTS'] },
+];
+// Official self-updating installers: deliberately floating (AGENTS.md).
+const FLOATING = ['https://claude.ai/install.sh', 'https://chatgpt.com/codex/install.sh', 'https://opencode.ai/install'];
+// zsh theme and plugins: [repository, commit ARG]; the branch comes from the
+// ARG's renovate comment.
+const GIT_PINS = [
+  ['https://github.com/romkatv/powerlevel10k', 'POWERLEVEL10K_COMMIT'],
+  ['https://github.com/zsh-users/zsh-autosuggestions', 'ZSH_AUTOSUGGESTIONS_COMMIT'],
+  ['https://github.com/zsh-users/zsh-syntax-highlighting', 'ZSH_SYNTAX_HIGHLIGHTING_COMMIT'],
+];
+const FPR_LIST = /^[0-9A-F]{40}(?:,[0-9A-F]{40})*$/;
+
+function check(source) {
+  const problems = [];
+  const instructions = parseDockerfile(source);
+  const args = new Map();
+  for (const ins of instructions) {
+    const m = ins.text.match(/^ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(\S*))?$/);
+    if (m) args.set(m[1], { value: m[2] || '', renovate: ins.renovate });
+  }
+  const arg = name => (args.get(name) || { value: '' }).value;
+
+  for (const { text, body } of instructions) {
+    const all = text + '\n' + body;
+    const where = text.slice(0, 70);
+    if (/\|\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:sudo\s+(?:-\S+\s+)*)?(?:env\s+)?(?:\S*\/)?(?:ba|da|z|k|fi)?sh\b/.test(all)) {
+      problems.push(`pipes into a shell: ${where}`);
+    }
+    if (/(?:\$\(|`)\s*(?:curl|wget)\b/.test(all)) problems.push(`runs a download through command substitution: ${where}`);
+    if (/\bwget\b/.test(all)) problems.push(`uses wget instead of the checked curl pattern: ${where}`);
+    if (gitCmd('clone').test(all)) problems.push(`clones a git repository instead of fetching a pinned commit: ${where}`);
+    if (/^ADD\s+(?:--\S+\s+)*\S*(?:https?|git):/i.test(text)) problems.push(`ADD fetches a URL: ${where}`);
+  }
+
+  if (!args.has('TARGETARCH')) problems.push('ARG TARGETARCH is not declared');
+  const found = new Set();
+  const scripts = [];
+  for (const ins of instructions.filter(i => /^RUN\s/.test(i.text))) {
+    // `RUN [--flags] <<'X'` runs the heredoc body; otherwise the body is file
+    // content written by the command (still checked for downloads).
+    const rest = ins.text.replace(/^RUN\s+(?:--\S+\s+)*/, '');
+    const heredocScript = /^<<-?\s*['"]?[A-Za-z_]\w*['"]?$/.test(rest);
+    const script = heredocScript ? ins.body : rest + '\n' + ins.body;
+    scripts.push(script);
+    if (!/\bcurl\b/.test(script) && !gitCmd('fetch').test(script)) continue;
+    const stmts = statements(script);
+    const where = (stmts[0] || { text: rest }).text.slice(0, 60);
+    if (!stmts.length || !/^set -eux?(?:o pipefail| -o pipefail)?$/.test(stmts[0].text) || !plainSep(stmts[0].after)) {
+      problems.push(`download step does not start with "set -eu;": ${where}`);
+    }
+    if (/\|\|/.test(script)) problems.push(`download step uses ||, which hides a failed fetch or check: ${where}`);
+    if (/\bset\s+\+[A-Za-z]*e|\bset\s+\+o\s+errexit\b/.test(script)) problems.push(`download step turns off errexit (set +e): ${where}`);
+
+    const verifiedKeyrings = new Set();
+    const verifiedTexts = new Set();
+    stmts.forEach((st, idx) => {
+      if (!/\bcurl\b/.test(st.text)) return;
+      const url = (st.text.match(/https?:\/\/[^\s"']+/) || [''])[0];
+      const label = url || st.text.slice(0, 60);
+      if (!/^curl\s/.test(st.text) || st.pipe) { problems.push(`curl must be a plain command writing to a file: ${label}`); return; }
+      if (!/\s(?:-[A-Za-z]*f[A-Za-z]*|--fail)(?=\s|$)/.test(st.text)) problems.push(`curl without -f: ${label}`);
+      if (!/\s--proto\s+'?=https'?(?=\s|$)/.test(st.text)) problems.push(`curl without --proto '=https': ${label}`);
+      if (!/\s--tlsv1\.[23](?=\s|$)/.test(st.text)) problems.push(`curl without --tlsv1.2: ${label}`);
+      const out = st.text.match(/\s(?:-o|--output)\s+("[^"]*"|'[^']*'|\S+)/);
+      if (!out) { problems.push(`curl does not write to a file with -o: ${label}`); return; }
+      if (!url.startsWith('https://')) { problems.push(`curl URL is not https: ${label}`); return; }
+      if (FLOATING.includes(url)) return;
+      const entry = PINNED.find(p => p.url.test(url));
+      if (!entry) { problems.push(`download has no pin and is not an allowed floating installer: ${url}`); return; }
+      found.add(entry.name);
+      const file = out[1].replace(/^["']|["']$/g, '');
+      const rest = stmts.slice(idx + 1);
+      const useAt = rest.findIndex(s => usesFile(s.text, file));
+      const first = useAt < 0 ? null : rest[useAt];
+      const firstUse = `${entry.name}: the first use after download is not`;
+      for (const name of entry.args || []) {
+        if (!refersTo(script, name)) problems.push(`${entry.name}: download step does not use ARG ${name}`);
+      }
+      if (entry.perArch && !(refersTo(script, 'TARGETARCH') && /\*\)[^;]*;\s*exit 1/.test(script))) {
+        problems.push(`${entry.name}: per-architecture asset is not selected by TARGETARCH with a failing default`);
+      }
+      if (entry.kind === 'sha256' || entry.kind === 'signed-sum') {
+        const v = first && shaCheck(first, file);
+        if (!v) { problems.push(`${firstUse} the plain statement: echo "$SHA256  ${file}" | sha256sum -c -;`); return; }
+        if (entry.kind === 'sha256') {
+          for (const name of entry.args) {
+            if (!/^[0-9a-f]{64}$/.test(arg(name))) problems.push(`${entry.name}: ARG ${name} is not a pinned sha256`);
+          }
+          if (!entry.args.includes(v) && !derives(stmts, v, r => entry.args.some(a => refersTo(r, a)))) {
+            problems.push(`${entry.name}: checksum $${v} does not come from its *_SHA256 ARGs`);
+          }
+          verifiedKeyrings.add(file);
+        } else if (![...verifiedTexts].some(t => derives(stmts, v, r => usesFile(r, t)))) {
+          problems.push(`${entry.name}: checksum $${v} does not come from gpgv-verified text`);
+        }
+      } else if (entry.kind === 'signed') {
+        const m = first && first.text.match(new RegExp('^gpgv --keyring "([^"]+)" --output "([^"]+)" "' + esc(file) + '"$'));
+        if (!m || !plainSep(first.before) || !plainSep(first.after)) {
+          problems.push(`${firstUse} the plain statement: gpgv --keyring "KEYRING" --output "VERIFIED" "${file}";`);
+          return;
+        }
+        if (!verifiedKeyrings.has(m[1])) problems.push(`${entry.name}: gpgv keyring ${m[1]} is not a sha256-checked download`);
+        if (rest.slice(useAt + 1).some(s => usesFile(s.text, file))) problems.push(`${entry.name}: the unverified ${file} is read after gpgv`);
+        verifiedTexts.add(m[2]);
+        if (!/^\d+\.\d+\.\d+$/.test(arg('NODE_MIN_VERSION'))) problems.push('ARG NODE_MIN_VERSION is not a version floor');
+        const floor = rest.findIndex(s => /^if ! printf '%s\\n' "\$NODE_MIN_VERSION" "\$\w+" \| sort -C -V$/.test(s.text));
+        if (floor < 0 || !rest.slice(floor + 1, floor + 4).some(s => s.text === 'exit 1')) {
+          problems.push(`${entry.name}: no rollback guard against NODE_MIN_VERSION (sort -C -V)`);
+        }
+      } else if (entry.kind === 'fingerprints') {
+        const allowed = entry.args[0];
+        if (!FPR_LIST.test(arg(allowed))) problems.push(`${entry.name}: ARG ${allowed} is not a list of key fingerprints`);
+        const m = first && first.text.match(new RegExp('^([A-Za-z_]\\w*)=\\$\\(gpg --batch --show-keys --with-colons "' + esc(file) +
+          '" \\| awk -F: \'\\$1 == "pub" \\{ p = 1; next \\} \\$1 == "fpr" && p \\{ print \\$10; p = 0 \\}\'\\)$'));
+        if (!m) { problems.push(`${firstUse} listing its primary key fingerprints with gpg --show-keys`); return; }
+        const keys = m[1];
+        const after = rest.slice(useAt + 1);
+        const next = after.findIndex(s => usesFile(s.text, file));
+        const between = next < 0 ? after : after.slice(0, next);
+        const at = re => between.findIndex(s => re.test(s.text));
+        const steps = [
+          at(new RegExp('^test -n "\\$' + keys + '"$')),
+          at(new RegExp('^for (\\w+) in \\$' + keys + '$')),
+          at(new RegExp('^do case ",\\$' + allowed + '," in \\*",\\$\\w+,"\\*\\)$')),
+          at(/^\*\) echo .* >&2$/),
+          at(/^exit 1$/),
+          at(/^done$/),
+        ];
+        if (steps.some((s, i) => s < 0 || (i && s <= steps[i - 1]))) {
+          problems.push(`${entry.name}: keys are not all checked against ${allowed} before the keyring is used`);
+        }
+      }
+    });
+  }
+
+  for (const p of PINNED) if (!found.has(p.name)) problems.push(`${p.name}: expected pinned download not found`);
+  for (const name of args.keys()) {
+    if (/_SHA256(?:_|$)|_FINGERPRINTS$/.test(name) && !scripts.some(s => refersTo(s, name))) problems.push(`ARG ${name} is not used`);
+  }
+  for (const name of ['NODE_RELEASE_KEYS_COMMIT']) {
+    if (!/^[0-9a-f]{40}$/.test(arg(name))) problems.push(`ARG ${name} is not a pinned commit`);
+  }
+
+  // zsh theme and plugins: fetched at a pinned commit that is on the upstream
+  // branch named by the renovate comment.
+  const gitScripts = scripts.filter(s => gitCmd('fetch').test(s));
+  for (const script of gitScripts) {
+    for (const url of script.match(/https:\/\/[^\s"']+/g) || []) {
+      if (!GIT_PINS.some(([repo]) => repo === url)) problems.push(`git source is not commit-pinned: ${url}`);
+    }
+    if (!/rev-parse HEAD\)"?\s*=\s*"\$/.test(script)) problems.push('git fetch step does not verify the checked-out commit');
+    if (!/\bmerge-base --is-ancestor\b/.test(script) || !/refs\/heads\//.test(script)) {
+      problems.push('git fetch step does not check that the commit is on the upstream branch');
+    }
+  }
+  for (const [repo, name] of GIT_PINS) {
+    const a = args.get(name) || { value: '' };
+    if (!/^[0-9a-f]{40}$/.test(a.value)) problems.push(`ARG ${name} is not a pinned commit`);
+    const r = a.renovate || {};
+    if (r.datasource !== 'git-refs' || r.depName !== repo || !r.branch) {
+      problems.push(`ARG ${name} has no "# renovate: datasource=git-refs depName=${repo} branch=..." comment`);
+      continue;
+    }
+    const call = gitScripts.some(s => statements(s).some(st =>
+      st.text.includes(repo) && refersTo(st.text, name) && st.text.endsWith(' ' + r.branch)));
+    if (!call) problems.push(`${repo} is not fetched at ARG ${name} on its ${r.branch} branch`);
+  }
+  // oh-my-zsh comes from the digest-pinned base image; never fetch it as a fallback.
+  if (!gitScripts.some(s => statements(s).some(st => /^test -f \S*\/\.oh-my-zsh\/oh-my-zsh\.sh$/.test(st.text)))) {
+    problems.push('build does not fail when the base image lacks oh-my-zsh');
+  }
+  return problems;
+}
+
+// Each case changes the real Dockerfile: a bypass must be reported, an
+// equivalent safe form must pass.
+const SELF_TESTS = [
+  ['`|| true` after a checksum', '| sha256sum -c -;', '| sha256sum -c - || true;', 'uses ||'],
+  ['set +e around a checksum', /(echo "\$sha256  \$tmp\/git-delta\.deb" \| sha256sum -c -;)/, 'set +e; $1 set -e;', 'turns off errexit'],
+  ['set +o errexit', /RUN set -eu; \\\n(\s+tmp=\$\(mktemp -d\); \\\n\s+curl[^\n]*claude\.ai)/, 'RUN set -eu; set +o errexit; \\\n$1', 'turns off errexit'],
+  ['&& after a checksum', /(echo "\$sha256  \$tmp\/git-delta\.deb" \| sha256sum -c -);/, '$1 &&', 'git-delta: the first use'],
+  ['checksum inside if', /(echo "\$sha256  \$tmp\/git-delta\.deb" \| sha256sum -c -);/, 'if $1; then :; fi;', 'git-delta: the first use'],
+  ['checksum negated', /(echo "\$sha256  \$tmp\/git-delta\.deb" \| sha256sum -c -);/, '! $1;', 'git-delta: the first use'],
+  ['checksum removed', /\s+echo "\$sha256  \$tmp\/git-delta\.deb" \| sha256sum -c -; \\\n/, '\n', 'git-delta: the first use'],
+  ['checksum of a hardcoded value', /echo "\$sha256  (\$tmp\/fzf\.tar\.gz)"/, 'x=0000; echo "$x  $1"', 'does not come from its *_SHA256 ARGs'],
+  ['heredoc script with an unpinned download', '# uv (Python package manager)\n',
+    "RUN <<'SH'\nset -eu\ncurl -fsSL --proto '=https' --tlsv1.2 -o /tmp/x https://example.com/x.sh\nbash /tmp/x\nSH\n# uv (Python package manager)\n", 'has no pin'],
+  ['heredoc script without set -eu', '# uv (Python package manager)\n',
+    "RUN <<'SH'\ntmp=$(mktemp -d)\ncurl -fsSL --proto '=https' --tlsv1.2 -o \"$tmp/i\" https://opencode.ai/install\nbash \"$tmp/i\"\nSH\n# uv (Python package manager)\n", 'does not start with "set -eu;"'],
+  ['curl piped into tar', /curl (-fsSL --proto '=https' --tlsv1\.2) -o "\$tmp\/fzf\.tar\.gz" \\\n\s+("[^"]+");/, 'curl $1 $2 | tar -xz -C "$tmp";', 'plain command'],
+  ['curl piped into sh', /curl (-fsSL --proto '=https' --tlsv1\.2) -o "\$tmp\/install\.sh" (https:\/\/claude\.ai\/install\.sh);/, 'curl $1 $2 | bash;', 'pipes into a shell'],
+  ['download in command substitution', /bash "\$tmp\/install" --no-modify-path;/, 'sh -c "$(curl -fsSL https://opencode.ai/install)";', 'command substitution'],
+  ['unknown download', '# uv (Python package manager)\n', "RUN set -eu; curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/x https://example.com/t.tgz; tar -xzf /tmp/x\n# uv (Python package manager)\n", 'has no pin'],
+  ['curl without --proto', /curl -fsSL --proto '=https' (--tlsv1\.2 -o "\$tmp\/install\.sh" https:\/\/claude)/, 'curl -fsSL $1', 'without --proto'],
+  ['curl without -f', /curl -fsSL (--proto '=https' --tlsv1\.2 -o "\$tmp\/docker\.asc")/, 'curl -sSL $1', 'curl without -f'],
+  ['download step without set -eu', /RUN set -eu; \\\n(\s+arch="\$TARGETARCH"; \\\n\s+case "\$arch" in \\\n\s+amd64\) fnm_asset)/, 'RUN true; \\\n$1', 'does not start with "set -eu;"'],
+  ['sha256 ARG emptied', /ARG FNM_SHA256_ARM64=[0-9a-f]+/, 'ARG FNM_SHA256_ARM64=', 'ARG FNM_SHA256_ARM64 is not a pinned sha256'],
+  ['architecture default does not fail', /\*\) echo "unsupported architecture: \$arch" >&2; exit 1 ;;( \\\n\s+esac; \\\n\s+tmp=\$\(mktemp -d\); \\\n\s+curl[^\n]*fzf)/, '*) sha256="$FZF_SHA256_AMD64" ;;$1', 'fzf: per-architecture'],
+  ['unused sha256 ARG', 'ARG FZF_VERSION=', 'ARG STALE_SHA256=0683067a4cbbcc19b9fd2841253131d1b37ccfa724725098d811d4d0d9fcc25b\nARG FZF_VERSION=', 'ARG STALE_SHA256 is not used'],
+  ['TARGETARCH undeclared', /\nARG TARGETARCH\n/, '\n', 'ARG TARGETARCH is not declared'],
+  ['wget', '# uv (Python package manager)\n', 'RUN set -eu; wget -O /tmp/x https://example.com/x\n# uv (Python package manager)\n', 'uses wget'],
+  ['ADD of a URL', '# uv (Python package manager)\n', 'ADD https://example.com/tool /usr/local/bin/tool\n# uv (Python package manager)\n', 'ADD fetches a URL'],
+  ['pipe into sudo bash', '# uv (Python package manager)\n', 'RUN set -eu; cat /tmp/x | sudo -E bash\n# uv (Python package manager)\n', 'pipes into a shell'],
+  ['Node SHASUMS not verified', /gpgv --keyring "\$tmp\/node-release-keys\.kbx" --output "(\$tmp\/node-shasums\.verified)" "\$tmp\/SHASUMS256\.txt\.asc";/, 'cp "$tmp/SHASUMS256.txt.asc" "$1";', 'Node SHASUMS256: the first use'],
+  ['Node SHASUMS parsed unverified', /(node_entry=\$\(grep -E "[^"]+") "\$tmp\/node-shasums\.verified"\)/, '$1 "$tmp/SHASUMS256.txt.asc")', 'is read after gpgv'],
+  ['Node checksum not from the signed text', /node_sha256="\$\{node_entry%%  \*\}";/, 'node_sha256="$NODE_MIN_VERSION";', 'does not come from gpgv-verified text'],
+  ['Node keyring not checked', /\s+echo "\$NODE_RELEASE_KEYS_SHA256  \$tmp\/node-release-keys\.kbx" \| sha256sum -c -; \\\n/, '\n', 'Node release keyring: the first use'],
+  ['Node rollback guard removed', /if ! printf '%s\\n' "\$NODE_MIN_VERSION" "\$node_version" \| sort -C -V; then \\\n[^\n]*\n\s+fi; \\\n/, '', 'no rollback guard'],
+  ['apt key fingerprints not checked', /(keys=\$\(gpg --batch --show-keys[^\n]*\\\n[^\n]*\n)\s+test -n "\$keys"; \\\n\s+for key in \$keys; do \\\n\s+case ",\$GH_KEYRING_FINGERPRINTS," in \\\n[^\n]*\n[^\n]*\n\s+esac; \\\n\s+done; \\\n/, '$1', 'GitHub CLI apt key: keys are not all checked'],
+  ['apt key fingerprint malformed', /ARG DOCKER_KEYRING_FINGERPRINTS=\S+/, 'ARG DOCKER_KEYRING_FINGERPRINTS=8D81803C0EBFCD88', 'not a list of key fingerprints'],
+  ['commit pin is a tag', /ARG POWERLEVEL10K_COMMIT=[0-9a-f]+/, 'ARG POWERLEVEL10K_COMMIT=v1.20.0', 'ARG POWERLEVEL10K_COMMIT is not a pinned commit'],
+  ['git clone', /fetch_commit (https:\/\/github\.com\/zsh-users\/zsh-syntax-highlighting) \\\n[^\n]*master/, 'git clone $1 "$custom/plugins/zsh-syntax-highlighting"', 'clones a git repository'],
+  ['unpinned git source', 'custom=/home/vscode/.oh-my-zsh/custom; \\\n', 'custom=/home/vscode/.oh-my-zsh/custom; \\\n    fetch_commit https://github.com/example/plugin "$ZSH_AUTOSUGGESTIONS_COMMIT" "$custom/plugins/x" master; \\\n', 'git source is not commit-pinned'],
+  ['commit not verified', /\s+test "\$\(git -C "\$3" rev-parse HEAD\)" = "\$2"; \\\n/, '\n', 'does not verify the checked-out commit'],
+  ['no upstream ancestry check', /\s+if ! git -C "\$upstream" merge-base --is-ancestor "\$2" FETCH_HEAD; then \\\n[^\n]*\n\s+fi; \\\n/, '\n', 'is on the upstream branch'],
+  ['branch differs from the renovate comment', /("\$ZSH_AUTOSUGGESTIONS_COMMIT" "\$custom\/plugins\/zsh-autosuggestions") master/, '$1 develop', 'is not fetched at ARG ZSH_AUTOSUGGESTIONS_COMMIT'],
+  ['oh-my-zsh guard removed', /\s+test -f \/home\/vscode\/\.oh-my-zsh\/oh-my-zsh\.sh; \\\n/, '\n', 'lacks oh-my-zsh'],
+  // Equivalent forms that must stay accepted.
+  ['set -eux is accepted', /RUN set -eu;/g, 'RUN set -eux;', null],
+  ['set -euo pipefail is accepted', /RUN set -eu;/g, 'RUN set -euo pipefail;', null],
+  ['RUN --mount flags are accepted', /RUN set -eu;/g, 'RUN --mount=type=cache,target=/var/cache/apt,sharing=locked set -eu;', null],
+  ['a heredoc script is accepted', '# uv (Python package manager)\n',
+    "RUN <<'SH'\nset -eu\ntmp=$(mktemp -d)\ncurl -fsSL --proto '=https' --tlsv1.2 -o \"$tmp/i\" https://opencode.ai/install\nbash \"$tmp/i\" --no-modify-path\nSH\n# uv (Python package manager)\n", null],
+];
+
+function selfTest(source) {
+  const failures = [];
+  const base = check(source);
+  if (base.length) failures.push('the unchanged Dockerfile does not pass:\n  ' + base.join('\n  '));
+  for (const [name, from, to, expect] of SELF_TESTS) {
+    const changed = typeof from === 'string' ? source.replace(from, () => to) : source.replace(from, to);
+    if (changed === source) { failures.push(`${name}: the change no longer applies to the Dockerfile`); continue; }
+    const problems = check(changed);
+    if (expect === null && problems.length) failures.push(`${name}: rejected:\n  ` + problems.join('\n  '));
+    if (expect !== null && !problems.some(p => p.includes(expect))) {
+      failures.push(`${name}: not reported (wanted "${expect}"); got:\n  ` + (problems.join('\n  ') || '(nothing)'));
+    }
+  }
+  return failures;
+}
+
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const result = process.argv[3] === '--self-test' ? selfTest(source) : check(source);
+if (result.length) {
+  console.log(result.join('\n'));
+  process.exit(1);
+}
+NODE
+if ! out=$(node "$TMP/check-dockerfile-downloads.js" "$ROOT/template/Dockerfile" 2>&1); then
+  fail "template/Dockerfile download integrity:
+$out"
+fi
+if ! out=$(node "$TMP/check-dockerfile-downloads.js" "$ROOT/template/Dockerfile" --self-test 2>&1); then
+  fail "template/Dockerfile download-integrity self-test:
+$out"
+fi
 for workflow in "$ROOT/.github/workflows/rebuild.yml" \
   "$ROOT/.github/workflows/release.yml"; do
   grep -Fq 'FAIL: shell startup ran vscode-writable code' "$workflow" \
     || fail "$(basename "$workflow") lost the shell-startup plant smoke"
+  grep -Fq 'OK: managed zsh loads powerlevel10k, both plugins, node, fnm, fzf, and delta' "$workflow" \
+    || fail "$(basename "$workflow") lost the pinned zsh theme/plugins/tools smoke"
   grep -Fq '"$GITHUB_WORKSPACE/aic" init --build --force' "$workflow" \
     || fail "workflow pre-created override is not passed through explicit init --force"
   grep -Fq 'CODEX_NON_INTERACTIVE=1' "$workflow" \

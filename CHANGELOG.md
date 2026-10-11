@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Image builds now fail on a failed or changed download.** Tools are pinned
+  by sha256, apt keys by fingerprint, the zsh theme and plugins by upstream
+  commit, and Node must be a release signed by a pinned Node releaser key.
+  The Claude, Codex, and OpenCode installers still float. (Dockerfile)
+
 - **An agent can no longer plant code in the next human shell.** oh-my-zsh,
   powerlevel10k, the plugins, and fnm are now root-owned, and shell startup
   ignores `~/.bash_aliases`, writable caches, and tools earlier in PATH.

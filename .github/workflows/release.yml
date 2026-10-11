@@ -231,6 +231,21 @@ jobs:
               || { echo "FAIL: overlay not sourced by login zsh"; exit 1; }
             echo "OK: personal shell overlay is root-locked, verbatim, and sourced after baseline"
           '
+      - name: Smoke test - managed zsh loads the pinned theme, plugins, and tools
+        working-directory: /tmp/proj
+        run: |
+          # The image fetches powerlevel10k and both plugins at pinned commits
+          # and fails the build on any download error. Check that the managed
+          # zsh startup really loads them, so a broken shell setup cannot ship.
+          devcontainer exec --workspace-folder . zsh -ic '
+            (( $+functions[p10k] )) || { echo "FAIL: powerlevel10k not loaded"; exit 1; }
+            (( $+functions[_zsh_autosuggest_start] )) || { echo "FAIL: zsh-autosuggestions not loaded"; exit 1; }
+            (( $+functions[_zsh_highlight] )) || { echo "FAIL: zsh-syntax-highlighting not loaded"; exit 1; }
+            for tool in node fnm fzf delta; do
+              whence -p "$tool" >/dev/null || { echo "FAIL: $tool not on the zsh PATH"; exit 1; }
+            done
+            echo "OK: managed zsh loads powerlevel10k, both plugins, node, fnm, fzf, and delta"
+          '
       - name: Smoke test - personal statusline installs root-locked and is wired
         working-directory: /tmp/proj
         run: |

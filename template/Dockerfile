@@ -20,6 +20,28 @@ ENV TZ="$TZ"
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ---------------------------------------------------------------------------
+# Downloads (AGENTS.md "Image download integrity")
+# ---------------------------------------------------------------------------
+# Every curl or git fetch runs under `set -eu` (no `||`, no `set +e`) and
+# writes to a file first:
+#   curl -fsSL --proto '=https' --tlsv1.2 -o FILE URL
+# Nothing is piped into a shell or into tar/dpkg/gpg. Before a file is
+# installed or run, it is checked: a release asset with
+# `echo "$SHA256  FILE" | sha256sum -c -` against a pinned *_SHA256 ARG, an apt
+# repository key against an allow-list of reviewed fingerprints, and Node
+# against a SHASUMS256.txt signed by a pinned releaser keyring. A git source is
+# pinned by a commit that must be on its upstream branch. Renovate bumps
+# *_VERSION ARGs but never *_SHA256 ARGs, so a version bump fails the build
+# until the checksums are updated by hand. The official Claude/Codex/OpenCode
+# installers float on purpose (self-updating baked floor), but are downloaded
+# completely first.
+#
+# BuildKit (required anyway for the RUN heredocs below) sets TARGETARCH for the
+# platform being built. Each per-architecture download selects its asset and
+# checksum with it; any value other than amd64 or arm64 fails the build.
+ARG TARGETARCH
+
+# ---------------------------------------------------------------------------
 # System packages (base image already ships git, curl, sudo, etc.)
 # ---------------------------------------------------------------------------
 # openssh-client provides ssh-keygen, which Git invokes for SSH commit signing
@@ -47,44 +69,104 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       openssh-client \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# git-delta
+# git-delta (a .deb that dpkg installs as root)
 # renovate: datasource=github-releases depName=dandavison/delta
 ARG GIT_DELTA_VERSION=0.20.1
-RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" -o /tmp/git-delta.deb && \
-    dpkg -i /tmp/git-delta.deb && \
-    rm /tmp/git-delta.deb
+ARG GIT_DELTA_SHA256_AMD64=0683067a4cbbcc19b9fd2841253131d1b37ccfa724725098d811d4d0d9fcc25b
+ARG GIT_DELTA_SHA256_ARM64=6e08b734d611037eb9eb5db883cab7ac0a089216a9efdc1d2caac44319029c28
+RUN set -eu; \
+    arch="$TARGETARCH"; \
+    case "$arch" in \
+      amd64) sha256="$GIT_DELTA_SHA256_AMD64" ;; \
+      arm64) sha256="$GIT_DELTA_SHA256_ARM64" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    tmp=$(mktemp -d); \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/git-delta.deb" \
+      "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${arch}.deb"; \
+    echo "$sha256  $tmp/git-delta.deb" | sha256sum -c -; \
+    dpkg -i "$tmp/git-delta.deb"; \
+    rm -rf "$tmp"
 
 # uv (Python package manager)
 COPY --from=uv /uv /usr/local/bin/uv
 
-# fzf (GitHub release is newer than apt and includes shell integration)
+# fzf (GitHub release is newer than apt and includes shell integration). Only
+# the fzf binary is installed, root-owned: the archive's own owner is not kept.
 # renovate: datasource=github-releases depName=junegunn/fzf
 ARG FZF_VERSION=0.74.4
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "${ARCH}" in \
-      amd64) FZF_ARCH="linux_amd64" ;; \
-      arm64) FZF_ARCH="linux_arm64" ;; \
-      *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
-    esac && \
-    curl -fsSL "https://github.com/junegunn/fzf/releases/download/v${FZF_VERSION}/fzf-${FZF_VERSION}-${FZF_ARCH}.tar.gz" | tar -xz -C /usr/local/bin
+ARG FZF_SHA256_AMD64=05e6813a337cc722c3ed07e54a764b75cc5d671e2e60459db0ba696ee5fa7504
+ARG FZF_SHA256_ARM64=5d673b849f494f0d64ec471d8640b153ca8849e3846a31da17abdcfce8df6b46
+RUN set -eu; \
+    arch="$TARGETARCH"; \
+    case "$arch" in \
+      amd64) sha256="$FZF_SHA256_AMD64" ;; \
+      arm64) sha256="$FZF_SHA256_ARM64" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    tmp=$(mktemp -d); \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/fzf.tar.gz" \
+      "https://github.com/junegunn/fzf/releases/download/v${FZF_VERSION}/fzf-${FZF_VERSION}-linux_${arch}.tar.gz"; \
+    echo "$sha256  $tmp/fzf.tar.gz" | sha256sum -c -; \
+    tar -xzf "$tmp/fzf.tar.gz" -C "$tmp" --no-same-owner fzf; \
+    install -o root -g root -m 0755 "$tmp/fzf" /usr/local/bin/fzf; \
+    rm -rf "$tmp"
 
-# GitHub CLI (used by AI for PR/issue work; user logs in inside the container)
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-      > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
-    && rm -rf /var/lib/apt/lists/*
+# GitHub CLI (used by AI for PR/issue work; user logs in inside the container).
+# The repository keyring may hold only these reviewed primary keys
+# (`gpg --show-keys` fingerprints); apt then checks the floating gh package
+# with it. A key that is dropped or gets a new expiry date still passes; a new
+# key fails the build until it is reviewed and added here.
+#   2C6106201985B60E6C7AC87323F3D4EA75716059  GitHub CLI (expired 2026-09-05)
+#   7F38BBB59D064DBCB3D84D725612B36462313325  GitHub CLI (since 2026-04-07)
+ARG GH_KEYRING_FINGERPRINTS=2C6106201985B60E6C7AC87323F3D4EA75716059,7F38BBB59D064DBCB3D84D725612B36462313325
+RUN set -eu; \
+    tmp=$(mktemp -d); \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/githubcli-archive-keyring.gpg" \
+      https://cli.github.com/packages/githubcli-archive-keyring.gpg; \
+    keys=$(gpg --batch --show-keys --with-colons "$tmp/githubcli-archive-keyring.gpg" \
+      | awk -F: '$1 == "pub" { p = 1; next } $1 == "fpr" && p { print $10; p = 0 }'); \
+    test -n "$keys"; \
+    for key in $keys; do \
+      case ",$GH_KEYRING_FINGERPRINTS," in \
+        *",$key,"*) ;; \
+        *) echo "unreviewed GitHub CLI repository key: $key" >&2; exit 1 ;; \
+      esac; \
+    done; \
+    install -o root -g root -m 0644 "$tmp/githubcli-archive-keyring.gpg" \
+      /usr/share/keyrings/githubcli-archive-keyring.gpg; \
+    rm -rf "$tmp"; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gh; \
+    rm -rf /var/lib/apt/lists/*
 
-# Docker CLI (talks to socket-proxy via DOCKER_HOST=tcp://socket-proxy:2375)
-RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
-      | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu noble stable" \
-      > /etc/apt/sources.list.d/docker.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-      docker-ce-cli docker-buildx-plugin docker-compose-plugin \
-    && rm -rf /var/lib/apt/lists/*
+# Docker CLI (talks to socket-proxy via DOCKER_HOST=tcp://socket-proxy:2375).
+# Same reviewed-key rule as the gh keyring above.
+#   9DC858229FC7DD38854AE2D88D81803C0EBFCD88  Docker Release (CE deb)
+ARG DOCKER_KEYRING_FINGERPRINTS=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+RUN set -eu; \
+    tmp=$(mktemp -d); \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/docker.asc" \
+      https://download.docker.com/linux/debian/gpg; \
+    keys=$(gpg --batch --show-keys --with-colons "$tmp/docker.asc" \
+      | awk -F: '$1 == "pub" { p = 1; next } $1 == "fpr" && p { print $10; p = 0 }'); \
+    test -n "$keys"; \
+    for key in $keys; do \
+      case ",$DOCKER_KEYRING_FINGERPRINTS," in \
+        *",$key,"*) ;; \
+        *) echo "unreviewed Docker repository key: $key" >&2; exit 1 ;; \
+      esac; \
+    done; \
+    gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg "$tmp/docker.asc"; \
+    rm -rf "$tmp"; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu noble stable" \
+      > /etc/apt/sources.list.d/docker.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      docker-ce-cli docker-buildx-plugin docker-compose-plugin; \
+    rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
 # Persistent directories and ownership
@@ -295,60 +377,164 @@ ENV NPM_CONFIG_IGNORE_SCRIPTS=true
 # refresh_ai_tools() floats all three to the latest release on every container
 # (re)create, so `aic rebuild` always lands current AI CLIs. The Claude/Codex
 # installers skip editing login-shell rc files because ~/.local/bin is already
-# on PATH; OpenCode's
-# installer is told not to touch them with --no-modify-path (zsh-in-docker owns
-# the rc files and we set PATH explicitly above + in each rc below).
+# on PATH; OpenCode's installer is told not to touch them with
+# --no-modify-path (the managed rc files below set PATH explicitly).
+# These three installers float on purpose (no pinned checksum): they are the
+# vendors' supported way to install a CLI that updates itself. Each is still
+# downloaded completely to a file over HTTPS first, so a failed or cut-off
+# download fails the build instead of running a partial script.
 # `claude --version` may create one-time migration state. Do not bake that
 # machine identity into every project; runtime state belongs in the
 # per-project CLAUDE_CONFIG_DIR.
-RUN curl -fsSL https://claude.ai/install.sh | bash \
-    && claude --version \
-    && rm -f /home/vscode/.claude.json \
-    && rm -rf /home/vscode/.aic-sessions/tool-homes/claude/backups
+RUN set -eu; \
+    tmp=$(mktemp -d); \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/install.sh" https://claude.ai/install.sh; \
+    bash "$tmp/install.sh"; \
+    rm -rf "$tmp"; \
+    claude --version; \
+    rm -f /home/vscode/.claude.json; \
+    rm -rf /home/vscode/.aic-sessions/tool-homes/claude/backups
 # Keep the standalone package separate from CODEX_HOME: ~/.codex is a
 # per-project config/session home, while this rootfs path is the refreshable
 # executable floor. `refresh_ai_tools()` supplies the same installer variables.
-RUN curl -fsSL https://chatgpt.com/codex/install.sh \
-      | CODEX_NON_INTERACTIVE=1 \
-        CODEX_HOME=/home/vscode/.local/share/aic-tools/codex \
-        CODEX_INSTALL_DIR=/home/vscode/.local/bin sh \
-    && codex --version
-RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
-    && opencode --version
+RUN set -eu; \
+    tmp=$(mktemp -d); \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/install.sh" https://chatgpt.com/codex/install.sh; \
+    CODEX_NON_INTERACTIVE=1 \
+      CODEX_HOME=/home/vscode/.local/share/aic-tools/codex \
+      CODEX_INSTALL_DIR=/home/vscode/.local/bin \
+      sh "$tmp/install.sh"; \
+    rm -rf "$tmp"; \
+    codex --version
+RUN set -eu; \
+    tmp=$(mktemp -d); \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/install" https://opencode.ai/install; \
+    bash "$tmp/install" --no-modify-path; \
+    rm -rf "$tmp"; \
+    opencode --version
 
-# Python toolchain (per-user; survives image rebuilds via base layer caching)
+# Python toolchain (per-user; survives image rebuilds via base layer caching).
+# uv checks each Python download against the sha256 built into this
+# digest-pinned uv release.
 RUN uv python install 3.13 --default
 
 # Node LTS via fnm (per-user; lets projects override with their own version).
 # The root stage below moves the fnm binary to a root-owned /usr/local/bin/fnm;
 # Node versions stay in the vscode-owned $FNM_DIR.
+# fnm is a pinned release binary. Node floats inside its major line on
+# purpose, so the weekly rebuild picks up Node security releases, but only to
+# a release that a pinned Node releaser key signed:
+# - The keyring is gpg-only-active-keys/pubring.kbx of nodejs/release-keys at
+#   a pinned commit, checked by sha256. A release signed by any other key
+#   fails the build until the keyring pin is reviewed and updated.
+# - gpgv writes the signed text of SHASUMS256.txt.asc to a separate file
+#   (not "SHASUMS256.txt": gpgv would take that name as detached data), and
+#   only that verified text is parsed. gpgv writes the file even when the
+#   signature is bad, so its exit status must stop the build (no `||` here).
+# - The release must not be older than NODE_MIN_VERSION (rollback guard); the
+#   major of NODE_MIN_VERSION is the Node line that floats.
+# - `fnm install` does not check downloads, so the tarball is checked against
+#   the signed sha256 and unpacked into fnm's own layout
+#   (node-versions/vX.Y.Z/installation). `fnm default` fails the build if fnm
+#   does not see it.
+# renovate: datasource=github-releases depName=Schniz/fnm
+ARG FNM_VERSION=1.39.0
+ARG FNM_SHA256_AMD64=7807664f39d39fc518da1c35ba0181e4b3267603c4b1dedeb4b5fc6ae440a224
+ARG FNM_SHA256_ARM64=4eaff58b2c5bf30d0934027572dd0b5bbb60d2a1af309230b53662d4b1d45599
+# renovate: datasource=git-refs depName=https://github.com/nodejs/release-keys branch=main
+ARG NODE_RELEASE_KEYS_COMMIT=481637f813e912c4aa3622d7964ab426c97b8e8d
+ARG NODE_RELEASE_KEYS_SHA256=140f2ad5260fd62773b6243ce8e1d3009645d558f121b8262c55e383dc285932
 # renovate: datasource=node-version depName=node
-ARG NODE_VERSION=24
+ARG NODE_MIN_VERSION=24.21.0
 ENV FNM_DIR="/home/vscode/.fnm"
-RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$FNM_DIR" --skip-shell \
-    && export PATH="$FNM_DIR:$PATH" \
-    && eval "$(fnm env)" \
-    && fnm install ${NODE_VERSION} \
-    && fnm default ${NODE_VERSION}
+RUN set -eu; \
+    arch="$TARGETARCH"; \
+    case "$arch" in \
+      amd64) fnm_asset=fnm-linux; fnm_sha256="$FNM_SHA256_AMD64"; node_arch=x64 ;; \
+      arm64) fnm_asset=fnm-arm64; fnm_sha256="$FNM_SHA256_ARM64"; node_arch=arm64 ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    tmp=$(mktemp -d); \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/fnm.zip" \
+      "https://github.com/Schniz/fnm/releases/download/v${FNM_VERSION}/${fnm_asset}.zip"; \
+    echo "$fnm_sha256  $tmp/fnm.zip" | sha256sum -c -; \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/node-release-keys.kbx" \
+      "https://raw.githubusercontent.com/nodejs/release-keys/${NODE_RELEASE_KEYS_COMMIT}/gpg-only-active-keys/pubring.kbx"; \
+    echo "$NODE_RELEASE_KEYS_SHA256  $tmp/node-release-keys.kbx" | sha256sum -c -; \
+    node_major="${NODE_MIN_VERSION%%.*}"; \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/SHASUMS256.txt.asc" \
+      "https://nodejs.org/dist/latest-v${node_major}.x/SHASUMS256.txt.asc"; \
+    gpgv --keyring "$tmp/node-release-keys.kbx" --output "$tmp/node-shasums.verified" "$tmp/SHASUMS256.txt.asc"; \
+    node_entry=$(grep -E "^[0-9a-f]{64}  node-v${node_major}\.[0-9]+\.[0-9]+-linux-${node_arch}\.tar\.xz\$" "$tmp/node-shasums.verified"); \
+    if [ "$(printf '%s\n' "$node_entry" | wc -l)" -ne 1 ]; then \
+      echo "expected one signed Node ${node_major}.x tarball for linux-${node_arch}" >&2; exit 1; \
+    fi; \
+    node_sha256="${node_entry%%  *}"; \
+    node_version="${node_entry#*  node-v}"; \
+    node_version="${node_version%%-linux-*}"; \
+    if ! printf '%s\n' "$NODE_MIN_VERSION" "$node_version" | sort -C -V; then \
+      echo "signed Node $node_version is older than NODE_MIN_VERSION $NODE_MIN_VERSION" >&2; exit 1; \
+    fi; \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/node.tar.xz" \
+      "https://nodejs.org/dist/v${node_version}/node-v${node_version}-linux-${node_arch}.tar.xz"; \
+    echo "$node_sha256  $tmp/node.tar.xz" | sha256sum -c -; \
+    unzip -q "$tmp/fnm.zip" fnm -d "$tmp"; \
+    install -d "$FNM_DIR" "$FNM_DIR/node-versions/v${node_version}/installation"; \
+    install -m 0755 "$tmp/fnm" "$FNM_DIR/fnm"; \
+    tar -xJf "$tmp/node.tar.xz" --no-same-owner --strip-components=1 \
+      -C "$FNM_DIR/node-versions/v${node_version}/installation"; \
+    rm -rf "$tmp"; \
+    "$FNM_DIR/fnm" default "$node_version"; \
+    test "$("$FNM_DIR/aliases/default/bin/node" --version)" = "v${node_version}"
 
 # Semgrep (used by Claude Code's semgrep plugin; installed into ~/.local/bin
 # via uv tool so the binary is on PATH for the vscode user). Its settings path
-# is configured directly inside the persistent global auth volume.
+# is configured directly inside the persistent global auth volume. It floats
+# on PyPI on purpose (no hash lock); uv fails the build on any error.
 RUN uv tool install semgrep \
     && semgrep --version
 
-# oh-my-zsh + powerlevel10k + plugins. zsh-in-docker only fetches them; the
-# .zshrc it generates is discarded for the managed template/.zshrc, and the
-# root stage below moves the whole tree to a root-owned path.
-# renovate: datasource=github-releases depName=deluan/zsh-in-docker
-ARG ZSH_IN_DOCKER_VERSION=1.2.1
-RUN sh -c "$(curl -fsSL https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
-      -t https://github.com/romkatv/powerlevel10k \
-      -p git \
-      -p fzf \
-      -p https://github.com/zsh-users/zsh-autosuggestions \
-      -p https://github.com/zsh-users/zsh-syntax-highlighting \
-      -x
+# oh-my-zsh + powerlevel10k + plugins. The root stage below moves the whole
+# tree to a root-owned path; the managed rc is template/.zshrc.
+# oh-my-zsh itself comes from the digest-pinned base image (the Dev Containers
+# common-utils feature installs it for vscode). The build fails if it is
+# missing, so it is never fetched unpinned. The theme and the two plugins are
+# fetched at pinned commits: git checks every object against its id, and the
+# checkout must be exactly the pinned commit. GitHub also serves commits that
+# exist only in a fork through the upstream URL, so the pinned commit must
+# also be an ancestor of the upstream branch named in its renovate comment
+# (checked in a throwaway commits-only clone, so the checkout stays as-is).
+# The theme commit also pins gitstatusd: its installer (root stage below)
+# checks the download against the sha256 in that commit's install.info.
+# renovate: datasource=git-refs depName=https://github.com/romkatv/powerlevel10k branch=master
+ARG POWERLEVEL10K_COMMIT=d05a1b00f9a61f9578bf9dc19b8451942dde8734
+# renovate: datasource=git-refs depName=https://github.com/zsh-users/zsh-autosuggestions branch=master
+ARG ZSH_AUTOSUGGESTIONS_COMMIT=85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5
+# renovate: datasource=git-refs depName=https://github.com/zsh-users/zsh-syntax-highlighting branch=master
+ARG ZSH_SYNTAX_HIGHLIGHTING_COMMIT=e6683f20e5c38d3e5447f45845d04ddda75d0f23
+RUN set -eu; \
+    test -f /home/vscode/.oh-my-zsh/oh-my-zsh.sh; \
+    fetch_commit() { \
+      git init -q "$3"; \
+      git -C "$3" remote add origin "$1"; \
+      git -C "$3" fetch -q --depth 1 origin "$2"; \
+      git -C "$3" -c advice.detachedHead=false checkout -q FETCH_HEAD; \
+      test "$(git -C "$3" rev-parse HEAD)" = "$2"; \
+      upstream=$(mktemp -d); \
+      git init -q --bare "$upstream"; \
+      git -C "$upstream" fetch -q --filter=tree:0 "$1" "refs/heads/$4"; \
+      if ! git -C "$upstream" merge-base --is-ancestor "$2" FETCH_HEAD; then \
+        echo "$2 is not on the $4 branch of $1" >&2; exit 1; \
+      fi; \
+      rm -rf "$upstream"; \
+    }; \
+    custom=/home/vscode/.oh-my-zsh/custom; \
+    fetch_commit https://github.com/romkatv/powerlevel10k \
+      "$POWERLEVEL10K_COMMIT" "$custom/themes/powerlevel10k" master; \
+    fetch_commit https://github.com/zsh-users/zsh-autosuggestions \
+      "$ZSH_AUTOSUGGESTIONS_COMMIT" "$custom/plugins/zsh-autosuggestions" master; \
+    fetch_commit https://github.com/zsh-users/zsh-syntax-highlighting \
+      "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT" "$custom/plugins/zsh-syntax-highlighting" master
 
 # ---------------------------------------------------------------------------
 # Root-managed shell startup (zsh, bash, fish). Every file a managed shell

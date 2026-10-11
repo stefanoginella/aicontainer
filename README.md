@@ -1176,6 +1176,14 @@ there is no live unlock/update primitive.
   into inside. Host credential helpers and signing keys are not forwarded; use
   [`aic signing`](#commit-signing) for a sandbox-only key.
 - **Host credentials**: nothing is auto-forwarded. The AI only has access to what you explicitly `claude /login`, `codex auth login`, `opencode auth login`, `gh auth login` for inside the container. Note these tokens live in the shared `aic-auth-global` volume, so a compromised session in **any** project can use every token you've logged in with — prefer a fine-grained `gh` PAT.
+- **Image build inputs**: the image pins git-delta, fzf, and fnm by sha256,
+  the GitHub CLI and Docker apt keys by fingerprint, and the zsh theme and
+  plugins by a commit on their upstream branch. Node takes the newest release
+  of its major line that a pinned Node releaser key signed. The build fails if
+  one does not match. It still trusts the official Claude Code, Codex, and
+  OpenCode installers (they float so the CLIs can update themselves), the
+  signed Ubuntu, GitHub CLI, and Docker apt repositories, and PyPI for
+  `semgrep`.
 
 Don't run this on a network where reaching internal services is a concern — or enable the allowlist below.
 

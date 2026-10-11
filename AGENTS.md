@@ -76,6 +76,93 @@ If you change the GHCR repo path, update **all of**: the template, the sed
 pattern in `apply_template()`, the README's GHCR references, the
 `aic-firewall` allowlist's `ghcr.io` entry, and both workflows' image tags.
 
+## Image download integrity
+
+A download that fails without failing the build ships in `:latest` and
+`:vX.Y.Z`. The old `sh -c "$(curl …)"` zsh setup did exactly that: when curl
+failed, `sh -c ""` exited 0. Every curl or git fetch in `template/Dockerfile`
+is therefore a step that starts with `set -eu;` and has no `||` and no
+`set +e` (apt and uv steps are not covered by this rule). Each download writes
+to a file first: `curl -fsSL --proto '=https' --tlsv1.2 -o FILE URL`. Nothing is
+piped into a shell, `tar`, `dpkg`, or `gpg`, and the first use of each file is
+its check. Load-bearing, don't undo:
+
+1. **Release assets are pinned by sha256.** git-delta, fzf, and fnm each have a
+   `*_VERSION` ARG and `*_SHA256_AMD64`/`*_SHA256_ARM64` ARGs, selected by
+   `TARGETARCH` (any other architecture fails). The check is exactly the plain
+   statement `echo "$SHA256  FILE" | sha256sum -c -;`, so no `||`, `&&`, `if`,
+   or `!` can swallow a mismatch.
+2. **Renovate bumps only `*_VERSION`, never `*_SHA256`.** A bump PR therefore
+   fails the image build until a maintainer adds the new checksums. That is
+   the fail-closed design: never add a manager that rewrites the checksums,
+   and never read a checksum from the same release at build time.
+3. **Node floats inside its major line, but only to a signed release.** This
+   keeps the weekly refresh of `:latest` for Node security releases. The
+   keyring is `gpg-only-active-keys/pubring.kbx` of nodejs/release-keys at
+   `NODE_RELEASE_KEYS_COMMIT`, pinned by `NODE_RELEASE_KEYS_SHA256`, so a
+   release signed by any other key fails the build. `gpgv --output` writes the
+   signed text of `latest-vN.x/SHASUMS256.txt.asc`; only that text is parsed,
+   never the `.asc`. gpgv writes the output file even when the signature is
+   bad, so its exit status must stop the build (one more reason for no `||`).
+   Keep the output name different from the `.asc` name without its
+   extension: gpgv otherwise treats that file as detached data. The release
+   must not be older than `NODE_MIN_VERSION` (rollback guard, `sort -C -V`);
+   the major of `NODE_MIN_VERSION` is the line that floats, and Renovate raises
+   it. The tarball is checked against the signed sha256 and unpacked into fnm's
+   own layout (`$FNM_DIR/node-versions/vX.Y.Z/installation`), because `fnm
+   install` does not verify what it downloads. `fnm default` fails the build
+   if fnm does not see it; check this layout when Renovate bumps fnm.
+4. **apt repository keys are pinned by fingerprint.** `gpg --show-keys` lists
+   the primary keys of the downloaded gh and Docker keyrings, and every one
+   must be in `GH_KEYRING_FINGERPRINTS` / `DOCKER_KEYRING_FINGERPRINTS`. A key
+   that the vendor drops or re-signs with a new expiry date still passes; a
+   new key fails the build until it is reviewed and added. apt then checks the
+   floating `gh`/`docker-*` packages with those keys.
+5. **The zsh theme and plugins are pinned by commit.** powerlevel10k,
+   zsh-autosuggestions, and zsh-syntax-highlighting are fetched with `git fetch
+   --depth 1 origin <commit>`, and the checkout must equal the `*_COMMIT` ARG.
+   A commit id proves the content, not where it comes from: GitHub serves a
+   commit that exists only in a fork through the upstream URL. So the commit
+   must also be an ancestor of the upstream branch in the ARG's renovate
+   comment (`merge-base --is-ancestor`, checked in a throwaway commits-only
+   clone). Renovate's `git-refs` manager proposes new commits on that branch.
+   oh-my-zsh is not fetched: it comes from the digest-pinned base image, and
+   the build fails if it is missing, so nothing falls back to an unpinned
+   clone. The pinned theme commit also pins gitstatusd: p10k's installer
+   checks it against the sha256 in that commit's `install.info`.
+6. **Deliberately floating:** the official Claude, Codex, and OpenCode
+   installers (self-updating baked floor; still downloaded completely before
+   they run), apt packages (signed repositories), `uv tool install semgrep`
+   (PyPI, no hash lock), and `uv python install` (uv checks the sha256 built
+   into the digest-pinned uv image).
+
+To update a pin:
+
+- **A release checksum** (Renovate bumped a `*_VERSION`): download the asset for
+  **both** amd64 and arm64 from the exact URL that the Dockerfile builds, into
+  an empty scratch directory. Run `shasum -a 256` (macOS) or `sha256sum`, and
+  compare each value with upstream (the release asset digest on GitHub, or
+  fzf's `fzf_<version>_checksums.txt`). Put the values in the `*_SHA256_*`
+  ARGs in the same PR, and let CI build both architectures.
+- **The Node keyring** (Renovate bumped `NODE_RELEASE_KEYS_COMMIT`): if the
+  commit changed `gpg-only-active-keys/pubring.kbx`, review the added or
+  removed releaser keys against the releaser list in the nodejs/node README,
+  then put the file's sha256 in `NODE_RELEASE_KEYS_SHA256`.
+- **An apt key** (the build fails with "unreviewed … repository key"): check
+  the new fingerprint against the vendor's published one (GitHub CLI's Linux
+  install docs; Docker's install docs), then add it to the `*_FINGERPRINTS`
+  ARG and to the comment above it. Remove a fingerprint only when the vendor
+  has retired the key.
+
+Guarded by the download-integrity check in `tests/test-aic-host-security.sh`
+and the "managed zsh loads the pinned theme, plugins, and tools" smoke in both
+workflows. Every `curl` URL must match the check's table of pinned downloads or
+its short list of floating installers; a new download extends one of the two,
+together with a pin. The check's `--self-test` run changes the real Dockerfile
+in known ways (`|| true` after a check, `set +e`, a heredoc `RUN <<'SH'` script
+with an unpinned download, a fork-only commit without the ancestry check, …)
+and fails if one is not reported; extend it with every new rule.
+
 ## Version drift / update notifications
 
 Two best-effort checks live next to `read_aic_version()` in `aic`. Both fail
@@ -642,7 +729,8 @@ vscode-settings.json" test and the project-code cases in
 VS Code terminal profiles) start zsh, bash, and fish from root-owned files
 only, so an agent cannot plant code that runs in the next human shell.
 `template/.zshrc` is the real managed zsh rc (copied to
-`/etc/aic/shell/zsh/.zshrc`); zsh-in-docker only fetches the framework.
+`/etc/aic/shell/zsh/.zshrc`); oh-my-zsh comes from the base image, and the
+theme and plugins are fetched at pinned commits.
 Load-bearing, don't undo:
 
 1. **Everything sourced or run at startup is root-owned.** oh-my-zsh with the
@@ -969,7 +1057,9 @@ Review any change to these files for security regressions:
   npm — deliberate, so self-update works — at the cost of leaving them
   outside the `NPM_CONFIG_MIN_RELEASE_AGE` quarantine (which still covers npx
   MCPs). All three CLIs are a baked floor that `refresh_ai_tools()` floats to
-  latest on each create.
+  latest on each create. Every other curl or git download is pinned (by
+  sha256, signature, key fingerprint, or upstream commit) and checked before
+  use (see "Image download integrity").
 - `template/aic-firewall` — outbound allowlist plus unconditional metadata
   chains. New hosts expand reachability. A/B IPv4 and IPv6 generations are
   built while the active DROP generation remains live, then switched with one
