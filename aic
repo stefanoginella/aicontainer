@@ -2281,7 +2281,11 @@ const withinRoot = input => {
   const resolved = realpathLoose(input);
   return resolved === root || resolved.startsWith(root + path.sep);
 };
-const volumeKey = v => JSON.stringify([v.type || 'volume', v.source || '', v.target || '', !!v.read_only]);
+// Compare the whole mount spec, not a few fields. Compose merges mounts by
+// target, so an override entry with a managed target replaces the managed
+// mount; a key without volume.subpath/nocopy, bind.* or consistency would
+// accept a replacement that mounts the whole global auth volume.
+const volumeKey = v => JSON.stringify(stable({ ...v, type: v.type || 'volume', read_only: !!v.read_only }));
 const baselineMounts = new Map();
 for (const [serviceName, service] of Object.entries(baseServices)) {
   baselineMounts.set(serviceName, new Set((service.volumes || []).map(volumeKey)));

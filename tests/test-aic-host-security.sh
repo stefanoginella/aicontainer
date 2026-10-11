@@ -1378,6 +1378,44 @@ echo "$out" | grep -q 'trust boundary for project' \
 trust_after=$(find "$TMP/state/aicontainer" -path '*/trust/*' -type f 2>/dev/null | wc -l | tr -d ' ')
 [ "$trust_before" = "$trust_after" ] || fail "preflight wrote trust state"
 
+# Compose merges mounts by target, so an override entry with a managed target
+# replaces the whole managed mount. The validator must compare the full mount
+# spec: dropping or changing volume.subpath would otherwise expose the whole
+# global auth volume, and bind.* options on a managed project bind would pass.
+new_project "$TMP/mount-spec"
+for subpath_line in '' '          subpath: claude'; do
+  {
+    printf '%s\n' 'services:' '  devcontainer:' '    volumes:' \
+      '      - type: volume' '        source: aic-auth-global' \
+      '        target: /home/vscode/.config/aic-auth/signing'
+    if [ -n "$subpath_line" ]; then
+      printf '%s\n' '        volume:' "$subpath_line"
+    fi
+  } > "$TMP/mount-spec/.devcontainer/docker-compose.override.yml"
+  (cd "$TMP/mount-spec" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+  out=$(cd "$TMP/mount-spec" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+    "$ROOT/aic" validate </dev/null 2>&1) \
+    && fail "validate accepted a replaced aic-auth-global subpath mount (${subpath_line:-no subpath})"
+  echo "$out" | grep -q 'remounts protected volume aic-auth-global' \
+    || fail "replaced aic-auth-global subpath mount was not flagged (${subpath_line:-no subpath})"
+done
+cat > "$TMP/mount-spec/.devcontainer/docker-compose.override.yml" <<'YAML'
+services:
+  devcontainer:
+    volumes:
+      - type: bind
+        source: ../.git
+        target: /workspace/.git
+        bind:
+          propagation: rshared
+YAML
+(cd "$TMP/mount-spec" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+out=$(cd "$TMP/mount-spec" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null 2>&1) \
+  && fail "validate accepted changed bind options on the managed .git mount"
+echo "$out" | grep -q 'removes managed protection for /workspace/.git' \
+  || fail "changed bind options on the managed .git mount were not flagged"
+
 # Managed service replacement is detected after Compose merge.
 cat > "$TMP/unsafe/.devcontainer/docker-compose.override.yml" <<'YAML'
 services:

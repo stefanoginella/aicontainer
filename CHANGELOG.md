@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **An override can no longer widen a managed mount.** Validation now compares
+  each mount's full spec, so replacing a managed mount without its
+  `volume.subpath` (the whole global auth volume) or with other bind options
+  needs `aic trust`. (aic)
+
 - **Image builds now fail on a failed or changed download.** Tools are pinned
   by sha256, apt keys by fingerprint, the zsh theme and plugins by upstream
   commit, and Node must be a release signed by a pinned Node releaser key.
