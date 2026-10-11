@@ -167,6 +167,11 @@ repository.
 > arbitrary repository-supplied `.devcontainer/`. Run `aic init --force` (or
 > `aic sync` for an existing aicontainer project), inspect the resulting diff
 > and project-owned override files, then use `aic up` or reopen in VS Code.
+> Project-owned files that run code in the container (`post-create.project.sh`,
+> `shell-rc.zsh`, `p10k.zsh`, `statusline.*`, and added VS Code extensions or
+> settings in `devcontainer.json`) also need `aic trust` before any start, so
+> read them in that review. aic does not check the repository's `.vscode/`
+> folder; only VS Code Workspace Trust guards it.
 
 ### Diagnostics and review
 
@@ -569,7 +574,9 @@ set -euo pipefail
 lefthook install
 ```
 
-The base `post-create.py` runs it last, after the AI tools, git config, and volume ownership are all wired up, so your steps see a fully configured environment. Like `firewall-allowlist` and `chown-paths`, it's opt-in (run only if present), never touched by `aic sync`, and read-only inside the container — the [PreToolUse hook](#threat-model) blocks an in-container tool from editing anything under `.devcontainer/`, so the script stays host-only-editable. It's invoked via `bash <file>` (no executable bit needed), runs with no privilege the in-container agent doesn't already have, and a non-zero exit is logged as a warning during `aic up` without failing container creation — its output streams through so you can see what happened.
+The base `post-create.py` runs it last, after the AI tools, git config, and volume ownership are all wired up, so your steps see a fully configured environment. Like `firewall-allowlist` and `chown-paths`, it's opt-in (run only if present), never touched by `aic sync`, and read-only inside the container — the [PreToolUse hook](#threat-model) blocks an in-container tool from editing anything under `.devcontainer/`, so the script stays host-only-editable. It's invoked via `bash <file>` (no executable bit needed), runs as `vscode`, and a non-zero exit is logged as a warning during `aic up` without failing container creation — its output streams through so you can see what happened.
+
+> **It needs `aic trust`.** The hook runs before any agent prompt, with open network and the tool logins, and a cloned repository can supply it. So aic treats it as project code: `aic up` asks you to approve the exact file (or use `--allow-unsafe` for one run), and a direct VS Code start refuses until you run `aic trust`. Any edit asks again.
 
 ### Personal shell config
 
@@ -595,7 +602,7 @@ cp ~/.p10k.zsh ~/.config/aicontainer/p10k.zsh     # your host p10k prompt
 cp ~/.zsh_aliases ~/.config/aicontainer/rc.zsh    # or any personal rc snippet
 ```
 
-The host seed is read **read-only** by the seed sanitizer and copied verbatim; a project-owned `.devcontainer/` file wins over it when both exist. Run `aic sync` (host-side) then `aic rebuild`.
+The host seed is read **read-only** by the seed sanitizer and copied verbatim; a project-owned `.devcontainer/` file wins over it when both exist. Run `aic sync` (host-side) then `aic rebuild`. A project-owned `shell-rc.zsh` or `p10k.zsh` comes from the repository, so it needs `aic trust` like `post-create.project.sh`. Your host seed needs no approval.
 
 > ⚠️ **These files are copied verbatim — they can't be sanitized like the JSON configs.** They're shell *code*, executed inside a sandbox an autonomous agent can read. **Don't put secrets in them** (no tokens, no `export API_KEY=…`). Keep them to prompt/alias cosmetics. They run only as the unprivileged `vscode` user and, once installed, are root-locked so the agent can't modify them.
 
@@ -620,7 +627,7 @@ cp ~/.claude/statusline/statusline.mjs ~/.config/aicontainer/statusline.mjs
 aic rebuild
 ```
 
-Or per-project, as `.devcontainer/statusline.mjs` — the project file wins when both exist. Same filename in both places (unlike `rc.zsh` / `shell-rc.zsh`).
+Or per-project, as `.devcontainer/statusline.mjs` — the project file wins when both exist. Same filename in both places (unlike `rc.zsh` / `shell-rc.zsh`). A per-project script comes from the repository, so it needs `aic trust` like `post-create.project.sh`.
 
 On the next create, post-create installs the script `root:root 0444` at `/etc/aic/user-config/statusline/`, and sets Claude's `statusLine.command` to the fixed managed launcher `/usr/local/bin/aic-statusline`, which picks the interpreter from that filename. **No string from your host settings is ever executed** — only your script file crosses, and the command aic writes is its own constant.
 
@@ -734,7 +741,7 @@ ms-python.vscode-pylance
 }
 ```
 
-Run `aic sync` (host-side) then `aic rebuild`; verify with `grep ms-python .devcontainer/devcontainer.json`. Invalid extension lines (anything that isn't a `publisher.name` id) are warned about and skipped, so a stray line can't smuggle JSON into `devcontainer.json`.
+Run `aic sync` (host-side), approve the result with `aic trust`, then `aic rebuild`; verify with `grep ms-python .devcontainer/devcontainer.json`. An extension runs code in the container, and settings such as interpreter or terminal paths start programs. So every extension or setting in `devcontainer.json` beyond aic's own needs `aic trust`, also when a repository commits it there directly; a changed aic-owned setting is drift that `aic sync` repairs. A committed `.vscode/` folder is not covered: see the [threat model](#threat-model). Invalid extension lines (anything that isn't a `publisher.name` id) are warned about and skipped, so a stray line can't smuggle JSON into `devcontainer.json`.
 
 > **Conflict rule:** the merge lands your entries *before* aic's own, so on a key collision aic's default wins *inside `devcontainer.json`*. The common case (adding new keys like `python.*`) never collides. To override a key aic sets (e.g. a `terminal.integrated.*` value), use a standard workspace **`.vscode/settings.json`** — workspace settings beat devcontainer machine-scope settings, survive sync on their own, and aren't aic-managed.
 
@@ -1103,7 +1110,12 @@ there is no live unlock/update primitive.
   stack. Validation enables every Compose profile, so a profile-gated service
   cannot hide. `devcontainer.json` keys and Compose keys are allow-lists: a key
   aic does not review is a finding, not a silent pass. The generated initializer
-  repeats this gate before Compose creation. Managed drift requires `aic sync`;
+  repeats this gate before Compose creation. Project-owned code files
+  (`post-create.project.sh`, `shell-rc.zsh`, `p10k.zsh`, `statusline.*`) and VS
+  Code extensions or settings in `devcontainer.json` beyond aic's own are
+  boundary expansions too: a
+  clone supplies them, and they run before any prompt with open network and
+  the tool logins. Managed drift requires `aic sync`;
   an intentional boundary expansion needs `aic trust` or one-run
   `--allow-unsafe`, and repository edits cannot write either approval.
 
@@ -1112,8 +1124,14 @@ there is no live unlock/update primitive.
   `devcontainer.json` and executes its `initializeCommand` on the host before
   `aic initialize` can run. aic cannot prevalidate an arbitrary repo-supplied
   initializer. Generate/review the managed files first; for an untrusted clone,
-  start with `aic init --force`, inspect overrides, and prefer `aic up` for the
-  first launch.
+  start with `aic init --force`, inspect overrides and project code files, and
+  prefer `aic up` for the first launch.
+- **The repository's `.vscode/` folder**: aic validates only `.devcontainer/`.
+  A committed `.vscode/settings.json` (terminal profiles, interpreter paths) or
+  a `.vscode/tasks.json` task with `runOn: folderOpen` runs in the container
+  when VS Code opens the folder, guarded only by VS Code Workspace Trust. Read
+  it before you trust an unknown clone. Recommended extensions in
+  `.vscode/extensions.json` are not installed automatically.
 - **Host Git in a checkout that an agent changed**: only the top-level
   repository's Git control files are read-only. Treat host Git there like a
   fresh untrusted clone, because these paths still run files the agent can

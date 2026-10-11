@@ -240,6 +240,22 @@ capabilities, namespaces, devices, configs/secrets, include/extends/provider,
 lifecycle hooks, environment-file indirections, and protected managed mount
 targets. Any managed mismatch is untrustable and requires `aic sync`.
 
+Project-owned files that run code in the container need exact trust too
+(`validate_project_code_files()`): `post-create.project.sh`, `shell-rc.zsh`,
+`p10k.zsh`, and `statusline.{sh,mjs,js,py}`. A clone supplies them, and they
+run before any prompt with open egress and the tool logins, so "it runs as
+`vscode`" is not a reason to let a repository opt itself in. VS Code extensions
+and settings are judged from the merged `devcontainer.json`, not from
+`vscode-extensions` / `vscode-settings.json`, because that is what VS Code reads
+and a repository can commit it directly: an addition beyond the template is a
+trust finding (a committed `.vscode/` is out of scope; the README names it as a
+residual risk guarded only by Workspace Trust), and a changed template setting (beyond the per-shell rewrite in
+`patch_devcontainer_json()`) is managed drift. The trust hash covers the whole
+`.devcontainer/` tree, so any edit asks again. Keep the file list aligned with
+`AIC_CONTROL_FILES` and the post-create/lock-helper tables. Guarded by the
+project-code cases in `tests/test-aic-host-security.sh` and the "Bring up the
+devcontainer" step in both workflows (direct start refused, then trusted).
+
 Two rules keep the validated model equal to what Dev Containers can start:
 
 - Every validation `docker compose config` runs with `--profile '*'`. A plain
@@ -559,10 +575,12 @@ UID's `0700` tree; `vscode` itself still receives no capabilities. Guarded by
 `/workspace`, as `vscode`), so a project's `lefthook install`/`npm ci` sees a
 fully wired environment. It's the only way to extend post-create in pull
 mode, where `post-create.py` is baked into the image (`apply_template()`
-copies it only in `--build` mode). Lower-stakes than it looks: it runs
-unprivileged, and the PreToolUse hook keeps `.devcontainer/`
-host-only-editable. Non-zero exit is logged, not fatal — keep that; a flaky
-project step shouldn't block the devcontainer from coming up.
+copies it only in `--build` mode). It runs unprivileged, and the `.devcontainer/`
+mount keeps it host-only-editable, but it runs before any prompt with open
+egress and the tool logins. So it needs exact `aic trust` (see "Project identity
+and host-side validation"); in a trusted repo that is one prompt per edit.
+Non-zero exit is logged, not fatal — keep that; a flaky project step shouldn't
+block the devcontainer from coming up.
 
 **`vscode-extensions` / `vscode-settings.json`** — sync-safe per-project
 editor customization (`apply_template()` rewrites `customizations.vscode`
@@ -587,9 +605,14 @@ JSONC trailing comma is tolerated). Load-bearing, don't undo:
    escape hatch is the user's
    `.vscode/settings.json`, which beats devcontainer machine-scope settings.
    Don't reverse this precedence without updating the README and threat model.
+5. **Merged entries need exact trust.** An extension runs code in the container
+   and settings start programs, so the validator reports every extension or
+   setting beyond the template as a trust finding. The grammar checks above
+   keep the JSON well-formed; they do not make the content safe.
 
 Guarded by the "aic sync merges project-owned vscode-extensions /
-vscode-settings.json" test.
+vscode-settings.json" test and the project-code cases in
+`tests/test-aic-host-security.sh`.
 
 **Personal config overlay** (`shell-rc.zsh`, `p10k.zsh`, `statusline.*`) — lets
 the trusted human bring a familiar zsh prompt/aliases and Claude statusline into
@@ -614,7 +637,9 @@ Load-bearing, don't undo:
    once so an agent can't tamper with it (preserving the "shell startup is
    root-managed" guarantee), but its contents still execute only as `vscode`
    when sourced — the same authority the agent already has, and the same risk
-   class as the already-accepted `post-create.project.sh`. Keep the install on
+   class as `post-create.project.sh`. Like that hook, the project-owned copies
+   need exact `aic trust`; the host seed is the trusted human's own file and
+   needs none. Keep the install on
    the shared `aic-lock-user-config` path; don't add a writable-in-`$HOME` rc.
 3. **The shell overlay is zsh only.** p10k and the `source` lines live in the
    managed `.zshrc`; bash/fish keep the managed baseline unchanged. Don't source

@@ -420,6 +420,8 @@ check_devcontainer_project_name () {
 # `aic init --force` / `aic sync` run as the host user, so following one could
 # overwrite or read an arbitrary host file outside the repository.
 AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh statusline.sh statusline.mjs statusline.js statusline.py"
+# Project-owned files that run code in the container; each needs exact trust.
+AIC_PROJECT_CODE_FILES="post-create.project.sh shell-rc.zsh p10k.zsh statusline.sh statusline.mjs statusline.js statusline.py"
 
 validate_devcontainer_paths () {
   local require_dir="${1:-optional}" path name linked
@@ -1524,6 +1526,13 @@ cmd_sync () {
   if [ -f .devcontainer/vscode-settings.json ]; then
     echo "aic: merged vscode-settings.json into customizations.vscode.settings"
   fi
+  local code_file
+  for code_file in $AIC_PROJECT_CODE_FILES vscode-extensions vscode-settings.json; do
+    if [ -f ".devcontainer/$code_file" ]; then
+      echo "aic: project-owned code runs in the container: review it, then approve it once with 'aic trust' (any edit asks again)"
+      break
+    fi
+  done
   check_dockerfile_project_base "$(read_aic_version)" "$bump_base"
 }
 
@@ -1675,7 +1684,29 @@ hash_validation_inputs () {
     const h = crypto.createHash("sha256");
     const resolved = process.argv[1];
     h.update("<resolved-compose>\0");
-    if (fs.existsSync(resolved)) h.update(fs.readFileSync(resolved));
+    if (fs.existsSync(resolved)) {
+      // The managed build passes TZ: ${TZ:-UTC}. A terminal often exports TZ
+      // and a GUI-started editor does not, so hash the host value as a fixed
+      // token; a repository literal that differs from it stays in the hash.
+      const raw = fs.readFileSync(resolved, "utf8");
+      let model;
+      try { model = JSON.parse(raw); } catch (_) { model = null; }
+      if (model && model.services && typeof model.services === "object") {
+        const hostTz = process.env.TZ || "UTC";
+        let pinned = false;
+        // The x-aic-build template anchor is resolved into the model too.
+        const builds = [model["x-aic-build"]];
+        for (const service of Object.values(model.services)) builds.push(service && service.build);
+        for (const build of builds) {
+          const args = build && typeof build === "object" && build.args;
+          if (args && typeof args === "object" && args.TZ === hostTz) { args.TZ = "<host-tz>"; pinned = true; }
+        }
+        // Unchanged models keep their raw bytes, so existing approvals stay valid.
+        h.update(pinned ? JSON.stringify(model) : raw);
+      } else {
+        h.update(raw);
+      }
+    }
     h.update("\0<devcontainer-tree>\0");
     function walk(root, relative = "") {
       const full = relative ? path.join(root, relative) : root;
@@ -1732,6 +1763,27 @@ validate_managed_build_files () {
   if [ ! -d .devcontainer/hooks ] || ! diff -qr "$TEMPLATE_DIR/hooks" .devcontainer/hooks >/dev/null 2>&1; then
     printf 'MANAGED\t.devcontainer/hooks differs from the managed build template; run aic sync\n' >> "$out"
   fi
+}
+
+# Append UNSAFE findings for project-owned files that run code in the
+# container. They ride along in a cloned repository and run with no prompt:
+# post-create.project.sh at create time, the shell overlay in every zsh, and the
+# statusline on every Claude Code render. Each run has open egress and the
+# tool logins, so a repository must not opt itself in. Exact trust hashes the
+# whole .devcontainer tree, so any edit to these files asks again.
+# vscode-extensions and vscode-settings.json are judged from their merged
+# result in devcontainer.json (analyze_resolved_config), because that is what
+# VS Code reads and a repository can commit it directly.
+validate_project_code_files () {
+  local out="$1" name
+  for name in $AIC_PROJECT_CODE_FILES; do
+    [ -e ".devcontainer/$name" ] || [ -L ".devcontainer/$name" ] || continue
+    case "$name" in
+      post-create.project.sh) printf 'UNSAFE\t.devcontainer/%s runs project code on every container create\n' "$name" >> "$out" ;;
+      shell-rc.zsh|p10k.zsh) printf 'UNSAFE\t.devcontainer/%s runs project code in every zsh shell\n' "$name" >> "$out" ;;
+      *) printf 'UNSAFE\t.devcontainer/%s runs project code on every Claude Code status line render\n' "$name" >> "$out" ;;
+    esac
+  done
 }
 
 # Emit MANAGED<TAB>... for an untrustable managed-config violation and
@@ -1896,6 +1948,45 @@ const allowedContainerEnv = new Set([...Object.keys(templateEnv), 'AIC_TOOLS', '
 for (const key of Object.keys(actualEnv)) {
   if (!allowedContainerEnv.has(key)) {
     managed(`devcontainer.json contains unmanaged containerEnv.${key}; move project environment to docker-compose.override.yml and run aic sync`);
+  }
+}
+// VS Code acts on these when it attaches: an extension runs code in the
+// container, and settings (terminal profiles, interpreter and tool paths) start
+// programs. sync writes the template's values plus the project-owned
+// vscode-extensions / vscode-settings.json, but a repository can also commit the
+// result directly. So every addition is project code that needs exact trust,
+// and a changed managed value is drift.
+const templateVscode = isPlainObject(td.customizations) && isPlainObject(td.customizations.vscode)
+  ? td.customizations.vscode : {};
+const managedExtensions = new Set((Array.isArray(templateVscode.extensions) ? templateVscode.extensions : [])
+  .map(id => String(id).toLowerCase()));
+const actualVscode = isPlainObject(vscodeCustomizations) ? vscodeCustomizations : {};
+for (const id of Array.isArray(actualVscode.extensions) ? actualVscode.extensions : []) {
+  if (typeof id === 'string' && !managedExtensions.has(id.toLowerCase())) {
+    unsafe(`devcontainer.json installs VS Code extension ${id}, which runs code in the container (vscode-extensions)`);
+  }
+}
+const expectedSettings = { ...(isPlainObject(templateVscode.settings) ? templateVscode.settings : {}) };
+// Mirrors the per-shell rewrite in patch_devcontainer_json.
+if (['zsh', 'bash', 'fish'].includes(actualEnv.AIC_SHELL)) {
+  if ('terminal.integrated.defaultProfile.linux' in expectedSettings) {
+    expectedSettings['terminal.integrated.defaultProfile.linux'] = actualEnv.AIC_SHELL;
+  }
+  if ('terminal.integrated.fontFamily' in expectedSettings) {
+    expectedSettings['terminal.integrated.fontFamily'] = actualEnv.AIC_SHELL === 'zsh' ? "'MesloLGS NF', monospace" : 'monospace';
+  }
+}
+const actualSettings = isPlainObject(actualVscode.settings) ? actualVscode.settings : {};
+for (const [key, value] of Object.entries(actualSettings)) {
+  if (!Object.prototype.hasOwnProperty.call(expectedSettings, key)) {
+    unsafe(`devcontainer.json sets VS Code setting ${key}; settings can start programs in the container (vscode-settings.json)`);
+  } else if (JSON.stringify(stable(value)) !== JSON.stringify(stable(expectedSettings[key]))) {
+    managed(`devcontainer.json managed VS Code setting ${key} differs from the template; run aic sync`);
+  }
+}
+for (const key of Object.keys(expectedSettings)) {
+  if (!Object.prototype.hasOwnProperty.call(actualSettings, key)) {
+    managed(`devcontainer.json is missing managed VS Code setting ${key}; run aic sync`);
   }
 }
 
@@ -2591,6 +2682,7 @@ validate_project_security () {
     printf 'MANAGED\t%s\n' '.devcontainer/.env does not match this host runtime state; run aic sync or aic initialize' >> "$findings"
   fi
   validate_managed_build_files "$findings"
+  validate_project_code_files "$findings"
   # Startup paths create a missing commondir/config.worktree/hooks first, so
   # only a path that cannot be mounted safely is a finding here.
   git_control_path_problems | while IFS= read -r line; do
@@ -2675,7 +2767,7 @@ validate_project_security () {
     return 0
   fi
 
-  printf 'aic: resolved project configuration requests extra host access:\n' >&2
+  printf 'aic: resolved project configuration requests extra host access or runs project code:\n' >&2
   printf '%s\n%s\n' "$unsafe" "$volatile" | sed -e '/^$/d' -e 's/^UNSAFE[[:space:]]*/  ! /' \
     -e 's/^DOCKER[[:space:]]*/  ! /' -e 's/^VOLATILE[[:space:]]*/  ! /' >&2
   rm -f "$findings"
@@ -2713,6 +2805,7 @@ validate_project_security () {
     case "$reply" in
       y|Y|yes|YES)
         if [ -n "$volatile" ]; then
+          export AIC_UNSAFE_ONCE_HASH="$hash"
           echo "aic: proceeding once; persistent trust is unavailable for this build context."
         else
           store_project_trust "$hash"
@@ -3545,7 +3638,11 @@ cmd_initialize () {
   # Refresh the host-specific, gitignored socket path before either our own
   # resolved-Compose validation or the parent Dev Containers process uses it.
   write_runtime_environment_file
-  validate_project_security gate 0
+  # Never prompt here. Dev Containers can give this child a pty (VS Code ships
+  # node-pty), and a prompt in its log terminal would hang Reopen. Approval
+  # comes from `aic trust` or from the parent `aic up` (exact trust or the
+  # one-run hash).
+  validate_project_security gate 0 </dev/null
   prepare_host_seed_paths
   migrate_legacy_session_volume strict
   stop_owned_legacy_stack
@@ -4205,7 +4302,9 @@ Usage:
                        model are validated first. --allow-unsafe is a one-run
                        escape hatch for a reviewed host-access override.
   aic trust [--revoke] Review and persist approval for this project's exact
-                       unsafe host-access configuration outside the repository.
+                       host-access configuration and project code (post-create
+                       hook, shell overlay, statusline, VS Code extensions and
+                       settings) outside the repository.
                        Any relevant config change invalidates the approval.
   aic preflight        Print this project's trust boundary: what the agent can
                        read (mounts), what's blocked (.env/secrets), where
@@ -4341,7 +4440,7 @@ _aic () {
     'status:Show project configuration and runtime state'
     'validate:Validate the resolved configuration non-interactively'
     'up:Pull/build and start the devcontainer'
-    'trust:Approve this exact host-access configuration outside the repository'
+    'trust:Approve this exact host-access configuration and project code outside the repository'
     'preflight:Print this project'\''s trust boundary (mounts, secrets, network, sessions)'
     'signing:Set up sandbox commit signing (auto/byok/disable/status)'
     'shell:Open an interactive shell inside the devcontainer'
@@ -4429,7 +4528,7 @@ for cmd in aic aicontainer
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a status   -d 'Show project configuration and runtime state'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a validate -d 'Validate the resolved configuration'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a up       -d 'Start the devcontainer'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a trust    -d 'Approve exact host-access configuration'
+  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a trust    -d 'Approve exact host-access configuration and project code'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a preflight -d 'Print this project\'s trust boundary (mounts, secrets, network)'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a signing  -d 'Set up sandbox commit signing'
   complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a shell    -d 'Open the configured shell inside the devcontainer'

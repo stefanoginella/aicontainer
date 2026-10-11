@@ -1822,8 +1822,10 @@ def run_project_hook() -> None:
     mode). Opt-in by presence, mirroring chown-paths / firewall-allowlist /
     Dockerfile.project.
 
-    Runs as `vscode` with cwd /workspace and inherited env — no privilege the
-    in-container agent doesn't already have. The file lives under
+    Runs as `vscode` with cwd /workspace and inherited env, but before any
+    agent prompt, with open egress and the tool logins. So the host CLI
+    treats it as project code: `aic` refuses to start the container until the
+    exact file has `aic trust` (or a one-run `--allow-unsafe`). The file lives under
     .devcontainer/, which the PreToolUse hook blocks the in-container agent
     from writing, so it stays host-only-editable. Invoked via `bash <file>`
     so the executable bit isn't required. A non-zero exit is logged but does

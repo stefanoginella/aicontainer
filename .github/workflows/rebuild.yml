@@ -181,9 +181,45 @@ jobs:
           JSON
           cd /tmp/proj && git init -q
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build --force
-      - name: Bring up the devcontainer
+      - name: Bring up the devcontainer (project code needs exact trust first)
         working-directory: /tmp/proj
-        run: devcontainer up --workspace-folder .
+        run: |
+          # The staged shell overlay and statusline are project code from the
+          # repository. A direct start (the VS Code path) must refuse them
+          # before Compose runs, until the host approves the exact files with an
+          # interactive `aic trust`. The pty answers that prompt like a person.
+          if out=$(devcontainer up --workspace-folder . 2>&1); then
+            echo "FAIL: direct start ran untrusted project code"; exit 1
+          fi
+          echo "$out" | grep -q 'shell-rc.zsh runs project code in every zsh shell' \
+            || { echo "FAIL: direct start did not name the untrusted project code"; echo "$out"; exit 1; }
+          [ -z "$(docker ps -aq --filter label=com.docker.compose.service=devcontainer)" ] \
+            || { echo "FAIL: a refused start still created the devcontainer"; exit 1; }
+          AIC_HOME="$GITHUB_WORKSPACE" python3 -I -c '
+          import os, pty, select, sys, time
+          pid, fd = pty.fork()
+          if pid == 0:
+              os.execv(sys.argv[1], sys.argv[1:])
+          buf, sent, deadline = b"", False, time.monotonic() + 120
+          while True:
+              left = deadline - time.monotonic()
+              if left <= 0 or not select.select([fd], [], [], left)[0]:
+                  os.kill(pid, 9)
+                  sys.exit("FAIL: aic trust did not finish within 120s")
+              try:
+                  chunk = os.read(fd, 4096)
+              except OSError:
+                  break
+              if not chunk:
+                  break
+              buf += chunk
+              if not sent and b"[y/N]" in buf:
+                  os.write(fd, b"y\n")
+                  sent = True
+          sys.stdout.write(buf.decode(errors="replace"))
+          sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+          ' "$GITHUB_WORKSPACE/aic" trust
+          devcontainer up --workspace-folder .
       - name: Smoke test - personal shell overlay installs root-locked and is sourced
         working-directory: /tmp/proj
         run: |

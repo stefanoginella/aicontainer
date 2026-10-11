@@ -57,7 +57,10 @@ These files are intentionally powerful. aic-launched `up`, `rebuild`, and
 generated VS Code initializer repeats that gate after the bootstrap caveat
 above. Ordinary data mounts under `/workspace` or `/home/vscode/.cache` pass
 without a prompt. A custom image, host bind, capability, namespace, device, or
-other host-boundary expansion must be reviewed once with `aic trust`; the
+other host-boundary expansion must be reviewed once with `aic trust`. So must
+files that run code in the container: `post-create.project.sh`,
+`shell-rc.zsh`, `p10k.zsh`, `statusline.*`, and the extensions or settings
+that `vscode-extensions` / `vscode-settings.json` add to `devcontainer.json`. The
 approval is stored outside the repository and is invalidated by any relevant
 change. Use `aic up --allow-unsafe` or `aic rebuild --allow-unsafe` for a
 reviewed one-off instead. Build contexts outside `.devcontainer/` cannot be

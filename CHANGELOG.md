@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Project code from a cloned repository now needs `aic trust` before it
+  runs.** `post-create.project.sh`, `shell-rc.zsh`, `p10k.zsh`, `statusline.*`,
+  and VS Code extensions or settings in `devcontainer.json` beyond aic's own ran
+  with open network and the tool logins before any prompt. Any edit asks again.
+  (aic)
+
 - **Profile-gated Compose services no longer bypass validation.** Validation
   now resolves every Compose profile, so a service hidden behind `profiles:` is
   checked before startup. (aic)
@@ -82,6 +88,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   went on. (aic)
 
 ### Fixed
+
+- **A build-mode `aic trust` approval no longer depends on the host `TZ`.**
+  Approving in a terminal that exports `TZ`, then reopening from a GUI editor
+  without it, no longer reports the configuration as untrusted. (aic)
+
+- **VS Code Reopen no longer waits on a trust prompt.** The initializer now
+  refuses untrusted configuration and names `aic trust`. Before, it could ask
+  for approval on a terminal that nobody saw. (aic)
 
 - **Projects start again on Docker Desktop, Colima, and Rancher Desktop.**
   The managed socket mounts used the context's host path, which a daemon in a

