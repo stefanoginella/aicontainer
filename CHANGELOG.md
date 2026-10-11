@@ -153,6 +153,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Before, aic could inspect one daemon while Compose started the project on
   another. (aic)
 
+- **A package built with npm 12 now runs `aic init` and `aic sync`.** npm 12
+  leaves the template `.gitignore` out of the package, which made both commands
+  fail. The template now ships it as `gitignore`. (aic, package.json)
+
 ## [0.9.1] - 2026-10-05
 
 ### Changed

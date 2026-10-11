@@ -17,7 +17,6 @@
     "!template/**/*.py[cod]",
     "!template/**/.DS_Store",
     "!template/**/Thumbs.db",
-    "template/.gitignore",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"

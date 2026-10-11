@@ -1296,8 +1296,31 @@ jobs:
           set -euo pipefail
           package=$(node -p "require('./package.json').name")
           local_json=$(npm pack --json --dry-run)
+          # npm <= 11 prints an array with one entry; npm 12 prints an object
+          # keyed by the package name. Accept exactly those two shapes and
+          # fail on anything else, so a parse change can never compare an
+          # empty or undefined integrity.
           local_integrity=$(printf '%s' "$local_json" \
-            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)[0].integrity))')
+            | node -e '
+              let s = "";
+              process.stdin.on("data", (d) => (s += d)).on("end", () => {
+                const name = process.argv[1];
+                const j = JSON.parse(s);
+                let entry;
+                if (Array.isArray(j)) {
+                  if (j.length === 1) entry = j[0];
+                } else if (j && typeof j === "object") {
+                  const keys = Object.keys(j);
+                  if (keys.length === 1 && keys[0] === name) entry = j[name];
+                }
+                const integrity = entry && entry.name === name ? entry.integrity : undefined;
+                if (typeof integrity !== "string" || !/^sha512-[A-Za-z0-9+\/]+={0,2}$/.test(integrity)) {
+                  console.error("npm pack --json returned no sha512 integrity for " + name);
+                  process.exit(1);
+                }
+                process.stdout.write(integrity);
+              });
+            ' "$package")
 
           err=$(mktemp)
           remote_json=

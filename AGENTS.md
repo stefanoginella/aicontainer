@@ -19,7 +19,7 @@ it.
 - `template/` — copied into a project's `.devcontainer/` by `aic init`/`aic
   sync`; the source of truth for what lands in user repos.
   - `Dockerfile`, `post-create.py`, `hooks/`, `aic-firewall`,
-    `aic-chown-volumes`, `aic-lock-user-config`, `.zshrc`, `.gitignore`
+    `aic-chown-volumes`, `aic-lock-user-config`, `.zshrc`, `gitignore`
   - `hooks/`: the shared guardrail `pre-tool-use.sh`, the thin OpenCode adapter
     `opencode-guardrail.js`, and the opt-in metadata-only Claude/Codex lifecycle
     relay `agent-status.py` — all copied root-owned to `/etc/aic/hooks/`.
@@ -28,7 +28,13 @@ it.
   - `README.md` — copied into every project's `.devcontainer/` in **both**
     modes; a managed guide to the do-not-edit vs project-owned split. Keep its
     two lists in sync with `apply_template()` and the project-owned files.
-  - `.gitignore` — copied in both modes and contains only `.env`.
+  - `gitignore` — copied in both modes as `.devcontainer/.gitignore` and
+    contains only `.env`. It has no dot on purpose: npm 12 leaves a
+    `.gitignore` out of the package even when `files` names it, and a missing
+    managed template file makes every `aic init`/`aic sync` fail. Never put
+    a file that npm drops (`.gitignore`, `.npmignore`, `.npmrc`, …) in
+    `template/`. `tests/test-aic-package.sh` packs the repository, runs `aic
+    init`/`aic sync` from the tarball, and fails on a missing template file.
   - `.env` itself is atomically generated per host/context; it holds the
     socket, runtime user, path-free project identity, and host-owned status
     relay mode. It is a managed control file, not a template asset or
@@ -413,12 +419,12 @@ sync and do not turn diagnostics into implicit repair.
 **The selected local Docker socket is generated host state.** `aic init`,
 `aic sync`, and each generated `aic initialize` invocation resolve the active
 context's `unix://` endpoint, derive the Dev Containers runtime UID:GID, and
-atomically rewrite `.devcontainer/.env`. The managed `template/.gitignore`
-excludes that file, so rootless Docker, Docker Desktop, Colima, and OrbStack
-work without flags or machine-specific diffs. Never trust `AIC_DOCKER_SOCKET`
-from the environment or repository, accept a remote TCP/SSH endpoint, broaden
-the dotenv grammar, or remove `.env`/`.gitignore` from the control-path checks
-and template copies.
+atomically rewrite `.devcontainer/.env`. The managed `template/gitignore`
+(copied as `.devcontainer/.gitignore`) excludes that file, so rootless Docker,
+Docker Desktop, Colima, and OrbStack work without flags or machine-specific
+diffs. Never trust `AIC_DOCKER_SOCKET` from the environment or repository,
+accept a remote TCP/SSH endpoint, broaden the dotenv grammar, or remove
+`.env`/`.gitignore` from the control-path checks and template copies.
 
 `AIC_DOCKER_SOCKET` is the bind source as the **daemon** resolves it, not the
 host socket the Docker CLI talks to. A VM daemon cannot mount the context's

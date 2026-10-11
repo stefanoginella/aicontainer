@@ -1233,7 +1233,9 @@ apply_template () {
   # aic-managed (overwritten on sync) vs project-owned (survive). Steers humans
   # and AI agents away from hand-editing devcontainer.json. Itself aic-managed.
   atomic_copy_file "$src/README.md" "$dst/README.md"
-  atomic_copy_file "$src/.gitignore" "$dst/.gitignore"
+  # The template ships it without the dot: npm 12 leaves a .gitignore out of
+  # the package even when package.json "files" names it.
+  atomic_copy_file "$src/gitignore" "$dst/.gitignore"
   case "$mode" in
     pull)
       atomic_copy_file "$src/docker-compose.pull.yml" "$dst/docker-compose.yml"
@@ -1748,9 +1750,14 @@ project_trust_matches () {
 # copied wholesale by aic and execute as root while the image is built; unlike
 # project-owned Dockerfile.project, hand-editing them is unsupported.
 validate_managed_build_files () {
-  local out="$1" name
+  local out="$1" name src
   for name in README.md .gitignore; do
-    if [ ! -f "$TEMPLATE_DIR/$name" ] || ! cmp -s "$TEMPLATE_DIR/$name" ".devcontainer/$name"; then
+    # The template's gitignore has no dot (see apply_template).
+    case "$name" in
+      .gitignore) src=gitignore ;;
+      *) src="$name" ;;
+    esac
+    if [ ! -f "$TEMPLATE_DIR/$src" ] || ! cmp -s "$TEMPLATE_DIR/$src" ".devcontainer/$name"; then
       printf 'MANAGED\t.devcontainer/%s differs from the managed template; run aic sync\n' "$name" >> "$out"
     fi
   done
