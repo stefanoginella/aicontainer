@@ -405,7 +405,10 @@ cmd_enable() {
   ipt -A "$out_chain" -d 169.254.0.0/16 -j DROP
   ipt -A "$out_chain" -d 100.100.100.200/32 -j DROP
   ipt -A "$out_chain" -o lo -j ACCEPT
-  ipt -A "$out_chain" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  # Only replies to sessions that started from outside. A session the
+  # container opened before `enable` is ORIGINAL direction: it must match the
+  # allowlist like a new one, so a connection kept open earlier is cut off.
+  ipt -A "$out_chain" -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j ACCEPT
   # DNS to the configured resolvers stays open so curl/dig keep working.
   local resolver
   for resolver in "${resolvers[@]}"; do
@@ -453,12 +456,12 @@ cmd_enable() {
     fi
 
     # Fail closed for IPv6 rather than letting AAAA/direct-address traffic
-    # bypass the IPv4 allowlist. Loopback and established replies remain usable.
+    # bypass the IPv4 allowlist. Loopback and replies to inbound sessions remain usable.
     prepare_chain_v6 "$out6_chain"
     ip6t -A "$out6_chain" -d fe80::/10 -j DROP
     ip6t -A "$out6_chain" -d fd00:ec2::254/128 -j DROP
     ip6t -A "$out6_chain" -o lo -j ACCEPT
-    ip6t -A "$out6_chain" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    ip6t -A "$out6_chain" -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j ACCEPT
     ip6t -A "$out6_chain" -j DROP
 
     prepare_chain_v6 "$in6_chain"

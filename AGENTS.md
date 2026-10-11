@@ -1098,6 +1098,13 @@ Review any change to these files for security regressions:
   chain, set policy ACCEPT, or silently ignore unfilterable configured IPv6.
   The host status relay uses its own ipset and exact TCP-8787 rule; never put
   `host.docker.internal` in the general all-port allowlist.
+  The OUTPUT chains accept `ESTABLISHED,RELATED` only with `--ctdir REPLY`
+  (replies to sessions that started from outside). A blanket accept keeps an
+  outbound session alive that the container opened before `enable`, to a host
+  that is off the list. Guarded by the static check in
+  `tests/test-aic-host-security.sh` and the "allowlist enable cuts a connection
+  opened before it" smoke (throwaway containers, because `enable` cannot be
+  undone in a running one).
 - `template/hooks/pre-tool-use.sh` — blocks reads of `.env` and other
   sensitive paths. Loosening the matchers (`is_blocked_env`,
   `bash_touches_env`, `is_curl_pipe_sh`, `is_protected_path`, or the

@@ -2457,4 +2457,14 @@ case "$signing_probe" in
   *DAC_OVERRIDE*) fail "signing_state read-only probe must not gain a write bypass" ;;
 esac
 
+# aic-firewall OUTPUT chains may accept ESTABLISHED/RELATED only as replies
+# (--ctdir REPLY). A blanket accept lets an outbound session that the container
+# opened before `enable` keep running to a host that is not on the allowlist.
+fw_established=$(grep -E '(ipt|ip6t) -A "\$out6?_chain" .*ctstate' "$ROOT/template/aic-firewall" || true)
+[ "$(printf '%s\n' "$fw_established" | grep -c .)" = 2 ] \
+  || fail "aic-firewall must have exactly one IPv4 and one IPv6 OUTPUT conntrack accept"
+if printf '%s\n' "$fw_established" | grep -vqF -- '--ctdir REPLY'; then
+  fail "aic-firewall OUTPUT accepts ESTABLISHED,RELATED without --ctdir REPLY"
+fi
+
 echo "OK: host CLI symlink, merge, provenance, naming, and fail-closed checks passed"

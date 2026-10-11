@@ -460,6 +460,54 @@ jobs:
               echo "OK: IPv4 metadata/link-local egress is dropped; IPv6 is not configured"
             fi
           '
+      - name: Smoke test - allowlist enable cuts a connection opened before it
+        working-directory: /tmp/proj
+        run: |
+          # `enable` cannot be undone in a running container, so this uses
+          # throwaway containers from the image under test, on a user-defined
+          # network (conntrack only tracks sessions there, as in the real
+          # stack). A session that the firewalled container opened to a host
+          # that is not on the allowlist must stop passing once `enable` ran.
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer | head -n1)
+          [ -n "$cid" ] || { echo "FAIL: no devcontainer to take the image from"; exit 1; }
+          img=$(docker inspect -f '{{.Config.Image}}' "$cid")
+          net=aic-fw-smoke
+          cleanup() {
+            docker rm -f aic-fw-smoke-srv >/dev/null 2>&1 || true
+            docker network rm "$net" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker network create "$net" >/dev/null
+          # The alias lets `enable` find a socket-proxy address; that address is
+          # allowed on TCP 2375 only, so port 9000 below is not on the allowlist.
+          docker run -d --rm --name aic-fw-smoke-srv --network "$net" \
+            --network-alias socket-proxy --entrypoint /usr/bin/python3 "$img" -I -c '
+          import socketserver
+          class H(socketserver.StreamRequestHandler):
+              def handle(self):
+                  for _ in self.rfile:
+                      self.wfile.write(b"pong\n"); self.wfile.flush()
+          socketserver.ThreadingTCPServer.allow_reuse_address = True
+          socketserver.ThreadingTCPServer(("0.0.0.0", 9000), H).serve_forever()
+          ' >/dev/null
+          docker run --rm --network "$net" --cap-add NET_ADMIN --user root \
+            --entrypoint /bin/bash "$img" -c '
+            for _ in $(seq 40); do
+              (: </dev/tcp/aic-fw-smoke-srv/9000) 2>/dev/null && break
+              sleep 0.5
+            done
+            exec 3<>/dev/tcp/aic-fw-smoke-srv/9000 || { echo "FAIL: cannot reach the test server"; exit 1; }
+            echo ping >&3; x=; read -r -t 5 x <&3 || true
+            [ "$x" = pong ] || { echo "FAIL: no reply before enable"; exit 1; }
+            /usr/local/bin/aic-firewall enable >/tmp/enable.log 2>&1 \
+              || { echo "FAIL: aic-firewall enable failed"; cat /tmp/enable.log; exit 1; }
+            echo ping >&3; x=; read -r -t 5 x <&3 || true
+            [ -z "$x" ] || { echo "FAIL: a session opened before enable still passes"; exit 1; }
+            if timeout 6 bash -c "exec 5<>/dev/tcp/aic-fw-smoke-srv/9000 && echo ping >&5 && read -r -t 4 y <&5 && [ \"\$y\" = pong ]" 2>/dev/null; then
+              echo "FAIL: a new connection to a host off the allowlist passes"; exit 1
+            fi
+            echo "OK: enable cut the earlier session and blocks new off-list connections"
+          '
       - name: Smoke test - npm quarantine window is sane (npx-based MCPs installable)
         working-directory: /tmp/proj
         run: |

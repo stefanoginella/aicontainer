@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`aic-firewall enable` now cuts connections opened before it.** An outbound
+  session started earlier to a host off the allowlist kept running. Replies to
+  sessions that started from outside still pass. (aic-firewall)
+
 - **Deleting a host overlay file now removes it from the sandbox.** A
   `~/.config/aicontainer/` `rc.zsh`, `p10k.zsh`, or `statusline.*` that you
   delete, empty, or that is rejected no longer stays installed after
