@@ -186,6 +186,17 @@ silently skipping it would also skip managed validation, seed preparation,
 project migration, and safe volume bootstrap. `initialize` performs all of
 those fail-closed tasks, then calls the still-best-effort drift warning.
 
+A candidate is capable when `aic __supports initialize` exits 0. Never go back
+to reading the file alone: a Volta shim is a binary and an asdf/mise shim is a
+wrapper, so neither contains the CLI's text. The probe is internal (not in help
+or completions), prints nothing, makes no Docker or network call, writes no
+file, and accepts only that exact capability name; an older CLI treats it as an
+unknown command and fails it. A `grep` for `initialize)` stays as the second
+check, so a plain-script CLI that has `initialize` but predates the probe is
+not reported as "too old". Guarded by the initializer cases (nvm, fnm, Volta,
+asdf, mise, pre-probe CLI; `/bin/sh`, and dash when installed) in
+`tests/test-aic-host-security.sh`.
+
 Load-bearing bootstrap limit: Dev Containers must parse the repository's
 `devcontainer.json` and execute its host-side `initializeCommand` before the
 managed `aic initialize` code can validate that file. The initializer is

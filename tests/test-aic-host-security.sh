@@ -39,41 +39,70 @@ for shell in bash zsh fish; do
   fi
 done
 
+# `aic __supports initialize` is the internal capability probe that the
+# generated initializer runs. It must be silent and exact: exit 0 only for the
+# one capability name, nonzero for anything else, with no output.
+probe_home="$TMP/probe-home"
+mkdir -p "$probe_home"
+probe_run() {
+  (cd "$probe_home" && HOME="$probe_home" XDG_STATE_HOME="$probe_home/state" \
+    XDG_CACHE_HOME="$probe_home/cache" AIC_NO_UPDATE_CHECK=1 \
+    "$ROOT/aic" __supports "$@" 2>&1)
+}
+out=$(probe_run initialize) || fail "aic __supports initialize exited nonzero"
+[ -z "$out" ] || fail "aic __supports initialize printed output: $out"
+for probe_args in bogus "" "initialize extra" Initialize check-drift; do
+  # shellcheck disable=SC2086 # word splitting builds each argv on purpose
+  if out=$(probe_run $probe_args); then
+    fail "aic __supports accepted an unknown capability: '$probe_args'"
+  fi
+  [ -z "$out" ] || fail "aic __supports '$probe_args' printed output: $out"
+done
+[ -z "$(ls -A "$probe_home")" ] || fail "aic __supports wrote files"
+printf '%s\n' "$help" | grep -q '__supports' \
+  && fail "help lists the internal __supports probe"
+for shell in bash zsh fish; do
+  "$ROOT/aic" completion "$shell" | grep -q '__supports' \
+    && fail "$shell completion lists the internal __supports probe"
+done
+
 # GUI-launched editors often have a trimmed PATH, so initializeCommand scans
-# common Node-manager installs. It must skip an old/incompatible aic and choose
-# the last supported nvm/fnm fallback rather than stopping at the first match
-# glob match. Execute the actual JSON-encoded command with fixed system paths
-# redirected to this isolated fixture so a developer's own global install
-# cannot influence the result.
-initializer_home="$TMP/initializer-home"
+# common install paths and Node-manager shims. It must skip an old or
+# incompatible aic and choose the last supported nvm/fnm fallback rather than
+# stopping at the first glob match. A Volta shim is a binary and an asdf/mise
+# shim is a wrapper script, so neither contains the CLI's text: the initializer
+# must ask the candidate (`__supports initialize`) instead of reading it.
+# Execute the actual JSON-encoded command with fixed system paths redirected to
+# each isolated fixture home so a developer's own global install cannot
+# influence the result.
 initializer_bin="$TMP/initializer-bin"
 initializer_log="$TMP/initializer.log"
-mkdir -p "$initializer_home/.nvm/versions/node/v18.20.0/bin" \
-  "$initializer_home/.nvm/versions/node/v22.22.0/bin" "$initializer_bin"
-cat > "$initializer_bin/aic" <<'SH'
+mkdir -p "$initializer_bin"
+# An old CLI: no `initialize` command and no probe. Unknown commands print help
+# and exit 1, as released aic versions do.
+write_old_aic() {
+  cat > "$1" <<'SH'
 #!/bin/sh
 case "${1:-}" in
   version) echo "aic v0.4.0" ;;
-  *) exit 1 ;;
+  *) echo "usage: aic <command>"; exit 1 ;;
 esac
 SH
-cat > "$initializer_home/.nvm/versions/node/v18.20.0/bin/aic" <<'SH'
+  chmod +x "$1"
+}
+# A current CLI: answers the probe and logs its tag when `initialize` runs.
+write_new_aic() {
+  cat > "$1" <<SH
 #!/bin/sh
-case "${1:-}" in
-  initialize) printf '%s\n' v18 >> "$AIC_INITIALIZER_TEST_LOG" ;;
-  *) exit 1 ;;
+case "\${1:-}" in
+  __supports) [ "\$#" -eq 2 ] && [ "\$2" = initialize ] ;;
+  initialize) printf '%s\n' '$2' >> "\$AIC_INITIALIZER_TEST_LOG" ;;
+  *) echo "usage: aic <command>"; exit 1 ;;
 esac
 SH
-cat > "$initializer_home/.nvm/versions/node/v22.22.0/bin/aic" <<'SH'
-#!/bin/sh
-case "${1:-}" in
-  initialize) printf '%s\n' v22 >> "$AIC_INITIALIZER_TEST_LOG" ;;
-  *) exit 1 ;;
-esac
-SH
-chmod +x "$initializer_bin/aic" \
-  "$initializer_home/.nvm/versions/node/v18.20.0/bin/aic" \
-  "$initializer_home/.nvm/versions/node/v22.22.0/bin/aic"
+  chmod +x "$1"
+}
+write_old_aic "$initializer_bin/aic"
 initializer_cmd=$(node -e '
   const fs = require("fs");
   const source = fs.readFileSync(process.argv[1], "utf8");
@@ -85,25 +114,135 @@ initializer_cmd=$(node -e '
     command = command.split(candidate).join(missing + candidate.replaceAll("/", "_"));
   }
   process.stdout.write(command);
-' "$ROOT/template/devcontainer.json" "$initializer_home")
-: > "$initializer_log"
-HOME="$initializer_home" PATH="$initializer_bin:/usr/bin:/bin" \
-  AIC_INITIALIZER_TEST_LOG="$initializer_log" /bin/sh -c "$initializer_cmd"
-[ "$(cat "$initializer_log")" = "v22" ] \
-  || fail "initializeCommand did not skip the old PATH CLI and scan every supported nvm fallback"
+' "$ROOT/template/devcontainer.json" "$TMP")
+# run_initializer HOME: run the extracted command with the old CLI first on
+# PATH; sets initializer_out and initializer_rc, and resets the log. When dash
+# is installed, the command must behave the same there as under /bin/sh.
+initializer_dash=$(command -v dash 2>/dev/null || true)
+run_initializer() {
+  local dash_out dash_rc dash_log
+  if [ -n "$initializer_dash" ]; then
+    : > "$initializer_log"
+    set +e
+    dash_out=$(HOME="$1" PATH="$initializer_bin:/usr/bin:/bin" \
+      AIC_INITIALIZER_TEST_LOG="$initializer_log" "$initializer_dash" -c "$initializer_cmd" 2>&1)
+    dash_rc=$?
+    set -e
+    dash_log=$(cat "$initializer_log")
+  fi
+  : > "$initializer_log"
+  set +e
+  initializer_out=$(HOME="$1" PATH="$initializer_bin:/usr/bin:/bin" \
+    AIC_INITIALIZER_TEST_LOG="$initializer_log" /bin/sh -c "$initializer_cmd" 2>&1)
+  initializer_rc=$?
+  set -e
+  if [ -n "$initializer_dash" ]; then
+    [ "$dash_rc" = "$initializer_rc" ] && [ "$dash_out" = "$initializer_out" ] \
+      && [ "$dash_log" = "$(cat "$initializer_log")" ] \
+      || fail "initializeCommand behaves differently under dash for $1"
+  fi
+}
+expect_initializer_selects() {
+  run_initializer "$1"
+  [ "$initializer_rc" -eq 0 ] \
+    || fail "initializeCommand did not start $2 (rc=$initializer_rc): $initializer_out"
+  [ "$(cat "$initializer_log")" = "$2" ] \
+    || fail "initializeCommand ran '$(cat "$initializer_log")' instead of $2"
+}
+expect_initializer_too_old() {
+  run_initializer "$1"
+  [ "$initializer_rc" -ne 0 ] || fail "initializeCommand accepted an incompatible host CLI ($2)"
+  [ ! -s "$initializer_log" ] || fail "initializeCommand ran initialize on an incompatible host CLI ($2)"
+  echo "$initializer_out" | grep -q 'installed host CLI is too old' \
+    || fail "initializeCommand omitted the actionable incompatible-CLI diagnosis ($2)"
+  echo "$initializer_out" | grep -q 'npm update -g aicontainer' \
+    || fail "initializeCommand omitted the CLI upgrade command ($2)"
+}
 
-chmod -x "$initializer_home/.nvm/versions/node/v18.20.0/bin/aic" \
-  "$initializer_home/.nvm/versions/node/v22.22.0/bin/aic"
-set +e
-out=$(HOME="$initializer_home" PATH="$initializer_bin:/usr/bin:/bin" \
-  AIC_INITIALIZER_TEST_LOG="$initializer_log" /bin/sh -c "$initializer_cmd" 2>&1)
-initializer_rc=$?
-set -e
-[ "$initializer_rc" -ne 0 ] || fail "initializeCommand accepted an incompatible host CLI"
-echo "$out" | grep -q 'installed host CLI is too old' \
-  || fail "initializeCommand omitted the actionable incompatible-CLI diagnosis"
-echo "$out" | grep -q 'npm update -g aicontainer' \
-  || fail "initializeCommand omitted the CLI upgrade command"
+# nvm: skip the old PATH CLI and scan every supported glob fallback.
+nvm_home="$TMP/launcher-nvm"
+mkdir -p "$nvm_home/.nvm/versions/node/v18.20.0/bin" \
+  "$nvm_home/.nvm/versions/node/v22.22.0/bin"
+write_new_aic "$nvm_home/.nvm/versions/node/v18.20.0/bin/aic" v18
+write_new_aic "$nvm_home/.nvm/versions/node/v22.22.0/bin/aic" v22
+expect_initializer_selects "$nvm_home" v22
+
+# fnm uses the same glob fallback.
+fnm_home="$TMP/launcher-fnm"
+mkdir -p "$fnm_home/.local/share/fnm/node-versions/v22.22.0/installation/bin"
+write_new_aic "$fnm_home/.local/share/fnm/node-versions/v22.22.0/installation/bin/aic" fnm
+expect_initializer_selects "$fnm_home" fnm
+
+# Volta: ~/.volta/bin/aic is a symlink to one shim that dispatches by the name
+# it was called with. The shim text never contains the CLI's commands. The
+# probe must also beat a later supported nvm fallback.
+volta_home="$TMP/launcher-volta"
+volta_package="$volta_home/.volta/tools/image/packages/aicontainer/bin"
+mkdir -p "$volta_home/.volta/bin" "$volta_package" \
+  "$volta_home/.nvm/versions/node/v22.22.0/bin"
+write_new_aic "$volta_package/aic" volta
+write_new_aic "$volta_home/.nvm/versions/node/v22.22.0/bin/aic" nvm
+cat > "$volta_home/.volta/bin/volta-shim" <<SH
+#!/bin/sh
+tool=\$(basename "\$0")
+exec "$volta_package/\$tool" "\$@"
+SH
+chmod +x "$volta_home/.volta/bin/volta-shim"
+ln -s volta-shim "$volta_home/.volta/bin/aic"
+grep -Eq 'initialize' "$volta_home/.volta/bin/aic" \
+  && fail "Volta shim fixture must not contain the CLI's command text"
+expect_initializer_selects "$volta_home" volta
+
+# The same shim in front of an old CLI fails closed with the upgrade hint.
+write_old_aic "$volta_package/aic"
+rm -rf "$volta_home/.nvm"
+expect_initializer_too_old "$volta_home" "old CLI behind a Volta shim"
+
+# asdf: ~/.asdf/shims/aic is a wrapper script that execs the real tool.
+asdf_home="$TMP/launcher-asdf"
+asdf_install="$asdf_home/.asdf/installs/nodejs/22.22.0/bin"
+mkdir -p "$asdf_home/.asdf/shims" "$asdf_install"
+write_new_aic "$asdf_install/aic" asdf
+cat > "$asdf_home/.asdf/shims/aic" <<SH
+#!/bin/sh
+# asdf-plugin: nodejs 22.22.0
+exec "$asdf_install/aic" "\$@"
+SH
+chmod +x "$asdf_home/.asdf/shims/aic"
+grep -Eq 'initialize' "$asdf_home/.asdf/shims/aic" \
+  && fail "asdf shim fixture must not contain the CLI's command text"
+expect_initializer_selects "$asdf_home" asdf
+
+# mise: same wrapper shape under ~/.local/share/mise/shims.
+mise_home="$TMP/launcher-mise"
+mise_install="$mise_home/.local/share/mise/installs/node/22.22.0/bin"
+mkdir -p "$mise_home/.local/share/mise/shims" "$mise_install"
+write_new_aic "$mise_install/aic" mise
+cat > "$mise_home/.local/share/mise/shims/aic" <<SH
+#!/bin/sh
+exec "$mise_install/aic" "\$@"
+SH
+chmod +x "$mise_home/.local/share/mise/shims/aic"
+expect_initializer_selects "$mise_home" mise
+
+# A plain-script CLI that has `initialize` but predates the probe is still
+# capable: the grep fallback accepts it instead of a false "too old".
+legacy_home="$TMP/launcher-legacy"
+mkdir -p "$legacy_home/.aicontainer"
+cat > "$legacy_home/.aicontainer/aic" <<'SH'
+#!/bin/sh
+case "${1:-}" in
+  initialize) printf '%s\n' legacy >> "$AIC_INITIALIZER_TEST_LOG" ;;
+  *) echo "usage: aic <command>"; exit 1 ;;
+esac
+SH
+chmod +x "$legacy_home/.aicontainer/aic"
+expect_initializer_selects "$legacy_home" legacy
+
+# Only incompatible CLIs: the nvm fallbacks are not executable.
+chmod -x "$nvm_home/.nvm/versions/node/v18.20.0/bin/aic" \
+  "$nvm_home/.nvm/versions/node/v22.22.0/bin/aic"
+expect_initializer_too_old "$nvm_home" "old PATH CLI only"
 
 new_project() {
   local dir="$1"

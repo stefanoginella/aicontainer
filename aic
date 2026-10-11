@@ -3689,6 +3689,21 @@ cmd_check_drift () {
   fi
 }
 
+# Internal capability probe for the generated initializeCommand. A Node-manager
+# shim hides the CLI text (Volta's shim is a binary; asdf/mise shims are
+# wrappers that exec the real tool), so the initializer runs the candidate with
+# `__supports initialize` instead of reading it. Keep this cheap and free of
+# side effects: no output, no Docker, no network, no file writes. Exit 0 only
+# for one exact, known capability name. Older CLIs treat the name as an
+# unknown command and exit nonzero, so the probe fails closed.
+cmd_supports () {
+  [ "$#" -eq 1 ] || return 1
+  case "$1" in
+    initialize) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Internal managed initialize entry point for VS Code / devcontainer CLI. Once
 # the generated initializer is invoked, it applies the same fail-closed gate
 # and migration as `aic up` before Compose starts. Dev Containers necessarily
@@ -4663,6 +4678,7 @@ case "${1:-help}" in
   preflight) shift; cmd_preflight "$@" ;;
   check-drift) cmd_check_drift ;;   # internal: VS Code initializeCommand hook
   initialize) cmd_initialize ;;     # internal: trusted host initialize hook
+  __supports) shift; cmd_supports "$@" ;;  # internal: initializer capability probe
   signing) shift; cmd_signing "$@" ;;
   shell)   shift; cmd_shell "$@" ;;
   run)     shift; cmd_run "$@" ;;

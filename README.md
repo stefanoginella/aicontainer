@@ -246,8 +246,9 @@ The generated initializer runs the same host validation and volume migration as
 `aic up`, sanitizes the host preference seeds in a networkless one-shot service,
 brings up the devcontainer and socket-proxy, and drops you into an integrated
 terminal. `claude`, `codex`, and `opencode` are available immediately. The host
-`aic` CLI is required; the initializer checks common npm/Node-manager paths and
-prints one install command if a GUI-launched editor cannot find it. Step 2 is
+`aic` CLI is required; the initializer checks common npm/Node-manager paths
+(including nvm, fnm, Volta, asdf, and mise shims) and prints one install
+command if a GUI-launched editor cannot find it. Step 2 is
 the host-control-plane boundary: do not directly reopen a devcontainer supplied
 by an untrusted repository before aic has replaced and you have reviewed it.
 
