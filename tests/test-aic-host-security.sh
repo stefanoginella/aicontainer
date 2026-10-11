@@ -1664,6 +1664,9 @@ log_call() {
 }
 if [ "$tool" = docker ]; then
   if [ "${1:-}" = compose ]; then
+    # Read-only queries: validation reads the Compose version, then resolves
+    # the model. Anything else is logged as an execution below.
+    [ "${2:-}" = version ] && exec "$AIC_REAL_DOCKER" "$@"
     for arg in "$@"; do
       if [ "$arg" = config ]; then exec "$AIC_REAL_DOCKER" "$@"; fi
     done

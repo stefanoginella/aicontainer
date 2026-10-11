@@ -327,6 +327,14 @@ capabilities, namespaces, devices, configs/secrets, include/extends/provider,
 lifecycle hooks, environment-file indirections, and protected managed mount
 targets. Any managed mismatch is untrustable and requires `aic sync`.
 
+The gate needs Compose 2.35+ (`config --no-env-resolution`;
+`AIC_MIN_COMPOSE_VERSION`, shared with `doctor`). An older Compose is one
+COMPOSE finding with an upgrade hint, never the `aic sync` hint, and it still
+fails closed. `validation_compose_config()` captures Compose stderr only to
+detect an "unknown flag" error; never print that stderr, because it can hold
+resolved host values. Guarded by the Compose-minimum cases in
+`tests/test-aic-docker-runtime.sh`.
+
 Project-owned files that run code in the container need exact trust too
 (`validate_project_code_files()`): `post-create.project.sh`, `shell-rc.zsh`,
 `p10k.zsh`, and `statusline.{sh,mjs,js,py}`. A clone supplies them, and they
@@ -380,8 +388,9 @@ them when the model changes.
 
 **Diagnostics stay read-only.** `aic doctor` checks host versions, the selected
 local Unix-socket Docker context and its runtime/bind source (warning on an
-unrecognized macOS VM), Compose subpath schema support (stdin-only
-parse; no probe volume), Dev Container CLI, conventional Git-root shape,
+unrecognized macOS VM), Compose 2.35+ with subpath schema and `config
+--no-env-resolution --no-interpolate` support (stdin-only parses; no probe
+volume), Dev Container CLI, conventional Git-root shape,
 install completeness, control-path types, project identity, and the
 Dev Containers project-name source. Warnings exit 0; blockers exit nonzero. `aic status` reports identity/mode/
 tools/shell/Docker consent/status-relay mode/socket bind source/image/runtime, credential-bridge

@@ -47,7 +47,8 @@ one most worth your attention.
 
 ## Prerequisites
 
-- Docker Engine 25+ with Compose 2.24+ (volume-subpath support): [Docker
+- Docker Engine 25+ (volume-subpath support) with Compose 2.35+ (validation
+  uses `config --no-env-resolution`): [Docker
   Desktop](https://docker.com/products/docker-desktop),
   [OrbStack](https://orbstack.dev/), or
   [Colima](https://github.com/abiosoft/colima), [Rancher
@@ -184,8 +185,10 @@ aic status     # identity, modes, runtime, credential bridge, and volumes
 aic validate   # managed provenance + fully resolved Compose security model
 ```
 
-`doctor` can run before `init`; it checks Node 18+, Docker Engine 25+ and
-Compose 2.24+ (needed for volume subpaths), the selected local Unix socket,
+`doctor` can run before `init`; it checks Node 18+, Docker Engine 25+ (needed
+for volume subpaths), Compose 2.35+ (validation needs `config
+--no-env-resolution`; some distro `docker-compose-v2` packages are older), the
+selected local Unix socket,
 the Dev Container CLI, Git/project-root shape, install integrity,
 control-path safety (including `.git` and its control files), and whether a
 direct editor start would use the managed Compose project name. Warnings

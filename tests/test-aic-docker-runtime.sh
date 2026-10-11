@@ -29,9 +29,32 @@ mkdir -p "$fakebin" "$linuxbin" "$darwinbin"
 # asks another daemon fails the expectation. AIC_FAKE_INFO_MODE=starts answers
 # only from the second query on (a daemon that starts during the command);
 # AIC_FAKE_INFO_MODE=null prints the empty template and exits 0.
+# AIC_FAKE_COMPOSE_VERSION makes `docker compose` answer as that version (unset:
+# no Compose). AIC_FAKE_COMPOSE_FLAGS=reject makes `config` reject
+# --no-env-resolution/--no-interpolate the way Cobra does in Compose < 2.35,
+# with a fake resolved secret on stderr that aic must never print.
 cat > "$fakebin/docker" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$AIC_FAKE_LOG"
+if [ "${1:-}" = compose ]; then
+  [ -n "${AIC_FAKE_COMPOSE_VERSION:-}" ] || exit 1
+  [ "${2:-}" = version ] && { printf '%s\n' "$AIC_FAKE_COMPOSE_VERSION"; exit 0; }
+  for arg in "$@"; do
+    case "$arg" in
+      --no-env-resolution|--no-interpolate)
+        if [ "${AIC_FAKE_COMPOSE_FLAGS:-}" = reject ]; then
+          echo "environment: AIC_FAKE_SECRET=fake-resolved-secret" >&2
+          echo "unknown flag: $arg" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  done
+  case " $* " in
+    *" config "*) printf '{"name":"aic-doctor","subpath":"child"}\n'; exit 0 ;;
+  esac
+  exit 1
+fi
 case "${1:-} ${2:-}" in
   "context show") echo default; exit 0 ;;
   "context inspect") printf '%s\n' "${AIC_FAKE_CONTEXT_ENDPOINT:-$AIC_FAKE_ENDPOINT}"; exit 0 ;;
@@ -230,5 +253,74 @@ out=$(cd "$project" && PATH="$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$socket" 
   AIC_FAKE_INFO="Docker Desktop|docker-desktop|$rootful" "$ROOT/aic" status 2>&1)
 printf '%s\n' "$out" | grep -Fq "socket $socket (docker-desktop; mounts bind /var/run/docker.sock)" \
   || fail "status did not report the Docker Desktop bind source: $out"
+
+# Validation needs `config --no-env-resolution` (Compose 2.35+). An older
+# Compose must fail doctor and fail validation with an upgrade hint, not the
+# 'aic sync' hint, which cannot fix the host's Compose.
+desktop_info="Docker Desktop|docker-desktop|$rootful"
+run_aic() {
+  (cd "$project" && PATH="$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$socket" \
+    AIC_FAKE_INFO="$desktop_info" "$ROOT/aic" "$@" </dev/null 2>&1)
+}
+for good in 2.35.0 v2.40.3 5.1.2; do
+  out=$(AIC_FAKE_COMPOSE_VERSION="$good" run_aic doctor || true)
+  printf '%s\n' "$out" | grep -q "^OK    Docker Compose ${good#v} (minimum 2.35)$" \
+    || fail "doctor rejected Compose $good: $out"
+  printf '%s\n' "$out" | grep -q '^OK    Compose accepts config --no-env-resolution --no-interpolate' \
+    || fail "doctor did not probe config --no-env-resolution on Compose $good: $out"
+  printf '%s\n' "$out" | grep -q '^FAIL  .*Compose' && fail "doctor failed a Compose check on $good: $out"
+done
+
+: > "$AIC_FAKE_LOG"
+doctor_rc=0
+out=$(AIC_FAKE_COMPOSE_VERSION=2.29.7 AIC_FAKE_COMPOSE_FLAGS=reject run_aic doctor) || doctor_rc=$?
+[ "$doctor_rc" -ne 0 ] || fail "doctor exited zero with Compose 2.29.7: $out"
+printf '%s\n' "$out" | grep -q '^FAIL  Docker Compose 2.29.7 is too old — install the Compose plugin 2.35+' \
+  || fail "doctor did not fail Compose 2.29.7: $out"
+printf '%s\n' "$out" | grep -q '^FAIL  Compose rejects config --no-env-resolution' \
+  || fail "doctor did not report the missing config flag: $out"
+printf '%s\n' "$out" | grep -q '^Result: ready' && fail "doctor reported ready with Compose 2.29.7: $out"
+grep -q -- '^compose -f - config .*--no-env-resolution' "$AIC_FAKE_LOG" \
+  || fail "doctor did not probe the flag with a stdin-only config"
+grep -- '^compose ' "$AIC_FAKE_LOG" | grep -v -e '^compose -f - config ' -e '^compose version --short$' \
+  | grep -q . && fail "doctor ran a Compose command that is not a stdin-only parse"
+printf '%s\n' "$out" | grep -q 'fake-resolved-secret' && fail "doctor printed Compose stderr: $out"
+
+# Too old by version: one finding, no Compose config call, no 'aic sync' hint.
+: > "$AIC_FAKE_LOG"
+rc=0
+out=$(AIC_FAKE_COMPOSE_VERSION=2.29.7 AIC_FAKE_COMPOSE_FLAGS=reject run_aic validate) || rc=$?
+[ "$rc" -ne 0 ] || fail "validate passed with Compose 2.29.7: $out"
+printf '%s\n' "$out" | grep -Fxq '  ! Docker Compose 2.29.7 is too old; aic needs Compose 2.35+ (run aic doctor)' \
+  || fail "validate did not name the too-old Compose: $out"
+printf '%s\n' "$out" | grep -Fxq "aic: configuration cannot be validated: upgrade Docker Compose to 2.35+ (see 'aic doctor')" \
+  || fail "validate did not give the Compose upgrade hint: $out"
+printf '%s\n' "$out" | grep -q 'aic sync' && fail "validate told the user to run aic sync for an old Compose: $out"
+printf '%s\n' "$out" | grep -q 'could not be inspected' && fail "validate kept the misleading Compose findings: $out"
+grep -q -- '^compose .* config' "$AIC_FAKE_LOG" && fail "validate ran Compose config on a too-old Compose"
+[ "$(printf '%s\n' "$out" | grep -c '^  ! ')" = 1 ] || fail "validate reported more than the Compose finding: $out"
+
+# The start gate (VS Code's initializer) refuses the same way, before any
+# Docker state changes, also without the sync hint.
+: > "$AIC_FAKE_LOG"
+rc=0
+out=$(AIC_FAKE_COMPOSE_VERSION=2.29.7 AIC_FAKE_COMPOSE_FLAGS=reject run_aic initialize) || rc=$?
+[ "$rc" -ne 0 ] || fail "initialize started a configuration it could not validate: $out"
+printf '%s\n' "$out" | grep -Fxq "aic: refusing to start unverified configuration: upgrade Docker Compose to 2.35+ (see 'aic doctor')" \
+  || fail "initialize did not give the Compose upgrade hint: $out"
+printf '%s\n' "$out" | grep -q 'aic sync' && fail "initialize told the user to run aic sync for an old Compose: $out"
+grep -q -e '^volume ' -e '^run ' -e '^compose .* up' "$AIC_FAKE_LOG" \
+  && fail "initialize changed Docker state after a failed validation"
+
+# A version string that hides the age (an unstamped build): the rejected flag
+# itself is detected, and Compose's stderr is never printed.
+rc=0
+out=$(AIC_FAKE_COMPOSE_VERSION=2.35.0 AIC_FAKE_COMPOSE_FLAGS=reject run_aic validate) || rc=$?
+[ "$rc" -ne 0 ] || fail "validate passed although Compose rejected --no-env-resolution: $out"
+printf '%s\n' "$out" | grep -Fxq '  ! Docker Compose 2.35.0 rejects config --no-env-resolution/--no-interpolate; aic needs Compose 2.35+ (run aic doctor)' \
+  || fail "validate did not report the rejected Compose flag: $out"
+printf '%s\n' "$out" | grep -q 'aic sync' && fail "validate told the user to run aic sync for a rejected flag: $out"
+printf '%s\n' "$out" | grep -q 'fake-resolved-secret' && fail "validate printed Compose stderr: $out"
+printf '%s\n' "$out" | grep -q 'unknown flag' && fail "validate printed raw Compose stderr: $out"
 
 echo "docker runtime bind-source tests passed"

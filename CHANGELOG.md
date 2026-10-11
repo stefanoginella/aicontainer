@@ -119,6 +119,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A too-old Docker Compose now gets a clear upgrade message.** aic needs
+  Compose 2.35+; `aic doctor` accepted 2.24+, and validation then failed with
+  an `aic sync` hint that could not help. (aic)
+
 - **Personal `rc.zsh` aliases now win over oh-my-zsh, as documented.** The
   image loaded oh-my-zsh after the personal overlay, so its aliases replaced
   yours. (.zshrc)
