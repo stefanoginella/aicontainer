@@ -171,6 +171,24 @@ for workflow in "$ROOT/.github/workflows/rebuild.yml" \
   grep -Fq 'codex update' "$workflow" \
     && fail "workflow regressed to installation-method-dependent codex update"
 done
+# Publish jobs hold the npm OIDC token and GHCR package write. A tag ref lets
+# whoever moves the upstream tag run code there, so every action is pinned to
+# a full commit SHA, with the version as a comment for Renovate.
+action_pins=0
+for workflow in "$ROOT"/.github/workflows/*.yml; do
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    action_pins=$((action_pins + 1))
+    printf '%s\n' "$line" \
+      | grep -Eq '^[[:space:]]*(- )?uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40} # v[0-9]+(\.[0-9]+)*$' \
+      || fail "$(basename "$workflow") uses an action that is not pinned to a commit SHA: $line"
+  done <<EOF
+$(grep -E '^[[:space:]]*(- )?uses:' "$workflow" | grep -Ev 'uses: \./' || true)
+EOF
+done
+[ "$action_pins" -gt 0 ] || fail "action-pin check found no workflow actions"
+grep -Fq '"helpers:pinGitHubActionDigests"' "$ROOT/renovate.json" \
+  || fail "Renovate does not keep GitHub Action digests pinned"
 grep -Fq '"CODEX_NON_INTERACTIVE": "1"' "$ROOT/template/post-create.py" \
   || fail "runtime Codex refresh is not noninteractive"
 grep -Fq 'CODEX_INSTALLER_URL = "https://chatgpt.com/codex/install.sh"' \

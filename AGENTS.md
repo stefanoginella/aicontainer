@@ -942,7 +942,11 @@ Review any change to these files for security regressions:
 - `.github/workflows/*.yml` — GHCR uses job-scoped `GITHUB_TOKEN` package
   permission; npm uses OIDC trusted publishing + provenance, not a long-lived
   npm token. Publishing jobs run only on push/schedule/dispatch, never PR;
-  checkout credentials are never persisted.
+  checkout credentials are never persisted. Every `uses:` is pinned to a full
+  commit SHA with a `# vX.Y.Z` comment, never a tag: a moved upstream tag
+  would run in a job that holds the OIDC token and package write. Renovate
+  (`helpers:pinGitHubActionDigests`) bumps SHA and comment together. Guarded
+  by the action-pin check in `tests/test-aic-host-security.sh`.
 
 ## Commit signing (`aic signing`)
 
