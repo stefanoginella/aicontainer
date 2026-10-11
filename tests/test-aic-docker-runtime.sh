@@ -258,8 +258,11 @@ printf '%s\n' "$out" | grep -Fq "socket $socket (docker-desktop; mounts bind /va
 # Compose must fail doctor and fail validation with an upgrade hint, not the
 # 'aic sync' hint, which cannot fix the host's Compose.
 desktop_info="Docker Desktop|docker-desktop|$rootful"
+# Fake the same host OS as the `aic init` that wrote .env (bind_source's
+# default). The real uname would make .env stale on a Linux runner, and that
+# extra finding would hide whether the Compose finding stands alone.
 run_aic() {
-  (cd "$project" && PATH="$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$socket" \
+  (cd "$project" && PATH="$darwinbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$socket" \
     AIC_FAKE_INFO="$desktop_info" "$ROOT/aic" "$@" </dev/null 2>&1)
 }
 for good in 2.35.0 v2.40.3 5.1.2; do
