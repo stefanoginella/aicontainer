@@ -729,21 +729,43 @@ if ! out=$(node "$TMP/check-dockerfile-downloads.js" "$ROOT/template/Dockerfile"
   fail "template/Dockerfile download-integrity self-test:
 $out"
 fi
+# The smoke suite exists once, in smoke.yml. Both tracks must call it after
+# their build job and must not carry a copy of it.
+smoke_workflow="$ROOT/.github/workflows/smoke.yml"
+[ -f "$smoke_workflow" ] || fail "smoke.yml is missing"
+grep -Fq 'FAIL: shell startup ran vscode-writable code' "$smoke_workflow" \
+  || fail "smoke.yml lost the shell-startup plant smoke"
+grep -Fq 'OK: managed zsh loads powerlevel10k, both plugins, node, fnm, fzf, and delta' "$smoke_workflow" \
+  || fail "smoke.yml lost the pinned zsh theme/plugins/tools smoke"
+grep -Fq '"$GITHUB_WORKSPACE/aic" init --build --force' "$smoke_workflow" \
+  || fail "workflow pre-created override is not passed through explicit init --force"
+grep -Fq 'CODEX_NON_INTERACTIVE=1' "$smoke_workflow" \
+  || fail "workflow does not exercise the supported unattended Codex refresh"
+grep -Fq 'https://chatgpt.com/codex/install.sh' "$smoke_workflow" \
+  || fail "workflow does not exercise the official Codex installer"
+grep -Fq 'codex update' "$smoke_workflow" \
+  && fail "workflow regressed to installation-method-dependent codex update"
+[ "$(grep -cE '^  [A-Za-z0-9_-]+:[[:space:]]*$' "$smoke_workflow")" -ge 1 ] \
+  || fail "smoke.yml defines no job"
+grep -Eq '^  workflow_call:[[:space:]]*$' "$smoke_workflow" \
+  || fail "smoke.yml is not a reusable workflow"
+awk '/^on:/ { on = 1; next } /^[^[:space:]#]/ { on = 0 } on && /^  [A-Za-z_]+:/ { print $1 }' \
+  "$smoke_workflow" | grep -vx 'workflow_call:' | grep -q . \
+  && fail "smoke.yml has a trigger besides workflow_call"
+grep -Eq '^    needs:' "$smoke_workflow" \
+  && fail "smoke.yml job names a needs: the caller owns"
 for workflow in "$ROOT/.github/workflows/rebuild.yml" \
   "$ROOT/.github/workflows/release.yml"; do
-  grep -Fq 'FAIL: shell startup ran vscode-writable code' "$workflow" \
-    || fail "$(basename "$workflow") lost the shell-startup plant smoke"
-  grep -Fq 'OK: managed zsh loads powerlevel10k, both plugins, node, fnm, fzf, and delta' "$workflow" \
-    || fail "$(basename "$workflow") lost the pinned zsh theme/plugins/tools smoke"
-  grep -Fq '"$GITHUB_WORKSPACE/aic" init --build --force' "$workflow" \
-    || fail "workflow pre-created override is not passed through explicit init --force"
-  grep -Fq 'CODEX_NON_INTERACTIVE=1' "$workflow" \
-    || fail "workflow does not exercise the supported unattended Codex refresh"
-  grep -Fq 'https://chatgpt.com/codex/install.sh' "$workflow" \
-    || fail "workflow does not exercise the official Codex installer"
-  grep -Fq 'codex update' "$workflow" \
-    && fail "workflow regressed to installation-method-dependent codex update"
+  block=$(awk '/^  smoke:[[:space:]]*$/ { on = 1; print; next } on && /^  [A-Za-z0-9_-]+:/ { exit } on && NF { print }' "$workflow")
+  [ "$block" = "  smoke:
+    needs: build
+    uses: ./.github/workflows/smoke.yml" ] \
+    || fail "$(basename "$workflow") smoke job is not the thin call to smoke.yml"
 done
+grep -Fq '.github/workflows/smoke.yml' <(awk '/^  pull_request:/,/^  workflow_dispatch:/' "$ROOT/.github/workflows/rebuild.yml") \
+  || fail "rebuild.yml pull_request paths omit smoke.yml"
+grep -Fq '.github/workflows/smoke.yml' <(awk '/^  push:/,/^  pull_request:/' "$ROOT/.github/workflows/rebuild.yml") \
+  || fail "rebuild.yml push paths omit smoke.yml"
 # Publish jobs hold the npm OIDC token and GHCR package write. A tag ref lets
 # whoever moves the upstream tag run code there, so every action is pinned to
 # a full commit SHA, with the version as a comment for Renovate.

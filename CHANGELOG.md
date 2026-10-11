@@ -137,6 +137,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `shell`, `run`, `signing`, `validate`, and VS Code starts printed an error and
   went on. (aic)
 
+- **CI runs one shared smoke suite for both workflows.** `rebuild.yml` and
+  `release.yml` now call `smoke.yml`, so a runtime assertion is written
+  once instead of twice. (workflows)
+
 ### Fixed
 
 - **A too-old Docker Compose now gets a clear upgrade message.** aic needs

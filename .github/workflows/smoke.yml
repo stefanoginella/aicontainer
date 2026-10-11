@@ -1,0 +1,1213 @@
+name: smoke
+
+# The runtime smoke suite, shared by both tracks. rebuild.yml (security
+# refresh) and release.yml (release) each call it after their `build` job, so a
+# new assertion is written once. Never add a trigger other than workflow_call:
+# the suite must not run without a caller's build gate.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      # Buildx >= 0.37.2 enforces bake fs entitlements under Compose's
+      # `--progress rawjson`, but Compose only grants the build context. The
+      # Dev Containers CLI points `dockerfile:` at a temp Dockerfile-with-
+      # features outside it, so every build-mode `up` fails. CI-only; inputs
+      # are this repo's fixtures. Remove once docker/compose#14286 ships.
+      # https://github.com/docker/compose/issues/14285
+      # https://github.com/devcontainers/cli/issues/1320
+      BUILDX_BAKE_ENTITLEMENTS_FS: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Static test - registry publishing stays serialized and fail-closed
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          workflows = [
+              Path(".github/workflows/rebuild.yml"),
+              Path(".github/workflows/release.yml"),
+          ]
+          headers = [path.read_text().split("\njobs:\n", 1)[0] for path in workflows]
+          assert "group: aicontainer-registry-publish" not in headers[0]
+          assert "group: aicontainer-registry-publish" not in headers[1]
+          assert "group: rebuild-" in headers[0]
+          assert "group: aicontainer-release" in headers[1]
+          for path in workflows:
+              text = path.read_text()
+              match = re.search(
+                  r"(?ms)^  publish:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)", text
+              )
+              assert match, f"{path}: publish job missing"
+              publish = match.group(1)
+              lock = re.search(
+                  r"(?m)^    concurrency:\n"
+                  r"((?:^      [^\n]*\n)+)", publish
+              )
+              assert lock, f"{path}: publish concurrency missing"
+              lock_text = lock.group(1)
+              assert "group: aicontainer-registry-publish" in lock_text, path
+              assert "cancel-in-progress: false" in lock_text, path
+              assert "queue: max" in lock_text, path
+
+          release = workflows[1].read_text()
+          publish = re.search(
+              r"(?ms)^  publish:\n(.*?)(?=^  github-release:\n)", release
+          ).group(1)
+          assert publish.index("id: npm_version") < publish.index("id: ghcr_version")
+          for required in (
+              'imagetools inspect "$image" --raw',
+              'org.opencontainers.image.revision',
+              'org.opencontainers.image.version',
+              'io.aicontainer.channel',
+              'GITHUB_SHA',
+              'NPM_VERSION_EXISTS',
+              'GHCR_VERSION_IDENTITY',
+              'identity=verified',
+              'identity=legacy',
+              'Refusing partial recovery',
+              'unverified legacy tag; leaving :latest unchanged',
+          ):
+              assert required in publish, f"release.yml: missing {required}"
+          print("OK: shared registry lock and immutable-tag identity gate present")
+          PY
+      - name: Host/helper security regression tests
+        run: |
+          set -euo pipefail
+          for test in tests/*.sh; do
+            bash "$test"
+          done
+          for test in tests/*.py; do
+            PYTHONDONTWRITEBYTECODE=1 python3 -I "$test"
+          done
+      - name: Install devcontainer CLI
+        run: npm install -g @devcontainers/cli@latest
+      - name: Stage a throwaway project (exercises `aic init --build`)
+        run: |
+          mkdir -p /tmp/proj/.devcontainer "$HOME/.local/bin"
+          ln -sf "$GITHUB_WORKSPACE/aic" "$HOME/.local/bin/aic"
+          cat > /tmp/proj/.devcontainer/docker-compose.override.yml <<'YAML'
+          services:
+            devcontainer:
+              volumes:
+                - aic-smoke-venv:/workspace/.venv-smoke
+          volumes:
+            aic-smoke-venv:
+          YAML
+          # Opt-in personal shell overlay: post-create installs these root-owned
+          # 0444 and the baked .zshrc sources them after the managed baseline.
+          printf '# aic smoke overlay rc\nexport AIC_SMOKE_RC=1\ntouch /tmp/aic-smoke-rc-sourced\n' \
+            > /tmp/proj/.devcontainer/shell-rc.zsh
+          printf '# aic smoke overlay p10k\ntouch /tmp/aic-smoke-p10k-sourced\n' \
+            > /tmp/proj/.devcontainer/p10k.zsh
+          # Opt-in personal statusline overlay: the script lands root-owned 0444
+          # and Claude Code is pointed at the fixed baked launcher, never at a
+          # host command string.
+          printf '#!/bin/bash\necho "AIC_SMOKE_STATUSLINE"\n' \
+            > /tmp/proj/.devcontainer/statusline.sh
+          # Host Claude settings the sanitizer must NOT forward: statusLine is an
+          # arbitrary command string bound to host-only paths, and env is
+          # secret-bearing. `model` proves the allowlist still seeds preferences.
+          mkdir -p "$HOME/.claude"
+          cat > "$HOME/.claude/settings.json" <<'JSON'
+          {
+            "model": "opus",
+            "statusLine": {
+              "type": "command",
+              "command": "node /home/runner/.claude/statusline/aic-smoke-host.mjs"
+            },
+            "env": { "AIC_SMOKE_HOST_SECRET": "must-not-cross" }
+          }
+          JSON
+          cd /tmp/proj && git init -q
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build --force
+      - name: Bring up the devcontainer (project code needs exact trust first)
+        working-directory: /tmp/proj
+        run: |
+          # The staged shell overlay and statusline are project code from the
+          # repository. A direct start (the VS Code path) must refuse them
+          # before Compose runs, until the host approves the exact files with an
+          # interactive `aic trust`. The pty answers that prompt like a person.
+          if out=$(devcontainer up --workspace-folder . 2>&1); then
+            echo "FAIL: direct start ran untrusted project code"; exit 1
+          fi
+          echo "$out" | grep -q 'shell-rc.zsh runs project code in every zsh shell' \
+            || { echo "FAIL: direct start did not name the untrusted project code"; echo "$out"; exit 1; }
+          [ -z "$(docker ps -aq --filter label=com.docker.compose.service=devcontainer)" ] \
+            || { echo "FAIL: a refused start still created the devcontainer"; exit 1; }
+          AIC_HOME="$GITHUB_WORKSPACE" python3 -I -c '
+          import os, pty, select, sys, time
+          pid, fd = pty.fork()
+          if pid == 0:
+              os.execv(sys.argv[1], sys.argv[1:])
+          buf, sent, deadline = b"", False, time.monotonic() + 120
+          while True:
+              left = deadline - time.monotonic()
+              if left <= 0 or not select.select([fd], [], [], left)[0]:
+                  os.kill(pid, 9)
+                  sys.exit("FAIL: aic trust did not finish within 120s")
+              try:
+                  chunk = os.read(fd, 4096)
+              except OSError:
+                  break
+              if not chunk:
+                  break
+              buf += chunk
+              if not sent and b"[y/N]" in buf:
+                  os.write(fd, b"y\n")
+                  sent = True
+          sys.stdout.write(buf.decode(errors="replace"))
+          sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+          ' "$GITHUB_WORKSPACE/aic" trust
+          devcontainer up --workspace-folder .
+      - name: Smoke test - personal shell overlay installs root-locked and is sourced
+        working-directory: /tmp/proj
+        run: |
+          # The opt-in project-owned .devcontainer/{shell-rc,p10k}.zsh seeded at
+          # setup land root-owned 0444 under /etc/aic/user-config/shell, are
+          # sourced by the managed .zshrc AFTER the baseline, and are tamper-proof.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            for f in /etc/aic/user-config/shell/rc.zsh /etc/aic/user-config/shell/p10k.zsh; do
+              [ -e "$f" ] || { echo "FAIL: $f missing"; exit 1; }
+              perms=$(stat -c "%U %a" "$f")
+              [ "$perms" = "root 444" ] || { echo "FAIL: $f expected root 444, got $perms"; exit 1; }
+              if echo x >> "$f" 2>/dev/null; then echo "FAIL: vscode can write $f"; exit 1; fi
+            done
+            grep -q "aic smoke overlay rc" /etc/aic/user-config/shell/rc.zsh \
+              || { echo "FAIL: overlay rc not installed verbatim"; exit 1; }
+            rm -f /tmp/aic-smoke-rc-sourced /tmp/aic-smoke-p10k-sourced
+            zsh -lic true
+            [ -e /tmp/aic-smoke-rc-sourced ] && [ -e /tmp/aic-smoke-p10k-sourced ] \
+              || { echo "FAIL: overlay not sourced by login zsh"; exit 1; }
+            echo "OK: personal shell overlay is root-locked, verbatim, and sourced after baseline"
+          '
+      - name: Smoke test - a deleted host overlay seed leaves the sanitized volume
+        working-directory: /tmp/proj
+        run: |
+          # The sanitized volume outlives the container. When the human deletes
+          # ~/.config/aicontainer/rc.zsh, the next sanitizer run must remove the
+          # old copy, or it stays installed and sourced on every rebuild.
+          project_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
+            .devcontainer/docker-compose.yml)
+          sanitizer_id=$(docker ps -aq \
+            --filter "label=com.docker.compose.project=$project_name" \
+            --filter "label=com.docker.compose.service=aic-seed-sanitizer")
+          [ -n "$sanitizer_id" ] || { echo "FAIL: seed sanitizer container missing"; exit 1; }
+          run_sanitizer() {
+            docker start -a "$sanitizer_id" >/dev/null
+            [ "$(docker inspect -f '{{.State.ExitCode}}' "$sanitizer_id")" = 0 ] \
+              || { echo "FAIL: seed sanitizer failed"; exit 1; }
+          }
+          [ ! -e "$HOME/.config/aicontainer/rc.zsh" ] \
+            || { echo "FAIL: runner already has a host rc.zsh seed"; exit 1; }
+          mkdir -p "$HOME/.config/aicontainer"
+          printf '# aic smoke host seed\n' > "$HOME/.config/aicontainer/rc.zsh"
+          run_sanitizer
+          devcontainer exec --workspace-folder . grep -qx '# aic smoke host seed' /host-seed/shell-rc.zsh \
+            || { echo "FAIL: host rc.zsh seed was not copied"; exit 1; }
+          rm "$HOME/.config/aicontainer/rc.zsh"
+          run_sanitizer
+          if devcontainer exec --workspace-folder . test -e /host-seed/shell-rc.zsh; then
+            echo "FAIL: deleted host rc.zsh seed is still in the sanitized volume"; exit 1
+          fi
+          echo "OK: deleting a host overlay seed removes it from the sanitized volume"
+      - name: Smoke test - managed zsh loads the pinned theme, plugins, and tools
+        working-directory: /tmp/proj
+        run: |
+          # The image fetches powerlevel10k and both plugins at pinned commits
+          # and fails the build on any download error. Check that the managed
+          # zsh startup really loads them, so a broken shell setup cannot ship.
+          devcontainer exec --workspace-folder . zsh -ic '
+            (( $+functions[p10k] )) || { echo "FAIL: powerlevel10k not loaded"; exit 1; }
+            (( $+functions[_zsh_autosuggest_start] )) || { echo "FAIL: zsh-autosuggestions not loaded"; exit 1; }
+            (( $+functions[_zsh_highlight] )) || { echo "FAIL: zsh-syntax-highlighting not loaded"; exit 1; }
+            for tool in node fnm fzf delta; do
+              whence -p "$tool" >/dev/null || { echo "FAIL: $tool not on the zsh PATH"; exit 1; }
+            done
+            echo "OK: managed zsh loads powerlevel10k, both plugins, node, fnm, fzf, and delta"
+          '
+      - name: Smoke test - personal statusline installs root-locked and is wired
+        working-directory: /tmp/proj
+        run: |
+          # The opt-in project-owned .devcontainer/statusline.sh lands root-owned
+          # 0444 under /etc/aic/user-config/statusline, is executed by the fixed
+          # baked launcher, and is what settings.json points at. The host's own
+          # statusLine command string must never be seeded.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            f=/etc/aic/user-config/statusline/statusline.sh
+            [ -e "$f" ] || { echo "FAIL: $f missing"; exit 1; }
+            perms=$(stat -c "%U %a" "$f")
+            [ "$perms" = "root 444" ] || { echo "FAIL: $f expected root 444, got $perms"; exit 1; }
+            if echo x >> "$f" 2>/dev/null; then echo "FAIL: vscode can write $f"; exit 1; fi
+            grep -q AIC_SMOKE_STATUSLINE "$f" \
+              || { echo "FAIL: statusline not installed verbatim"; exit 1; }
+            for other in statusline.mjs statusline.js statusline.py; do
+              if [ -e "/etc/aic/user-config/statusline/$other" ]; then
+                echo "FAIL: unexpected $other installed"; exit 1
+              fi
+            done
+            # The directory itself must stay root-owned so an agent cannot drop a
+            # higher-priority variant next to the human'"'"'s script.
+            if touch /etc/aic/user-config/statusline/statusline.mjs 2>/dev/null; then
+              echo "FAIL: vscode can add a statusline variant"; exit 1
+            fi
+            lperms=$(stat -c "%U %a" /usr/local/bin/aic-statusline)
+            [ "$lperms" = "root 555" ] \
+              || { echo "FAIL: launcher expected root 555, got $lperms"; exit 1; }
+            cmd=$(python3 -c "import json;print(json.load(open(\"$HOME/.claude/settings.json\")).get(\"statusLine\",{}).get(\"command\",\"\"))")
+            [ "$cmd" = "/usr/local/bin/aic-statusline" ] \
+              || { echo "FAIL: settings.json statusLine command is \"$cmd\""; exit 1; }
+            # The host settings.json staged above carries a statusLine command
+            # and an env secret; the sanitizer must have dropped both while still
+            # seeding the allowlisted preference.
+            if grep -qE "aic-smoke-host\\.mjs|AIC_SMOKE_HOST_SECRET" "$HOME/.claude/settings.json"; then
+              echo "FAIL: a host statusLine command / env secret crossed the sanitizer"; exit 1
+            fi
+            grep -q "\"model\"" "$HOME/.claude/settings.json" \
+              || { echo "FAIL: allowlisted host preference was not seeded"; exit 1; }
+            out=$(/usr/local/bin/aic-statusline </dev/null)
+            [ "$out" = "AIC_SMOKE_STATUSLINE" ] \
+              || { echo "FAIL: launcher rendered \"$out\""; exit 1; }
+            echo "OK: personal statusline is root-locked, launcher-run, and wired into Claude Code"
+          '
+      - name: Smoke test - AI CLIs resolve (Codex is standalone, not npm)
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . claude --version
+          devcontainer exec --workspace-folder . codex --version
+          devcontainer exec --workspace-folder . opencode --version
+          devcontainer exec --workspace-folder . gh --version
+          devcontainer exec --workspace-folder . uv --version
+          # Codex must be the official standalone install in ~/.local/bin, not an
+          # npm global. Dropping npm is deliberate (so supported standalone refresh
+          # works and the CLI no longer rides the npm release-age quarantine); guard
+          # the swap so a revert to `npm i -g @openai/codex` is caught.
+          codex_path=$(devcontainer exec --workspace-folder . bash -lc 'command -v codex' | tr -d '\r' | tail -1)
+          echo "codex resolves to: $codex_path"
+          case "$codex_path" in
+            */.local/bin/codex) echo "OK: codex is the standalone install" ;;
+            *) echo "FAIL: codex not in ~/.local/bin (got '$codex_path'); npm install may have crept back"; exit 1 ;;
+          esac
+          # OpenCode is the standalone installer into ~/.opencode/bin (so
+          # `opencode upgrade` works and it skips the npm quarantine).
+          oc_path=$(devcontainer exec --workspace-folder . bash -lc 'command -v opencode' | tr -d '\r' | tail -1)
+          echo "opencode resolves to: $oc_path"
+          case "$oc_path" in
+            */.opencode/bin/opencode) echo "OK: opencode is the standalone install" ;;
+            *) echo "FAIL: opencode not in ~/.opencode/bin (got '$oc_path')"; exit 1 ;;
+          esac
+      - name: Smoke test - tool self-update works with rc files root-locked
+        working-directory: /tmp/proj
+        run: |
+          # refresh_ai_tools() runs `claude update`, Codex's documented unattended
+          # installer, and `opencode upgrade` on every container create. The Codex
+          # installer must not try to edit the managed shell startup files
+          # (root-owned and immutable in the image). A regression would silently
+          # fall back to the baked version (refresh is fail-soft), so assert all
+          # three refresh paths exit 0 here and leave the lock intact.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -eo pipefail
+            [ "$(stat -c %U:%a /etc/aic/shell/zsh/.zshrc)" = "root:444" ] || { echo "precondition: managed .zshrc not root-locked"; exit 1; }
+            claude update
+            codex_installer=$(mktemp)
+            trap '\''rm -f "$codex_installer"'\'' EXIT
+            curl -fsSL --proto "=https" --proto-redir "=https" --max-time 60 --max-filesize 4194304 \
+              https://chatgpt.com/codex/install.sh -o "$codex_installer"
+            CODEX_NON_INTERACTIVE=1 \
+              CODEX_HOME=/home/vscode/.local/share/aic-tools/codex \
+              CODEX_INSTALL_DIR=/home/vscode/.local/bin \
+              sh "$codex_installer"
+            opencode upgrade
+            [ "$(stat -c %U:%a /etc/aic/shell/zsh/.zshrc)" = "root:444" ] || { echo "managed .zshrc lock changed during refresh"; exit 1; }
+            echo "OK: claude + codex + opencode refresh cleanly with rc files locked"
+          '
+      - name: Smoke test - socket-proxy exposes only ping/version by default
+        working-directory: /tmp/proj
+        run: |
+          grep -qF 'tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459' .devcontainer/docker-compose.yml \
+            || { echo "FAIL: socket-proxy image is not digest-pinned"; exit 1; }
+          devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/_ping
+          devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/version >/dev/null
+          set +e
+          read_out=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
+            http://socket-proxy:2375/containers/json)
+          out=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://socket-proxy:2375/exec/none/start)
+          set -e
+          [ "$read_out" = "403" ] || { echo "expected 403 from socket-proxy /containers/json (Docker reads should be off by default), got $read_out"; exit 1; }
+          [ "$out" = "403" ] || { echo "expected 403 from socket-proxy /exec, got $out"; exit 1; }
+          # Docker read and write access are separate opt-ins. A plain init has
+          # both off; in particular POST/BUILD=0 stops a host escape via
+          # `docker run --privileged -v /:/host`.
+          set +e
+          out=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://socket-proxy:2375/containers/create)
+          out2=$(devcontainer exec --workspace-folder . curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://socket-proxy:2375/build)
+          set -e
+          [ "$out" = "403" ]  || { echo "expected 403 from socket-proxy /containers/create (POST should be off by default), got $out"; exit 1; }
+          [ "$out2" = "403" ] || { echo "expected 403 from socket-proxy /build (BUILD should be off by default), got $out2"; exit 1; }
+          echo "OK: only ping/version are exposed by default (reads/EXEC/POST/BUILD all blocked)"
+
+      - name: Smoke test - cloud metadata / link-local egress is blocked
+        working-directory: /tmp/proj
+        run: |
+          # post-create runs `sudo aic-firewall block-metadata` on every create,
+          # dropping IPv4/IPv6 link-local plus the Alibaba and AWS IMDSv6
+          # endpoints independently of the opt-in allowlist. Re-run it
+          # (idempotent) and inspect the scoped `aic-firewall status` output.
+          # block-metadata is strengthen-only, so like `enable` it can't widen
+          # policy. It fails when IPv6 is configured but cannot be filtered;
+          # only hosts without configured IPv6 legitimately omit IPv6 rules.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -e
+            sudo -n /usr/local/bin/aic-firewall block-metadata
+            st=$(sudo -n /usr/local/bin/aic-firewall status)
+            echo "$st"
+
+            status_section() {
+              local heading=$1 line inside=0
+              while IFS= read -r line; do
+                if [ "$line" = "$heading" ]; then
+                  inside=1
+                  continue
+                fi
+                case "$line" in
+                  "## "*) inside=0 ;;
+                esac
+                [ "$inside" -eq 0 ] || printf "%s\n" "$line"
+              done <<< "$st"
+            }
+            v4_output=$(status_section "## iptables OUTPUT chain")
+            v4_metadata=$(status_section "## iptables AIC_METADATA chain (always-on metadata/link-local block)")
+            printf "%s\n" "$v4_output" | grep -q "AIC_METADATA" || { echo "FAIL: IPv4 OUTPUT does not jump to AIC_METADATA"; exit 1; }
+            printf "%s\n" "$v4_metadata" | grep -q "169.254.0.0/16" || { echo "FAIL: IPv4 link-local DROP rule missing"; exit 1; }
+            printf "%s\n" "$v4_metadata" | grep -q "100.100.100.200" || { echo "FAIL: Alibaba metadata DROP rule missing"; exit 1; }
+
+            if printf "%s\n" "$st" | grep -q "^## ip6tables AIC_METADATA chain$"; then
+              v6_output=$(status_section "## ip6tables OUTPUT chain")
+              v6_metadata=$(status_section "## ip6tables AIC_METADATA chain")
+              printf "%s\n" "$v6_output" | grep -q "AIC_METADATA" || { echo "FAIL: IPv6 OUTPUT does not jump to AIC_METADATA"; exit 1; }
+              printf "%s\n" "$v6_metadata" | grep -q "fe80::/10" || { echo "FAIL: IPv6 link-local DROP rule missing"; exit 1; }
+              printf "%s\n" "$v6_metadata" | grep -q "fd00:ec2::254" || { echo "FAIL: AWS IMDSv6 DROP rule missing"; exit 1; }
+              echo "OK: IPv4 and IPv6 metadata/link-local egress is dropped"
+            elif ip -o -6 addr show up 2>/dev/null | grep -vE "^[0-9]+: lo " | grep -q .; then
+              echo "FAIL: IPv6 is configured but its metadata filter is absent"
+              exit 1
+            else
+              echo "OK: IPv4 metadata/link-local egress is dropped; IPv6 is not configured"
+            fi
+          '
+      - name: Smoke test - allowlist enable cuts a connection opened before it
+        working-directory: /tmp/proj
+        run: |
+          # `enable` cannot be undone in a running container, so this uses
+          # throwaway containers from the image under test, on a user-defined
+          # network (conntrack only tracks sessions there, as in the real
+          # stack). A session that the firewalled container opened to a host
+          # that is not on the allowlist must stop passing once `enable` ran.
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer | head -n1)
+          [ -n "$cid" ] || { echo "FAIL: no devcontainer to take the image from"; exit 1; }
+          img=$(docker inspect -f '{{.Config.Image}}' "$cid")
+          net=aic-fw-smoke
+          cleanup() {
+            docker rm -f aic-fw-smoke-srv >/dev/null 2>&1 || true
+            docker network rm "$net" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker network create "$net" >/dev/null
+          # The alias lets `enable` find a socket-proxy address; that address is
+          # allowed on TCP 2375 only, so port 9000 below is not on the allowlist.
+          docker run -d --rm --name aic-fw-smoke-srv --network "$net" \
+            --network-alias socket-proxy --entrypoint /usr/bin/python3 "$img" -I -c '
+          import socketserver
+          class H(socketserver.StreamRequestHandler):
+              def handle(self):
+                  for _ in self.rfile:
+                      self.wfile.write(b"pong\n"); self.wfile.flush()
+          socketserver.ThreadingTCPServer.allow_reuse_address = True
+          socketserver.ThreadingTCPServer(("0.0.0.0", 9000), H).serve_forever()
+          ' >/dev/null
+          docker run --rm --network "$net" --cap-add NET_ADMIN --user root \
+            --entrypoint /bin/bash "$img" -c '
+            for _ in $(seq 40); do
+              (: </dev/tcp/aic-fw-smoke-srv/9000) 2>/dev/null && break
+              sleep 0.5
+            done
+            exec 3<>/dev/tcp/aic-fw-smoke-srv/9000 || { echo "FAIL: cannot reach the test server"; exit 1; }
+            echo ping >&3; x=; read -r -t 5 x <&3 || true
+            [ "$x" = pong ] || { echo "FAIL: no reply before enable"; exit 1; }
+            /usr/local/bin/aic-firewall enable >/tmp/enable.log 2>&1 \
+              || { echo "FAIL: aic-firewall enable failed"; cat /tmp/enable.log; exit 1; }
+            echo ping >&3; x=; read -r -t 5 x <&3 || true
+            [ -z "$x" ] || { echo "FAIL: a session opened before enable still passes"; exit 1; }
+            if timeout 6 bash -c "exec 5<>/dev/tcp/aic-fw-smoke-srv/9000 && echo ping >&5 && read -r -t 4 y <&5 && [ \"\$y\" = pong ]" 2>/dev/null; then
+              echo "FAIL: a new connection to a host off the allowlist passes"; exit 1
+            fi
+            echo "OK: enable cut the earlier session and blocks new off-list connections"
+          '
+      - name: Smoke test - npm quarantine window is sane (npx-based MCPs installable)
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . bash -lc '
+            val="${NPM_CONFIG_MIN_RELEASE_AGE-}"
+            echo "NPM_CONFIG_MIN_RELEASE_AGE=$val"
+            [ -n "$val" ] || { echo "FAIL: NPM_CONFIG_MIN_RELEASE_AGE unset"; exit 1; }
+            [ "$val" -ge 0 ] 2>/dev/null || { echo "FAIL: not a non-negative integer"; exit 1; }
+            # npm interprets this value in DAYS. Anything > 30 makes most active
+            # npx-based MCP plugins unusable; almost certainly a unit mistake
+            # (e.g. believing 1440 means 24h in minutes — it means 1440 days).
+            [ "$val" -le 30 ] || { echo "FAIL: $val days is too restrictive; npx MCPs will fail with ENOVERSIONS"; exit 1; }
+            echo "OK: npm quarantine is ${val} day(s)"
+          '
+
+      - name: Smoke test - PreToolUse hook blocks .env
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . bash -lc '
+            cd /workspace
+            printf "SECRET=hunter2\n" > .env
+            payload='\''{"tool_name":"Read","tool_input":{"file_path":"/workspace/.env"}}'\''
+            if echo "$payload" | /etc/aic/hooks/pre-tool-use.sh; then
+              echo "hook FAILED to block .env"
+              exit 1
+            else
+              echo "hook correctly blocked .env"
+            fi
+          '
+
+      - name: Smoke test - agent status hooks are managed and opt-in
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . bash -lc '
+            set -e
+            [ "${AIC_STATUS_RELAY-}" = 0 ] || { echo "FAIL: status relay did not default off"; exit 1; }
+            [ "$(stat -c "%U:%G:%a" /etc/aic/hooks/agent-status.py)" = root:root:644 ] \
+              || { echo "FAIL: status relay hook is not root-owned 0644"; exit 1; }
+            command="/usr/bin/python3 -I /etc/aic/hooks/agent-status.py claude"
+            jq -e --arg command "$command" \
+              ".hooks.SessionStart[0].hooks[0].command == \$command and .hooks.SessionEnd[0].hooks[0].command == \$command" \
+              /etc/claude-code/managed-settings.json >/dev/null \
+              || { echo "FAIL: Claude lifecycle hooks are not managed"; exit 1; }
+            [ "$(grep -Fc "/usr/bin/python3 -I /etc/aic/hooks/agent-status.py codex" /etc/codex/requirements.toml)" = 5 ] \
+              || { echo "FAIL: Codex lifecycle hooks are not managed"; exit 1; }
+            payload='\''{"session_id":"ci-secret","hook_event_name":"Stop","prompt":"must-not-leak"}'\''
+            printf "%s\n" "$payload" | /usr/bin/python3 -I /etc/aic/hooks/agent-status.py claude
+            echo "OK: metadata relay is root-managed, wired, opt-in, and fail-open"
+          '
+
+      - name: Smoke test - OpenCode guardrail blocks a .env read
+        working-directory: /tmp/proj
+        run: |
+          # post-create must force permission=allow + wire the guardrail plugin,
+          # and the shim must block a .env read by shelling out to the shared
+          # pre-tool-use.sh. (A full `opencode run` needs an authed model, so we
+          # exercise the plugin's tool.execute.before hook directly via node —
+          # this proves the mapping + script integration; plugin-load-without-
+          # trust-prompt is checked manually per the release notes.)
+          devcontainer exec --workspace-folder . bash -lc '
+            set -e
+            cfg=$HOME/.config/opencode/opencode.json
+            grep -qF "\"*\": \"allow\"" "$cfg" || { echo "FAIL: opencode permission not forced to allow"; exit 1; }
+            grep -qF "/etc/aic/hooks/opencode-guardrail.js" "$cfg" || { echo "FAIL: guardrail plugin not wired in opencode.json"; exit 1; }
+            cd /workspace
+            printf "SECRET=hunter2\n" > .env
+            node --input-type=module -e "
+              import { AicGuardrail } from \"/etc/aic/hooks/opencode-guardrail.js\";
+              const h = await AicGuardrail();
+              let blocked = false;
+              try { await h[\"tool.execute.before\"]({tool:\"read\"}, {args:{filePath:\"/workspace/.env\"}}); }
+              catch { blocked = true; }
+              if (!blocked) { console.error(\"FAIL: guardrail did not block .env read\"); process.exit(1); }
+              await h[\"tool.execute.before\"]({tool:\"read\"}, {args:{filePath:\"/workspace/.devcontainer/devcontainer.json\"}});
+              console.log(\"OK: opencode guardrail blocks .env, allows a normal read\");
+            "
+          '
+
+      - name: Smoke test - scoped sudo cannot chown arbitrary paths
+        working-directory: /tmp/proj
+        run: |
+          devcontainer exec --workspace-folder . bash -lc '
+            sudo -n /usr/local/bin/aic-chown-volumes
+            if sudo -nl /usr/bin/chown 2>/dev/null | grep -q chown; then
+              echo "FAIL: /usr/bin/chown still in NOPASSWD sudoers"
+              exit 1
+            fi
+            echo "OK: arbitrary sudo chown is denied"
+          '
+
+      - name: Smoke test - chown-paths allowlist is enforced
+        working-directory: /tmp/proj
+        run: |
+          # chown-paths is RO-mounted + PreToolUse-blocked, so an in-container
+          # tool can't add entries. But a forbidden entry (e.g. a careless
+          # host-side edit) must still be refused fail-closed without touching
+          # the target. We write it host-side; the live RO bind mount reflects
+          # it inside the container.
+          trap 'rm -f .devcontainer/chown-paths' EXIT
+          printf '/etc/aic/user-config/gitconfig\n' > .devcontainer/chown-paths
+          devcontainer exec --workspace-folder . bash -lc '
+            sudo -n /usr/local/bin/aic-chown-volumes && { echo "FAIL: accepted out-of-allowlist path"; exit 1; }
+            owner=$(stat -c "%U" /etc/aic/user-config/gitconfig)
+            [ "$owner" = "root" ] || { echo "FAIL: managed gitconfig now owned by $owner"; exit 1; }
+            echo "OK: forbidden chown-paths entry refused; managed gitconfig still root-owned"
+          '
+          printf '/workspace/.venv-smoke\n' > .devcontainer/chown-paths
+          devcontainer exec --workspace-folder . bash -lc '
+            sudo -n /usr/local/bin/aic-chown-volumes || { echo "FAIL: rejected a valid /workspace path"; exit 1; }
+            mkdir -p /workspace/.venv-smoke/nested
+            touch /workspace/.venv-smoke/writable
+            echo "OK: exact standard named-volume mount accepted and made writable"
+          '
+          printf '/workspace/.venv-smoke/nested\n' > .devcontainer/chown-paths
+          devcontainer exec --workspace-folder . bash -lc '
+            sudo -n /usr/local/bin/aic-chown-volumes && { echo "FAIL: accepted a nested path below a named-volume mount"; exit 1; }
+            echo "OK: nested path below a named-volume mount refused"
+          '
+          printf '/workspace/.devcontainer\n' > .devcontainer/chown-paths
+          devcontainer exec --workspace-folder . bash -lc '
+            sudo -n /usr/local/bin/aic-chown-volumes && { echo "FAIL: accepted a host bind mount"; exit 1; }
+            echo "OK: allowed-prefix host bind mount refused"
+          '
+
+      - name: Smoke test - self-protection files are root-owned 0444
+        working-directory: /tmp/proj
+        run: |
+          # Git config and every managed shell startup file live behind
+          # root-owned directories and are root:root 0444. Home-level startup
+          # files remain writable for compatibility, but the managed launch
+          # paths must ignore them so an agent cannot plant next-shell code.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            for f in /etc/aic/user-config/gitconfig \
+                     /etc/aic/shell/zsh/.zshrc \
+                     /etc/aic/shell/zsh/.zshenv \
+                     /etc/aic/shell/bashrc \
+                     /etc/bash.bashrc \
+                     /etc/fish/conf.d/aic.fish; do
+              [ -e "$f" ] || { echo "FAIL: $f missing (should be locked)"; exit 1; }
+              perms=$(stat -c "%U %a" "$f")
+              echo "$f perms: $perms"
+              [ "$perms" = "root 444" ] || { echo "FAIL: $f expected root 444, got $perms"; exit 1; }
+              if echo "x" >> "$f" 2>/dev/null; then
+                echo "FAIL: vscode can still write to $f"; exit 1
+              fi
+            done
+            mkdir -p "$HOME/.config/fish"
+            printf "touch /tmp/aic-home-zsh-ran\n" > "$HOME/.zshrc"
+            printf "touch /tmp/aic-home-bash-ran\n" > "$HOME/.bash_profile"
+            printf "touch /tmp/aic-home-fish-ran\n" > "$HOME/.config/fish/config.fish"
+            zsh -lic true
+            bash --noprofile --rcfile /etc/aic/shell/bashrc -ic true
+            fish --no-config -C "source /etc/fish/conf.d/aic.fish" -lc true
+            for marker in /tmp/aic-home-zsh-ran /tmp/aic-home-bash-ran /tmp/aic-home-fish-ran; do
+              [ ! -e "$marker" ] || { echo "FAIL: planted home startup file executed ($marker)"; exit 1; }
+            done
+            rm -f "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.config/fish/config.fish"
+            # Everything shell startup sources or runs is root-owned: oh-my-zsh
+            # with the theme and plugins, gitstatusd, fnm, and the root-owned
+            # zsh cache. Startup must also ignore home files, writable caches,
+            # and same-named tools earlier in PATH.
+            bad=$(find /usr/local/share/oh-my-zsh /usr/local/share/aic /usr/local/bin/fnm \
+                    /etc/aic/shell /etc/bash.bashrc ! -type l \( ! -user root -o -perm /022 \) -print)
+            [ -z "$bad" ] || { echo "FAIL: vscode-writable shell startup code: $bad"; exit 1; }
+            ls /usr/local/share/oh-my-zsh/custom/themes/powerlevel10k/gitstatus/usrbin/gitstatusd-linux-* >/dev/null \
+              || { echo "FAIL: gitstatusd is not baked into the root-owned theme"; exit 1; }
+            orig_path=$PATH
+            export PATH=/usr/local/bin:/usr/bin:/bin
+            plant() { mkdir -p "$(dirname "$1")"; printf ": > /tmp/aic-plant-%s\n" "$2" > "$1"; }
+            plant "$HOME/.bash_aliases" bash-aliases
+            plant "$HOME/.bash_completion" bash-completion
+            plant "$HOME/.oh-my-zsh/oh-my-zsh.sh" home-oh-my-zsh
+            plant "$HOME/.cache/p10k-dump-vscode.zsh" p10k-dump
+            plant "$HOME/.cache/oh-my-zsh/.zsh-update" oh-my-zsh-update
+            shadows="git fzf rm mkdir tee dircolors lesspipe groups whoami fnm"
+            for bin in $shadows; do
+              [ ! -e "$HOME/.local/bin/$bin" ] || { echo "precondition: $HOME/.local/bin/$bin exists"; exit 1; }
+              printf "#!/bin/sh\n: > /tmp/aic-plant-bin-%s\n" "$bin" > "$HOME/.local/bin/$bin"
+              chmod +x "$HOME/.local/bin/$bin"
+            done
+            printf "#!/bin/sh\n: > /tmp/aic-plant-fnm-dir\n" > "$FNM_DIR/fnm"
+            chmod +x "$FNM_DIR/fnm"
+            env PATH="$orig_path" zsh -lic true
+            env PATH="$orig_path" bash --noprofile --rcfile /etc/aic/shell/bashrc -ic true
+            env PATH="$orig_path" fish --no-config -C "source /etc/fish/conf.d/aic.fish" -lc true
+            ran=$(ls /tmp/aic-plant-* 2>/dev/null || true)
+            [ -z "$ran" ] || { echo "FAIL: shell startup ran vscode-writable code: $ran"; exit 1; }
+            for bin in $shadows; do rm -f "$HOME/.local/bin/$bin"; done
+            rm -rf "$HOME/.bash_aliases" "$HOME/.bash_completion" "$HOME/.oh-my-zsh" \
+                   "$HOME/.cache/p10k-dump-vscode.zsh" "$HOME/.cache/oh-my-zsh" "$FNM_DIR/fnm"
+            export PATH=$orig_path
+            env PATH="$orig_path" zsh -ic "node --version" >/dev/null \
+              || { echo "FAIL: fnm Node is not on the zsh PATH"; exit 1; }
+            echo "OK: managed git/shell config is locked and home startup replacements are ignored"
+          '
+
+      - name: Smoke test - Git control paths are read-only mount points
+        working-directory: /tmp/proj
+        run: |
+          # Host Git runs code named in .git/config, config.worktree, and hooks,
+          # and loads them from the directory .git/commondir names. The agent
+          # must not change them, or rename .git and create a new one: a
+          # directory that only contains mount points can be renamed, so .git
+          # is bound onto itself. aic creates commondir/config.worktree first.
+          set -euo pipefail
+          [ "$(cat .git/commondir)" = "." ] || { echo "FAIL: aic did not create .git/commondir"; exit 1; }
+          [ -f .git/config.worktree ] || { echo "FAIL: aic did not create .git/config.worktree"; exit 1; }
+          devcontainer exec --workspace-folder . bash -c '
+            set -uo pipefail
+            cd /workspace
+            for f in .git/config .git/config.worktree .git/commondir; do
+              if printf x >> "$f" 2>/dev/null; then echo "FAIL: vscode can write $f"; exit 1; fi
+              if mv "$f" "$f.moved" 2>/dev/null; then echo "FAIL: vscode can move $f"; exit 1; fi
+            done
+            if touch .git/hooks/aic-smoke 2>/dev/null; then echo "FAIL: vscode can write .git/hooks"; exit 1; fi
+            if out=$(mv .git .git-moved 2>&1); then echo "FAIL: vscode can rename .git"; exit 1; fi
+            echo "$out" | grep -q "Device or resource busy" \
+              || { echo "FAIL: .git rename failed for an unexpected reason: $out"; exit 1; }
+            git hash-object -w --stdin </dev/null >/dev/null \
+              || { echo "FAIL: in-container Git cannot write objects"; exit 1; }
+            echo "OK: Git control paths are read-only and .git cannot be renamed"
+          '
+          [ "$(cat .git/commondir)" = "." ] || { echo "FAIL: .git/commondir changed"; exit 1; }
+
+      - name: Smoke test - project post-create hook runs (vscode, /workspace, non-fatal, clean VIRTUAL_ENV)
+        working-directory: /tmp/proj
+        run: |
+          # post-create.project.sh is opt-in by presence and RO-mounted; the
+          # live bind mount reflects this host-side write inside the container.
+          # post-create only runs at create time, so re-invoke it directly to
+          # exercise run_project_hook (mirrors how the chown-paths test re-runs
+          # the wrapper). The hook exits non-zero on purpose: post-create must
+          # warn-and-continue (exit 0), never propagate the failure. It also
+          # records VIRTUAL_ENV: post-create uses system Python and defensively
+          # strips any launcher environment before handing off to the project.
+          trap 'rm -f .devcontainer/post-create.project.sh .aic-hook-evidence' EXIT
+          cat > .devcontainer/post-create.project.sh <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          { echo "user=$(whoami)"; echo "pwd=$(pwd)"; echo "venv=${VIRTUAL_ENV:-}"; } > /workspace/.aic-hook-evidence
+          exit 3
+          SH
+          devcontainer exec --workspace-folder . bash -lc '
+            rm -f /workspace/.aic-hook-evidence
+            /usr/bin/python3 /opt/post-create.py || { echo "FAIL: post-create propagated the hook non-zero exit"; exit 1; }
+            [ -f /workspace/.aic-hook-evidence ] || { echo "FAIL: project hook did not run"; exit 1; }
+            grep -qx "user=vscode"    /workspace/.aic-hook-evidence || { echo "FAIL: hook not run as vscode"; cat /workspace/.aic-hook-evidence; exit 1; }
+            grep -qx "pwd=/workspace" /workspace/.aic-hook-evidence || { echo "FAIL: hook cwd not /workspace"; cat /workspace/.aic-hook-evidence; exit 1; }
+            if grep -q "environments-v2/post-create" /workspace/.aic-hook-evidence; then echo "FAIL: hook inherited post-create ephemeral VIRTUAL_ENV"; cat /workspace/.aic-hook-evidence; exit 1; fi
+            echo "OK: project hook ran as vscode in /workspace; non-zero exit non-fatal; no leaked VIRTUAL_ENV"
+          '
+
+      - name: Smoke test - sandbox memory note lands in CLAUDE.md / AGENTS.md (idempotent)
+        working-directory: /tmp/proj
+        run: |
+          # post-create writes a managed note into the tools' user-level memory
+          # files (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, both auto-loaded every
+          # session) so an agent does not waste tokens trying to "fix" the
+          # by-design read-only .git/config / .git/hooks (writes fail EBUSY).
+          # Assert it lands after create, and that re-running post-create resets
+          # the managed file idempotently without duplicating the block.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -e
+            begin="<!-- BEGIN aicontainer sandbox notes (managed) -->"
+            for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
+              [ -f "$f" ] || { echo "FAIL: $f missing"; exit 1; }
+              grep -qF "$begin" "$f" || { echo "FAIL: $f missing managed marker"; exit 1; }
+              grep -qF "Device or resource busy" "$f" || { echo "FAIL: $f missing EBUSY guidance"; exit 1; }
+            done
+            /usr/bin/python3 /opt/post-create.py
+            for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
+              n=$(grep -cF "$begin" "$f")
+              [ "$n" = "1" ] || { echo "FAIL: $f has $n note blocks after re-run (want 1)"; exit 1; }
+            done
+            echo "OK: managed sandbox note in CLAUDE.md + AGENTS.md; reset is idempotent"
+          '
+
+      - name: Smoke test - prompt/code persistence is project-isolated
+        working-directory: /tmp/proj
+        run: |
+          marker=AIC_PROJECT_A_INJECTION
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            marker=AIC_PROJECT_A_INJECTION
+            # A symlink or hard link must not let planted memory survive the
+            # reset. Keep the planted targets in the persistent volume.
+            planted_link="$HOME/.aic-sessions/aic-planted-link.md"
+            planted_hard="$HOME/.aic-sessions/aic-planted-hard.md"
+            printf "%s\n" "$marker" > "$planted_link"
+            printf "%s\n" "$marker" > "$planted_hard"
+            rm -f "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"
+            ln -s "$planted_link" "$HOME/.aic-sessions/tool-homes/claude/CLAUDE.md"
+            ln "$planted_hard" "$HOME/.aic-sessions/tool-homes/codex/AGENTS.md"
+            printf "{\"model\":\"%s\"}\n" "$marker" > "$HOME/.claude/settings.json"
+            mkdir -p "$HOME/.claude/skills/aic-project-a"
+            printf "%s\n" "$marker" > "$HOME/.claude/skills/aic-project-a/SKILL.md"
+            printf "model = \"%s\"\n" "$marker" > "$HOME/.codex/config.toml"
+            # Codex reads AGENTS.override.md in place of AGENTS.md.
+            printf "%s\n" "$marker" > "$HOME/.codex/AGENTS.override.md"
+            mkdir -p "$HOME/.codex/plugins/aic-project-a"
+            printf "%s\n" "$marker" > "$HOME/.codex/plugins/aic-project-a/probe"
+          '
+          devcontainer up --workspace-folder . --remove-existing-container
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            marker=AIC_PROJECT_A_INJECTION
+            for mapping in \
+              "$HOME/.claude:$HOME/.aic-sessions/tool-homes/claude" \
+              "$HOME/.codex:$HOME/.aic-sessions/tool-homes/codex" \
+              "$HOME/.config/opencode:$HOME/.aic-sessions/tool-homes/opencode-config" \
+              "$HOME/.local/share/opencode:$HOME/.aic-sessions/tool-homes/opencode-data" \
+              "$HOME/.config/gh:$HOME/.aic-sessions/tool-homes/gh" \
+              "$HOME/.config/npm:$HOME/.aic-sessions/tool-homes/npm"; do
+              link=${mapping%%:*}
+              target=${mapping#*:}
+              [ -L "$link" ] || { echo "FAIL: canonical tool home is not a symlink: $link"; exit 1; }
+              [ "$(readlink -f "$link")" = "$target" ] \
+                || { echo "FAIL: $link does not resolve to $target"; exit 1; }
+            done
+            for private_dir in \
+              "$HOME/.aic-sessions" \
+              "$HOME/.aic-sessions/tool-homes/claude" \
+              "$HOME/.aic-sessions/tool-homes/codex" \
+              "$HOME/.aic-sessions/tool-homes/opencode-config" \
+              "$HOME/.aic-sessions/tool-homes/opencode-data" \
+              "$HOME/.aic-sessions/tool-homes/gh" \
+              "$HOME/.aic-sessions/tool-homes/npm"; do
+              [ "$(stat -c %a "$private_dir")" = 700 ] \
+                || { echo "FAIL: private tool-home directory is not mode 0700: $private_dir"; exit 1; }
+            done
+            # `! grep` never trips set -e, so test the result explicitly.
+            if grep -Fq "$marker" "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
+                                  "$HOME/.codex/AGENTS.md" "$HOME/.codex/config.toml"; then
+              echo "FAIL: planted memory/config survived the recreate"; exit 1
+            fi
+            [ ! -e "$HOME/.codex/AGENTS.override.md" ] && [ ! -L "$HOME/.codex/AGENTS.override.md" ] \
+              || { echo "FAIL: planted Codex AGENTS.override.md survived the recreate"; exit 1; }
+            for managed in "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
+                           "$HOME/.codex/AGENTS.md" "$HOME/.codex/config.toml"; do
+              # Resolve only the tool-home link, never the managed file itself.
+              real="$(readlink -f "$(dirname "$managed")")/$(basename "$managed")"
+              [ -f "$real" ] && [ ! -L "$real" ] && [ "$(stat -c %h "$real")" = 1 ] \
+                || { echo "FAIL: managed file is not a fresh single-link regular file: $managed"; exit 1; }
+            done
+            # The reset replaced the links; it never wrote through them.
+            grep -Fqx "$marker" "$HOME/.aic-sessions/aic-planted-link.md"
+            grep -Fqx "$marker" "$HOME/.aic-sessions/aic-planted-hard.md"
+            [ "$(stat -c %h "$HOME/.aic-sessions/aic-planted-hard.md")" = 1 ]
+            rm -f "$HOME/.aic-sessions/aic-planted-link.md" "$HOME/.aic-sessions/aic-planted-hard.md"
+            grep -Fq "$marker" "$HOME/.claude/skills/aic-project-a/SKILL.md"
+            grep -Fq "$marker" "$HOME/.codex/plugins/aic-project-a/probe"
+            for child in "$HOME/.config/aic-auth"/*; do
+              case "$(basename "$child")" in signing|semgrep) ;; *) echo "FAIL: broad auth-root child exposed: $child"; exit 1 ;; esac
+            done
+            echo "OK: managed memory/config reset on recreate, symlinks and hard links included; project-local skills/plugins persist only here"
+          '
+          mkdir -p /tmp/proj-b
+          git -C /tmp/proj-b init -q
+          (cd /tmp/proj-b && AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build)
+          # App repositories often commit a root .env with COMPOSE_PROJECT_NAME.
+          # The Dev Containers CLI prefers it to the managed Compose name, so a
+          # direct start (the VS Code path) must stop before Compose creates
+          # anything, and `aic up` must start under the managed name instead.
+          printf 'COMPOSE_PROJECT_NAME=aic-smoke-collision\n' > /tmp/proj-b/.env
+          if out=$(devcontainer up --workspace-folder /tmp/proj-b 2>&1); then
+            echo "FAIL: direct start accepted a root .env Compose project name"; exit 1
+          fi
+          echo "$out" | grep -q 'repository-root .env sets COMPOSE_PROJECT_NAME' \
+            || { echo "FAIL: direct start did not explain the root .env refusal"; echo "$out"; exit 1; }
+          (cd /tmp/proj-b && AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" up)
+          rm /tmp/proj-b/.env
+          proj_b_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
+            /tmp/proj-b/.devcontainer/docker-compose.yml)
+          [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$proj_b_name" \
+              --filter label=com.docker.compose.service=devcontainer)" ] \
+            || { echo "FAIL: aic up did not start proj-b under its managed Compose name"; exit 1; }
+          [ -z "$(docker ps -aq --filter label=com.docker.compose.project=aic-smoke-collision)" ] \
+            || { echo "FAIL: a container joined the root .env Compose project"; exit 1; }
+          echo "OK: root .env project name refused for direct starts; aic up pins the managed name"
+          devcontainer exec --workspace-folder /tmp/proj-b bash -lc '
+            set -euo pipefail
+            marker=AIC_PROJECT_A_INJECTION
+            for path in "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
+                        "$HOME/.claude/skills" "$HOME/.claude/agents" \
+                        "$HOME/.claude/commands" "$HOME/.claude/plugins" \
+                        "$HOME/.codex/AGENTS.md" "$HOME/.codex/config.toml" \
+                        "$HOME/.codex/skills" "$HOME/.codex/rules" \
+                        "$HOME/.codex/prompts" "$HOME/.codex/plugins"; do
+              [ -e "$path" ] || { echo "FAIL: isolated prompt/code surface missing: $path"; exit 1; }
+              if grep -R -Fq "$marker" "$path"; then
+                echo "FAIL: project A injection reached project B: $path"; exit 1
+              fi
+            done
+            echo "OK: project A prompt/code injection is absent from project B"
+          '
+
+          # A login tool normally writes a temp file and atomically renames it.
+          # Simulate that in project A, then prove only the exact credential
+          # JSON reaches project B (with mode 0600), never settings/plugins.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            atomic_login() {
+              local destination=$1 payload=$2 temp="${1}.tmp"
+              printf "%s\n" "$payload" > "$temp"
+              chmod 600 "$temp"
+              mv -f "$temp" "$destination"
+            }
+            atomic_login "$HOME/.claude/.credentials.json" \
+              "{\"aic_auth_sync\":\"claude-smoke\"}"
+            atomic_login "$HOME/.codex/auth.json" \
+              "{\"aic_auth_sync\":\"codex-smoke\"}"
+            atomic_login "$HOME/.local/share/opencode/auth.json" \
+              "{\"aic_auth_sync\":\"opencode-auth-smoke\"}"
+            atomic_login "$HOME/.local/share/opencode/account.json" \
+              "{\"aic_auth_sync\":\"opencode-account-smoke\"}"
+            # gh and npm rewrite their files in place and mix login state with
+            # settings that run code. Only the login entries may leave project A.
+            marker=AIC_PROJECT_A_INJECTION
+            printf "%s\n" "registry=https://registry.invalid/$marker/" \
+              "script-shell=/tmp/$marker" \
+              "//registry.npmjs.org/:_authToken=npm_aicSmokeToken" \
+              > "$HOME/.config/npm/npmrc"
+            printf "%s\n" "github.com:" "    pager: /tmp/$marker" \
+              "    oauth_token: gho_aicSmokeToken" "    user: aic-smoke" \
+              > "$HOME/.config/gh/hosts.yml"
+            printf "%s\n" "aliases:" "    co: \"!/tmp/$marker\"" \
+              > "$HOME/.config/gh/config.yml"
+          '
+          devcontainer exec --workspace-folder /tmp/proj-b bash -lc '
+            set -euo pipefail
+            wait_for_auth() {
+              local path=$1 expected_digest=$2 actual_digest
+              for _ in $(seq 1 30); do
+                if [ -f "$path" ] \
+                  && [ "$(stat -c %a "$path")" = 600 ]; then
+                  actual_digest=$(sha256sum "$path" | awk "{print \$1}")
+                  [ "$actual_digest" = "$expected_digest" ] && return 0
+                fi
+                sleep 1
+              done
+              echo "FAIL: credential did not synchronize safely: $path" >&2
+              return 1
+            }
+            wait_for_auth "$HOME/.claude/.credentials.json" \
+              514800cf3e74a800dc093b66bfb61e34054c34d292a3b96d7862980df307a264
+            wait_for_auth "$HOME/.codex/auth.json" \
+              b9954fe3bbe0f88eaeba2be8863dd22be60b69c688fafbbc3623200463edd32c
+            wait_for_auth "$HOME/.local/share/opencode/auth.json" \
+              225ae61218074d03262901bc5c0e73ede6978b99e6453c3b9ccf26117420864f
+            wait_for_auth "$HOME/.local/share/opencode/account.json" \
+              86efbd793af74336046205a631e6c3c7c59e46bd4d28c15ea5adae2a2f37c0bb
+            wait_for_line() {
+              local path=$1 line=$2
+              for _ in $(seq 1 30); do
+                [ -f "$path" ] && grep -Fqx -- "$line" "$path" && return 0
+                sleep 1
+              done
+              echo "FAIL: login entry did not synchronize: $path" >&2
+              return 1
+            }
+            wait_for_line "$HOME/.config/npm/npmrc" \
+              "//registry.npmjs.org/:_authToken=npm_aicSmokeToken"
+            wait_for_line "$HOME/.config/gh/hosts.yml" \
+              "    oauth_token: \"gho_aicSmokeToken\""
+            for path in "$HOME/.config/npm/npmrc" "$HOME/.config/gh/hosts.yml"; do
+              [ "$(stat -c %a "$path")" = 600 ] \
+                || { echo "FAIL: synchronized login file is not mode 0600: $path"; exit 1; }
+            done
+            if grep -R -Fq AIC_PROJECT_A_INJECTION "$HOME/.config/npm/" "$HOME/.config/gh/"; then
+              echo "FAIL: project A gh/npm settings reached project B"; exit 1
+            fi
+            echo "OK: only gh/npm login entries reached project B; their settings stayed in A"
+
+            atomic_login() {
+              local destination=$1 payload=$2 temp="${1}.tmp"
+              printf "%s\n" "$payload" > "$temp"
+              chmod 600 "$temp"
+              mv -f "$temp" "$destination"
+            }
+            atomic_login "$HOME/.local/share/opencode/auth.json" \
+              "{\"aic_auth_sync\":\"opencode-auth-return\"}"
+            atomic_login "$HOME/.local/share/opencode/account.json" \
+              "{\"aic_auth_sync\":\"opencode-account-return\"}"
+            echo "OK: exact Claude/Codex/OpenCode credential files arrived with mode 0600"
+          '
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            wait_for_auth() {
+              local path=$1 expected_digest=$2 actual_digest
+              for _ in $(seq 1 30); do
+                if [ -f "$path" ] \
+                  && [ "$(stat -c %a "$path")" = 600 ]; then
+                  actual_digest=$(sha256sum "$path" | awk "{print \$1}")
+                  [ "$actual_digest" = "$expected_digest" ] && return 0
+                fi
+                sleep 1
+              done
+              echo "FAIL: credential did not round-trip safely: $path" >&2
+              return 1
+            }
+            wait_for_auth "$HOME/.local/share/opencode/auth.json" \
+              0e2de306b5141389bf9f0a6dc46ab4484f05e5198b5703ef74262e388f9a211c
+            wait_for_auth "$HOME/.local/share/opencode/account.json" \
+              bc63c0d43b23e2405525c73263880e5a1c461bc10ba8746656dcb212bd2937a2
+            echo "OK: OpenCode auth.json/account.json round-trip exactly without logging payloads"
+          '
+
+          for workspace in /tmp/proj /tmp/proj-b; do
+            project_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
+              "$workspace/.devcontainer/docker-compose.yml")
+            expected_user=$(sed -nE 's/^AIC_RUNTIME_USER=([0-9]+:[0-9]+)$/\1/p' \
+              "$workspace/.devcontainer/.env")
+            [ -n "$expected_user" ] \
+              || { echo "FAIL: managed runtime UID:GID missing for $workspace"; exit 1; }
+            sync_id=$(docker ps -q \
+              --filter "label=com.docker.compose.project=$project_name" \
+              --filter "label=com.docker.compose.service=aic-auth-sync")
+            [ -n "$sync_id" ] || { echo "FAIL: auth-sync container missing for $workspace"; exit 1; }
+            docker inspect "$sync_id" | jq -e --arg user "$expected_user" '
+              .[0]
+              | .Config.User == $user
+                and .HostConfig.NetworkMode == "none"
+                and .HostConfig.ReadonlyRootfs == true
+                and ((.HostConfig.CapDrop // []) | map(ascii_upcase) | index("ALL") != null)
+                and ((.HostConfig.CapAdd // []) | length == 0)
+                and ((.HostConfig.SecurityOpt // [])
+                  | any(. == "no-new-privileges:true" or . == "no-new-privileges"))
+                and .HostConfig.PidsLimit == 32
+                and .State.Health.Status == "healthy"
+            ' >/dev/null || { echo "FAIL: auth-sync hardening mismatch for $workspace"; exit 1; }
+          done
+          forbidden=$(docker exec "$sync_id" find /auth-global -mindepth 2 \
+            \( -name settings.json -o -name config.toml -o -name CLAUDE.md \
+               -o -name AGENTS.md -o -name skills -o -name plugins \
+               -o -name config.yml \) -print -quit)
+          [ -z "$forbidden" ] \
+            || { echo "FAIL: project config/prompt/plugin reached global auth: $forbidden"; exit 1; }
+          if docker exec "$sync_id" grep -R -Fq AIC_PROJECT_A_INJECTION /auth-global; then
+            echo "FAIL: project gh/npm settings reached the global auth volume"; exit 1
+          fi
+          echo "OK: auth-sync is networkless, read-only, capability-free, healthy, and credential-only"
+
+      - name: Smoke test - missing git identity is flagged loudly at create time
+        working-directory: /tmp/proj
+        run: |
+          # The sandbox has no identity of its own — its root-managed config
+          # contains only the allowlisted host seed. An empty host gitconfig leaves
+          # no identity in-container, and it can't be fixed from inside
+          # (/etc/aic/user-config/gitconfig is root-locked; .git/config is RO), so
+          # post-create must surface it loudly at create time. The runner starts
+          # with no global identity (the signing test below sets it); unset
+          # defensively, recreate, and assert post-create warned + identity is
+          # genuinely absent. Keep this before the signing test (which sets it).
+          set -euo pipefail
+          git config --global --unset-all user.name  || true
+          git config --global --unset-all user.email || true
+          devcontainer up --workspace-folder . --remove-existing-container 2>&1 | tee /tmp/no-ident.log
+          grep -q "git identity: no user.name/user.email is configured" /tmp/no-ident.log \
+            || { echo "FAIL: post-create did not warn about missing git identity"; exit 1; }
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            [ -z "$(cd "$HOME" && git config --get user.email || true)" ] \
+              || { echo "FAIL: identity unexpectedly present"; exit 1; }
+          '
+          echo "OK: missing git identity flagged at create time"
+
+      - name: Smoke test - aic signing wires a sandbox signing key
+        working-directory: /tmp/proj
+        run: |
+          # The host signing key is never forwarded, so signing here only works
+          # via a sandbox-only key in aic-auth-global that post-create wires into
+          # /etc/aic/user-config/gitconfig on (re)create. Stage a key the way `aic signing
+          # auto` does, give the mounted host gitconfig a committer identity (so
+          # post-create writes allowed_signers and verification can pass),
+          # recreate, then assert signing is wired and a commit verifies.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            dir="$HOME/.config/aic-auth/signing"; mkdir -p "$dir"
+            ssh-keygen -t ed25519 -N "" -C ci-signing -f "$dir/id_ed25519" >/dev/null
+            printf auto > "$dir/mode"
+          '
+          git config --global user.email ci@example.com
+          git config --global user.name  "CI Signer"
+          devcontainer up --workspace-folder . --remove-existing-container
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            key="$HOME/.config/aic-auth/signing/id_ed25519"
+            managed=/etc/aic/user-config/gitconfig
+            grep -qx "    gpgsign = true" "$managed" || { echo "FAIL: gpgsign not enabled"; cat "$managed"; exit 1; }
+            grep -qF "signingkey = $key" "$managed" || { echo "FAIL: signingkey not wired into managed gitconfig"; cat "$managed"; exit 1; }
+            # The managed config must STILL be root-locked after adding signing.
+            perms=$(stat -c "%U %a" "$managed")
+            [ "$perms" = "root 444" ] || { echo "FAIL: managed gitconfig not root-locked ($perms)"; exit 1; }
+            cd /workspace
+            git commit --allow-empty -m "signed commit" >/dev/null
+            # %G? : G=good+verified, U=good signature (principal unverified),
+            # N=unsigned, E=error. The core guarantee is that the sandbox key
+            # actually SIGNS, so accept G or U and fail only on N/E. (Verified
+            # vs unverified depends on the committer email matching
+            # allowed_signers, which is best-effort.)
+            v=$(git log -1 --format=%G?)
+            echo "signature status: $v"
+            case "$v" in
+              G) echo "OK: commit signed and verified (G)" ;;
+              U) echo "OK: commit signed (U: good signature, principal not in allowed_signers)" ;;
+              *) echo "FAIL: expected a signature (G or U), got $v"; git log -1 --show-signature; exit 1 ;;
+            esac
+            echo "OK: sandbox signing key wired; managed gitconfig still root-locked; commit signed"
+          '
+
+      - name: CLI test - aic sync warns on / bumps a stale Dockerfile.project base
+        run: |
+          # Host-only (no container). A project-owned Dockerfile.project that
+          # pins an old aicontainer base must NOT be silently edited by sync —
+          # sync warns; only `--bump-base` rewrites the FROM. Guards the drift
+          # footgun where an override's build: runs the stale base.
+          set -euo pipefail
+          tmp="$(mktemp -d)"; cd "$tmp"; git init -q
+          cur="v$(node -p "require('$GITHUB_WORKSPACE/package.json').version")"
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
+          printf 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.1\nRUN true\n' > .devcontainer/Dockerfile.project
+          # 1) plain sync: must WARN and leave the file untouched
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync 2>&1)"; echo "$out"
+          echo "$out" | grep -q "Dockerfile.project pins .*:v0.0.1" || { echo "FAIL: no drift warning"; exit 1; }
+          grep -Fxq 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.1' .devcontainer/Dockerfile.project || { echo "FAIL: plain sync edited the file"; exit 1; }
+          # 2) sync --bump-base: must rewrite FROM to this aic's version
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --bump-base >/dev/null
+          grep -q "ghcr.io/stefanoginella/aicontainer:${cur}" .devcontainer/Dockerfile.project \
+            || { echo "FAIL: --bump-base did not rewrite FROM to ${cur}"; cat .devcontainer/Dockerfile.project; exit 1; }
+          grep -Fxq 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.1' .devcontainer/Dockerfile.project && { echo "FAIL: stale tag still present"; exit 1; }
+          echo "OK: sync warns on drift; --bump-base rewrites FROM to ${cur}"
+
+      - name: CLI test - aic sync merges project-owned vscode-extensions / vscode-settings.json
+        run: |
+          # Host-only (no container). devcontainer.json is regenerated wholesale
+          # each sync, so per-project editor config lives in two project-owned
+          # files merged at the JSONC markers. Assert: valid ids + settings land,
+          # invalid ids are rejected and don't leak into the file, the list is
+          # deduped, and a second sync is idempotent.
+          set -euo pipefail
+          tmp="$(mktemp -d)"; cd "$tmp"; git init -q
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
+          # the in-repo guide ships in pull mode too
+          test -f .devcontainer/README.md || { echo "FAIL: .devcontainer/README.md not shipped"; exit 1; }
+          grep -q 'do NOT edit' .devcontainer/README.md || { echo "FAIL: README.md missing the do-not-edit guidance"; exit 1; }
+          printf 'ms-python.python\ncharliermarsh.ruff\nms-python.python\n# a comment\nnot a valid id!!\n' > .devcontainer/vscode-extensions
+          printf '{\n  "python.defaultInterpreterPath": "/workspace/.venv/bin/python",\n  "ruff.importStrategy": "fromEnvironment"\n}\n' > .devcontainer/vscode-settings.json
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync 2>&1)"; echo "$out"
+          echo "$out" | grep -q "ignoring invalid vscode-extensions entry: not a valid id" || { echo "FAIL: invalid id not rejected"; exit 1; }
+          dc=.devcontainer/devcontainer.json
+          grep -q '"ms-python.python"'             "$dc" || { echo "FAIL: extension not merged"; exit 1; }
+          grep -q '"charliermarsh.ruff"'           "$dc" || { echo "FAIL: extension not merged"; exit 1; }
+          grep -q '"python.defaultInterpreterPath"' "$dc" || { echo "FAIL: setting not merged"; exit 1; }
+          grep -q 'not a valid id' "$dc" && { echo "FAIL: invalid id leaked into devcontainer.json"; exit 1; }
+          [ "$(grep -c '"ms-python.python"' "$dc")" = "1" ] || { echo "FAIL: extension not deduped"; exit 1; }
+          cp "$dc" "$tmp/dc-before"
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync >/dev/null 2>&1
+          diff -u "$tmp/dc-before" "$dc" || { echo "FAIL: merge not idempotent"; exit 1; }
+          echo "OK: vscode-extensions/settings merged, invalid id rejected, deduped, idempotent"
+
+      - name: CLI test - drift warning works; trusted initialize is wired
+        run: |
+          # Host-only (no container). The pinned-vs-CLI drift warning must also
+          # reach VS Code "Reopen/Rebuild in Container", which drives
+          # `devcontainer up` directly and never `aic up`: the template's
+          # initializeCommand calls the fail-closed `aic initialize`. Assert the
+          # reusable drift probe warns only on mismatch, honors the opt-out, and
+          # the full trusted initializer (validation + migration) is wired in.
+          set -euo pipefail
+          tmp="$(mktemp -d)"; cd "$tmp"; git init -q
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
+          # init pins the current version -> no drift -> check-drift is silent.
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
+          [ -z "$out" ] || { echo "FAIL: check-drift warned with no drift: $out"; exit 1; }
+          # Force drift by repinning the compose tag to a bogus version.
+          sed -i -E 's#(aicontainer:)v[0-9]+\.[0-9]+\.[0-9]+#\1v9.9.9#' .devcontainer/docker-compose.yml
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"; echo "$out"
+          echo "$out" | grep -q "pins the v9.9.9 image" || { echo "FAIL: check-drift did not warn on drift"; exit 1; }
+          # AIC_NO_UPDATE_CHECK silences it; exit stays 0 either way.
+          out="$(AIC_NO_UPDATE_CHECK=1 AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
+          [ -z "$out" ] || { echo "FAIL: AIC_NO_UPDATE_CHECK did not silence check-drift: $out"; exit 1; }
+          grep -Fq 'exec \"$aic_bin\" initialize' .devcontainer/devcontainer.json || { echo "FAIL: initializeCommand missing trusted aic initialize wiring"; exit 1; }
+          echo "OK: drift warning is precise and VS Code uses the fail-closed initializer"
+
+      - name: CLI test - Docker API read and write access are separate opt-ins
+        run: |
+          # Host-only (no container). Default exposes only ping/version;
+          # --docker-read enables Docker metadata, and --docker additionally
+          # enables writes. Each explicit mode must survive a plain sync.
+          set -euo pipefail
+          tmp="$(mktemp -d)"; cd "$tmp"; git init -q
+          dc=.devcontainer/docker-compose.yml
+          read_keys=(CONTAINERS EVENTS IMAGES INFO NETWORKS VOLUMES)
+          assert_toggle() {
+            local key=$1 value=$2
+            grep -qE "^[[:space:]]*${key}:[[:space:]]*${value}[[:space:]]*$" "$dc" \
+              || { echo "FAIL: expected ${key}: ${value}"; grep -nE "${key}|POST|BUILD" "$dc"; exit 1; }
+          }
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
+          for key in "${read_keys[@]}"; do assert_toggle "$key" 0; done
+          assert_toggle VERSION 1
+          assert_toggle PING 1
+          assert_toggle POST 0
+          assert_toggle BUILD 0
+          grep -qE '^[[:space:]]*pids_limit:[[:space:]]*[0-9]+'    "$dc" || { echo "FAIL: pids_limit missing"; exit 1; }
+
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --docker-read >/dev/null
+          for key in "${read_keys[@]}"; do assert_toggle "$key" 1; done
+          assert_toggle POST 0
+          assert_toggle BUILD 0
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync >/dev/null
+          assert_toggle CONTAINERS 1
+
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --docker >/dev/null
+          for key in "${read_keys[@]}"; do assert_toggle "$key" 1; done
+          assert_toggle POST 1
+          assert_toggle BUILD 1
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync >/dev/null
+          assert_toggle POST 1
+
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --no-docker >/dev/null
+          for key in "${read_keys[@]}"; do assert_toggle "$key" 0; done
+          assert_toggle POST 0
+          assert_toggle BUILD 0
+          echo "OK: Docker none/read/write modes are explicit, sync-stable, and default to none"
+
+      - name: CLI test - project override scan flags host-access grants before up
+        run: |
+          # Host-only (no container). Project-owned docker-compose.override.yml /
+          # Dockerfile.project ride along in an untrusted repo and ARE honored on
+          # `aic up` (the override is auto-wired into dockerComposeFile). The pre-up
+          # scan — surfaced host-side by both `aic check-drift` and VS Code's
+          # `aic initialize` structural gate — must flag privileged,
+          # cap_add, host mounts, the Docker socket, and a non-aicontainer base,
+          # stay silent on a clean project, and honor the opt-out.
+          set -euo pipefail
+          tmp="$(mktemp -d)"; cd "$tmp"; git init -q
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
+          echo "$out" | grep -q "request extra host access" && { echo "FAIL: clean project flagged"; echo "$out"; exit 1; }
+          printf 'services:\n  devcontainer:\n    privileged: true\n    cap_add:\n      - SYS_ADMIN\n    volumes:\n      - /:/host\n      - /var/run/docker.sock:/var/run/docker.sock\n' \
+            > .devcontainer/docker-compose.override.yml
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"; echo "$out"
+          echo "$out" | grep -q "privileged: true"    || { echo "FAIL: privileged not flagged"; exit 1; }
+          echo "$out" | grep -q "cap_add"             || { echo "FAIL: cap_add not flagged"; exit 1; }
+          echo "$out" | grep -q "Docker socket"       || { echo "FAIL: docker.sock not flagged"; exit 1; }
+          echo "$out" | grep -q "sensitive host path" || { echo "FAIL: host mount not flagged"; exit 1; }
+          printf 'FROM ubuntu:24.04\nRUN true\n' > .devcontainer/Dockerfile.project
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1 \
+            | grep -q "not the aicontainer base" || { echo "FAIL: non-aicontainer base not flagged"; exit 1; }
+          out="$(AIC_NO_OVERRIDE_SCAN=1 AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
+          echo "$out" | grep -q "request extra host access" && { echo "FAIL: AIC_NO_OVERRIDE_SCAN did not silence the scan"; exit 1; }
+          echo "OK: scan flags privileged/caps/socket/host-mount/non-base; clean project silent; opt-out honored"

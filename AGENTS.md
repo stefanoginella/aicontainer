@@ -6,9 +6,9 @@ Users running aicontainer in their projects start at `README.md`.
 `CLAUDE.md` is a thin pointer to this file — keep that arrangement; new
 agent-facing notes go here.
 
-Convention: "guarded by the '…' test" below names a CLI/smoke test present in
-both workflows. When you change the behavior, extend the test — never weaken
-it.
+Convention: "guarded by the '…' test" below names a CLI test or a smoke test
+in `.github/workflows/smoke.yml`. When you change the behavior, extend the
+test — never weaken it.
 
 ## Repository layout
 
@@ -46,9 +46,13 @@ it.
   - `release.yml` — **release track**: `v*` tag push (or `workflow_dispatch`
     on a tag ref) only. Ensures immutable `:vX.Y.Z` + npm artifacts exist,
     then conservatively promotes mutable latest channels.
-- `tests/` — host CLI and privileged-helper regression tests run before both
-  real-devcontainer workflow smoke suites. Security fixes normally add a fast
-  host fixture here and a runtime assertion in both workflows.
+  - `smoke.yml` — the real-devcontainer smoke suite, `on: workflow_call` only.
+    Both `rebuild.yml` and `release.yml` call it after their `build` job
+    (`needs: build`), so a runtime assertion is written once, here. Never copy
+    the job back into a caller or add another trigger.
+- `tests/` — host CLI and privileged-helper regression tests run before the
+  real-devcontainer smoke suite. Security fixes normally add a fast host
+  fixture here and a runtime assertion in `smoke.yml`.
 - `package.json` — its `version` is the source of truth for the GHCR tag `aic
   init` pins. Never bump it by hand; use `npm version` (see "Releasing").
 - `CHANGELOG.md` — hand-maintained ([Keep a Changelog](https://keepachangelog.com/)
@@ -161,8 +165,8 @@ To update a pin:
   has retired the key.
 
 Guarded by the download-integrity check in `tests/test-aic-host-security.sh`
-and the "managed zsh loads the pinned theme, plugins, and tools" smoke in both
-workflows. Every `curl` URL must match the check's table of pinned downloads or
+and the "managed zsh loads the pinned theme, plugins, and tools" smoke in
+`smoke.yml`. Every `curl` URL must match the check's table of pinned downloads or
 its short list of floating installers; a new download extends one of the two,
 together with a pin. The check's `--self-test` run changes the real Dockerfile
 in known ways (`|| true` after a check, `set +e`, a heredoc `RUN <<'SH'` script
@@ -261,7 +265,7 @@ stack and its `_aic-sessions` volume. Two rules close this:
 Do not pin the name in `validate`, `initialize`, or `trust`: without the pin
 they still see a repository override's top-level `name:`, which a direct start
 would use. Guarded by the root-`.env` cases in
-`tests/test-aic-host-security.sh` and the proj-b smoke in both workflows.
+`tests/test-aic-host-security.sh` and the proj-b smoke in `smoke.yml`.
 
 Projects created before this scheme have no top-level name. `aic sync`, the
 next `up`, or VS Code's generated `initializeCommand` copies their transcript
@@ -335,7 +339,7 @@ agent-writable by design: a read-only `.git/modules` would break submodule
 work and still not stop the agent from adding a new nested repository to the
 index. The README documents these residual risks for host Git. Guarded by the
 Git-control cases in `tests/test-aic-host-security.sh` and the "Git control
-paths" smoke in both workflows.
+paths" smoke in `smoke.yml`.
 
 `validate_project_security()` is the real pre-Docker gate. It verifies managed
 file provenance, resolves the base and merged Compose models to JSON, and
@@ -366,7 +370,7 @@ residual risk guarded only by Workspace Trust), and a changed template setting (
 `.devcontainer/` tree, so any edit asks again. Keep the file list aligned with
 `AIC_CONTROL_FILES` and the post-create/lock-helper tables. Guarded by the
 project-code cases in `tests/test-aic-host-security.sh` and the "Bring up the
-devcontainer" step in both workflows (direct start refused, then trusted).
+devcontainer" step in `smoke.yml` (direct start refused, then trusted).
 
 Two rules keep the validated model equal to what Dev Containers can start:
 
@@ -606,7 +610,7 @@ never copied whole. Load-bearing, don't undo:
 
 Guarded by `tests/test-aic-auth-sync.py`, the template/Dockerfile assertions in
 `tests/test-aic-host-security.sh`, and the "prompt/code persistence is
-project-isolated" smoke in both workflows.
+project-isolated" smoke in `smoke.yml`.
 
 `initialize_managed_volumes()` must precreate every volume/subpath/file safely
 and validate all existing volume metadata before Compose subpath resolution.
@@ -794,7 +798,7 @@ with vscode-owned tool directories (`~/.local/bin`, fnm's Node), so a typed
 command or a prompt helper can run a binary the agent replaced, and VS Code
 terminals run through the vscode-owned VS Code server. Startup hardening does
 not make a container shell more trusted than the agent. Guarded by the
-"self-protection files are root-owned 0444" smoke in both workflows and the
+"self-protection files are root-owned 0444" smoke in `smoke.yml` and the
 shell-startup assertions in `tests/test-aic-host-security.sh`.
 
 **Personal config overlay** (`shell-rc.zsh`, `p10k.zsh`, `statusline.*`) — lets
@@ -962,7 +966,7 @@ GitHub Release from the tag's `## [X.Y.Z]` section.
 Internal notes:
 
 - `rebuild.yml` validates changes to template, CLI, tests, package metadata,
-  and lifecycle scripts. Its publish-capable main/schedule/manual runs share a
+  lifecycle scripts, and `smoke.yml`. Its publish-capable main/schedule/manual runs share a
   cancel-in-progress group; PR validation is ref-scoped. Before mutable-tag
   publication it proves the template matches current default-branch HEAD.
   Scheduled/manual builds use `pull: true` + `no-cache: true`; a security
@@ -1039,7 +1043,7 @@ model; Earthly's floating-with-coupling is the documented anti-pattern.
 
 ## Don't do
 
-- **Don't weaken smoke/CLI tests** in either workflow. They cover real
+- **Don't weaken smoke/CLI tests** (`tests/`, `smoke.yml`). They cover real
   security guarantees: object-read toggles plus `POST/BUILD=0` (Docker default
   `none`), external read/write consent, resolved-config validation, path-unique
   identity/migration, metadata drops on IPv4+IPv6, the `.env` guardrail,

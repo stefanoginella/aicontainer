@@ -23,7 +23,7 @@ aic up
 aic shell
 ```
 
-If you'd rather not symlink `aic` onto your PATH, invoke it directly: `AIC_HOME=~/aicontainer ~/aicontainer/aic init --build`. The CI smoke job (`.github/workflows/rebuild.yml`) uses exactly that form and is the bar a PR has to clear.
+If you'd rather not symlink `aic` onto your PATH, invoke it directly: `AIC_HOME=~/aicontainer ~/aicontainer/aic init --build`. The CI smoke suite (`.github/workflows/smoke.yml`) uses exactly that form and is the bar a PR has to clear.
 
 > Don't `cp -R template /tmp/test/.devcontainer` directly — the template ships `docker-compose.pull.yml` and `docker-compose.build.yml` (no `docker-compose.yml`), so `devcontainer up` won't find a compose file. `aic init` is what picks the right variant and renames it.
 
