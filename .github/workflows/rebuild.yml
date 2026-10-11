@@ -662,12 +662,21 @@ jobs:
           devcontainer exec --workspace-folder . bash -lc '
             set -euo pipefail
             marker=AIC_PROJECT_A_INJECTION
-            printf "%s\n" "$marker" > "$HOME/.claude/CLAUDE.md"
+            # A symlink or hard link must not let planted memory survive the
+            # reset. Keep the planted targets in the persistent volume.
+            planted_link="$HOME/.aic-sessions/aic-planted-link.md"
+            planted_hard="$HOME/.aic-sessions/aic-planted-hard.md"
+            printf "%s\n" "$marker" > "$planted_link"
+            printf "%s\n" "$marker" > "$planted_hard"
+            rm -f "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"
+            ln -s "$planted_link" "$HOME/.aic-sessions/tool-homes/claude/CLAUDE.md"
+            ln "$planted_hard" "$HOME/.aic-sessions/tool-homes/codex/AGENTS.md"
             printf "{\"model\":\"%s\"}\n" "$marker" > "$HOME/.claude/settings.json"
             mkdir -p "$HOME/.claude/skills/aic-project-a"
             printf "%s\n" "$marker" > "$HOME/.claude/skills/aic-project-a/SKILL.md"
-            printf "%s\n" "$marker" > "$HOME/.codex/AGENTS.md"
             printf "model = \"%s\"\n" "$marker" > "$HOME/.codex/config.toml"
+            # Codex reads AGENTS.override.md in place of AGENTS.md.
+            printf "%s\n" "$marker" > "$HOME/.codex/AGENTS.override.md"
             mkdir -p "$HOME/.codex/plugins/aic-project-a"
             printf "%s\n" "$marker" > "$HOME/.codex/plugins/aic-project-a/probe"
           '
@@ -699,14 +708,31 @@ jobs:
               [ "$(stat -c %a "$private_dir")" = 700 ] \
                 || { echo "FAIL: private tool-home directory is not mode 0700: $private_dir"; exit 1; }
             done
-            ! grep -Fq "$marker" "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
-                                "$HOME/.codex/AGENTS.md" "$HOME/.codex/config.toml"
+            # `! grep` never trips set -e, so test the result explicitly.
+            if grep -Fq "$marker" "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
+                                  "$HOME/.codex/AGENTS.md" "$HOME/.codex/config.toml"; then
+              echo "FAIL: planted memory/config survived the recreate"; exit 1
+            fi
+            [ ! -e "$HOME/.codex/AGENTS.override.md" ] && [ ! -L "$HOME/.codex/AGENTS.override.md" ] \
+              || { echo "FAIL: planted Codex AGENTS.override.md survived the recreate"; exit 1; }
+            for managed in "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
+                           "$HOME/.codex/AGENTS.md" "$HOME/.codex/config.toml"; do
+              # Resolve only the tool-home link, never the managed file itself.
+              real="$(readlink -f "$(dirname "$managed")")/$(basename "$managed")"
+              [ -f "$real" ] && [ ! -L "$real" ] && [ "$(stat -c %h "$real")" = 1 ] \
+                || { echo "FAIL: managed file is not a fresh single-link regular file: $managed"; exit 1; }
+            done
+            # The reset replaced the links; it never wrote through them.
+            grep -Fqx "$marker" "$HOME/.aic-sessions/aic-planted-link.md"
+            grep -Fqx "$marker" "$HOME/.aic-sessions/aic-planted-hard.md"
+            [ "$(stat -c %h "$HOME/.aic-sessions/aic-planted-hard.md")" = 1 ]
+            rm -f "$HOME/.aic-sessions/aic-planted-link.md" "$HOME/.aic-sessions/aic-planted-hard.md"
             grep -Fq "$marker" "$HOME/.claude/skills/aic-project-a/SKILL.md"
             grep -Fq "$marker" "$HOME/.codex/plugins/aic-project-a/probe"
             for child in "$HOME/.config/aic-auth"/*; do
               case "$(basename "$child")" in signing|semgrep) ;; *) echo "FAIL: broad auth-root child exposed: $child"; exit 1 ;; esac
             done
-            echo "OK: managed memory/config reset on recreate; project-local skills/plugins persist only here"
+            echo "OK: managed memory/config reset on recreate, symlinks and hard links included; project-local skills/plugins persist only here"
           '
           mkdir -p /tmp/proj-b
           git -C /tmp/proj-b init -q
@@ -741,7 +767,9 @@ jobs:
                         "$HOME/.codex/skills" "$HOME/.codex/rules" \
                         "$HOME/.codex/prompts" "$HOME/.codex/plugins"; do
               [ -e "$path" ] || { echo "FAIL: isolated prompt/code surface missing: $path"; exit 1; }
-              ! grep -R -Fq "$marker" "$path"
+              if grep -R -Fq "$marker" "$path"; then
+                echo "FAIL: project A injection reached project B: $path"; exit 1
+              fi
             done
             echo "OK: project A prompt/code injection is absent from project B"
           '

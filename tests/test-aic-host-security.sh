@@ -479,9 +479,12 @@ if (cd "$TMP/profiles" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
     "$ROOT/aic" validate </dev/null >/dev/null 2>&1); then
   fail "validate accepted an untrusted profile-gated service"
 fi
-sed 's|^  "customizations": {|  "runServices": ["devcontainer", "hidden"],\
-  "waitFor": "onCreateCommand",\
+# waitFor is managed: VS Code must not open a terminal (and start an agent)
+# before post-create has reset the managed memory files and locked config.
+sed -e 's|^  "customizations": {|  "runServices": ["devcontainer", "hidden"],\
+  "shutdownAction": "none",\
   "customizations": {|' \
+  -e 's|^  "waitFor": "postCreateCommand"|  "waitFor": "onCreateCommand"|' \
   "$TMP/profiles/.devcontainer/devcontainer.json" \
   > "$TMP/profiles/.devcontainer/devcontainer.json.tmp"
 mv "$TMP/profiles/.devcontainer/devcontainer.json.tmp" \
@@ -489,8 +492,10 @@ mv "$TMP/profiles/.devcontainer/devcontainer.json.tmp" \
 out=$(cd "$TMP/profiles" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
 echo "$out" | grep -q 'must not define unmanaged runServices' \
   || fail "devcontainer.json runServices bypassed managed validation"
-echo "$out" | grep -q 'must not define unmanaged waitFor' \
+echo "$out" | grep -q 'must not define unmanaged shutdownAction' \
   || fail "devcontainer.json top-level keys are not an allow-list"
+echo "$out" | grep -q 'managed anchor waitFor differs from the template' \
+  || fail "devcontainer.json waitFor can let VS Code open a terminal before post-create"
 (cd "$TMP/profiles" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
 sed 's|^    "vscode": {|    "codespaces": {},\
     "vscode": {|' \

@@ -1016,6 +1016,12 @@ env/header credentials are deliberately removed, so authenticate inside the
 sandbox or reference an in-container environment variable. Claude, Codex, and
 OpenCode user config is project-scoped and reconciled from the sanitized seed
 on recreate; root-managed policy remains separate from those writable homes.
+Each create also replaces the user-level `CLAUDE.md`/`AGENTS.md` with aic's
+sandbox note, also when an earlier session made it a link, and removes Codex
+`AGENTS.override.md` and OpenCode `opencode.jsonc`/`config.json` from the tool
+homes. Keep lasting instructions in the repository's own `CLAUDE.md`/`AGENTS.md`.
+VS Code opens a terminal only after this setup is done, which includes the
+AI-tool update, so the first open after a rebuild can take a minute or more.
 
 **Providers (OpenCode):** custom provider/model definitions carry over, but
 secret-looking provider keys are stripped recursively. Run `opencode auth

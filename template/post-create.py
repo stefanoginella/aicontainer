@@ -337,6 +337,132 @@ def _safe_write_text(path: Path, text: str, *, create: bool = False) -> None:
         os.close(fd)
 
 
+def _open_directory_nofollow(path: Path) -> int:
+    """Open an absolute directory one component at a time, never following a
+    link, so a swapped ancestor cannot redirect the operation."""
+    if not path.is_absolute():
+        raise OSError(f"managed directory must be absolute: {path}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open("/", flags)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except OSError as error:
+        os.close(fd)
+        raise OSError(f"refusing symlinked or non-directory path: {path}: {error}") from error
+    return fd
+
+
+def _ensure_tool_home(path: Path) -> None:
+    """Make one fixed tool home, and the tool-homes directory above it, real
+    directories.
+
+    Both are vscode-owned, so a previous session can swap one for a link to a
+    directory with its own memory/config. Remove only the link (or other
+    non-directory) entry, never what it points to, then recreate it.
+    """
+    for directory in (path.parent, path):
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            info = None
+        if info is not None and not stat.S_ISDIR(info.st_mode):
+            directory.unlink()
+            log(f"replaced non-directory tool home {directory}")
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Fail here, not later, when an ancestor is still a link. A previous
+        # session can also remove its own write bit to block the reset.
+        fd = _open_directory_nofollow(directory)
+        try:
+            mode = 0o700 if directory == path else stat.S_IMODE(os.fstat(fd).st_mode) | 0o700
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+
+
+def _quarantine_directory(name: str, dir_fd: int) -> None:
+    """Rename a directory at a fixed managed name aside, so the name can be
+    replaced. A tool does not load a dot-named quarantine directory."""
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        aside = f".{name}.aic-quarantine-{secrets.token_hex(8)}"
+        os.rename(name, aside, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        log(f"moved directory at managed name {name} aside to {aside}")
+
+
+def _remove_managed_name(path: Path) -> None:
+    """Remove a file that would load before or over a managed file. A link is
+    removed, never followed; a directory is moved aside."""
+    dir_fd = _open_directory_nofollow(path.parent)
+    try:
+        _quarantine_directory(path.name, dir_fd)
+        try:
+            os.unlink(path.name, dir_fd=dir_fd)
+            log(f"removed unmanaged {path}")
+        except FileNotFoundError:
+            pass
+    finally:
+        os.close(dir_fd)
+
+
+def _reset_managed_files(*resets) -> None:
+    """Run every reset even when one fails, then raise the first error, so a
+    blocked config file cannot keep the memory reset from running (or the
+    other way around)."""
+    first: BaseException | None = None
+    for reset in resets:
+        try:
+            reset()
+        except Exception as error:  # noqa: BLE001 - run the other resets first
+            log(f"error: managed reset failed: {type(error).__name__}: {error}")
+            first = first or error
+    if first is not None:
+        raise first
+
+
+def _replace_managed_file(path: Path, text: str) -> None:
+    """Replace one fixed managed config/memory file with a new inode.
+
+    These files are regenerated on every create, so nothing at the path is
+    kept: a new 0600 file is created beside it with O_EXCL and renamed over the
+    entry. The rename replaces a symlink or hard-link name without writing
+    through it, so a previous session cannot keep its own text this way. A
+    directory at the name is moved aside first.
+    """
+    dir_fd = _open_directory_nofollow(path.parent)
+    temp_name = f".{path.name}.aic-{secrets.token_hex(8)}"
+    flags = (
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        fd = os.open(temp_name, flags, 0o600, dir_fd=dir_fd)
+        try:
+            try:
+                view = memoryview(text.encode())
+                while view:
+                    written = os.write(fd, view)
+                    view = view[written:]
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
+            _quarantine_directory(path.name, dir_fd)
+            os.replace(temp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            try:
+                os.unlink(temp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dir_fd)
+
+
 def _project_chown_paths() -> list[Path]:
     """Parse .devcontainer/chown-paths (project-owned, RO-mounted) into the
     list of extra volume mountpoints to re-own. Entries outside the prefix
@@ -414,20 +540,19 @@ def load_host_claude_settings() -> dict:
     return _load_sanitized_seed(HOST_SEED_CLAUDE)
 
 
-def ensure_sandbox_memory(path: Path, *, create: bool = False) -> None:
+def ensure_sandbox_memory(path: Path) -> None:
     """Replace an auto-loaded user-memory file with the managed sandbox note.
 
     Preserving arbitrary prior text lets one compromised session plant prompts
     that execute in a later create. Users keep intentional project instructions
     in the repository's CLAUDE.md/AGENTS.md; these user-level files are managed
-    security surfaces and are reset on every create.
+    security surfaces and are reset on every create. A symlink or hard link at
+    the path is replaced, never followed or kept, and a failed reset is an
+    error (see main()), not a warning.
     """
     block = f"{SANDBOX_MEMORY_BEGIN}\n{SANDBOX_MEMORY_NOTE}\n{SANDBOX_MEMORY_END}\n"
-    try:
-        _safe_write_text(path, block, create=create)
-        log(f"reset managed sandbox note -> {path}")
-    except OSError as e:
-        log(f"warning: could not write sandbox note to {path}: {e}")
+    _replace_managed_file(path, block)
+    log(f"reset managed sandbox note -> {path}")
 
 
 def setup_claude() -> None:
@@ -437,17 +562,21 @@ def setup_claude() -> None:
     auth-sync sidecar copies only .credentials.json between this whole home and
     the global credential store."""
     claude_dir = CLAUDE_HOME
-    claude_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_tool_home(claude_dir)
 
     settings_file = claude_dir / "settings.json"
     settings = load_host_claude_settings()
 
-    _safe_write_text(settings_file, json.dumps(settings, indent=2) + "\n", create=True)
-    log(f"wrote {settings_file}")
+    def write_settings() -> None:
+        _replace_managed_file(settings_file, json.dumps(settings, indent=2) + "\n")
+        log(f"wrote {settings_file}")
 
     # User-level memory is project-local and reset to the managed note on every
     # create, preventing a prior autonomous session from planting instructions.
-    ensure_sandbox_memory(claude_dir / "CLAUDE.md", create=True)
+    _reset_managed_files(
+        lambda: ensure_sandbox_memory(claude_dir / "CLAUDE.md"),
+        write_settings,
+    )
 
     # Every session/history/customization path now lives in this whole
     # per-project home; no globally writable directory controls it. Precreate
@@ -477,7 +606,7 @@ def setup_codex() -> None:
     auto-trusts and the in-container user can't disable. A host `[hooks]` table
     is already dropped by load_host_codex_config()'s allowlist."""
     codex_dir = CODEX_HOME
-    codex_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_tool_home(codex_dir)
 
     cfg = load_host_codex_config()
     cfg["approval_policy"] = "never"
@@ -489,12 +618,18 @@ def setup_codex() -> None:
     sys.path.insert(0, "/opt/aic-python")
     import tomli_w  # type: ignore[import-not-found]  # noqa: PLC0415
 
-    _safe_write_text(config_toml, tomli_w.dumps(cfg), create=True)
-    log(f"wrote {config_toml}")
+    def write_config() -> None:
+        _replace_managed_file(config_toml, tomli_w.dumps(cfg))
+        log(f"wrote {config_toml}")
 
     # AGENTS.md auto-loads for Codex, but is project-local and reset to the
-    # managed note on every create.
-    ensure_sandbox_memory(codex_dir / "AGENTS.md", create=True)
+    # managed note on every create. Codex reads AGENTS.override.md in place of
+    # AGENTS.md, so that name must not survive either.
+    _reset_managed_files(
+        lambda: ensure_sandbox_memory(codex_dir / "AGENTS.md"),
+        lambda: _remove_managed_name(codex_dir / "AGENTS.override.md"),
+        write_config,
+    )
 
     for dirname in ("sessions", "skills", "rules", "prompts", "plugins"):
         (codex_dir / dirname).mkdir(exist_ok=True)
@@ -1404,14 +1539,23 @@ def setup_opencode() -> None:
     cfg["permission"] = {"*": "allow"}
     cfg["plugin"] = ["/etc/aic/hooks/opencode-guardrail.js"]
 
-    OPENCODE_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_tool_home(OPENCODE_CONFIG_DIR)
     config_json = OPENCODE_CONFIG_DIR / "opencode.json"
-    _safe_write_text(config_json, json.dumps(cfg, indent=2) + "\n", create=True)
-    log(f"wrote {config_json}")
+
+    def write_config() -> None:
+        _replace_managed_file(config_json, json.dumps(cfg, indent=2) + "\n")
+        log(f"wrote {config_json}")
 
     # OpenCode AGENTS.md auto-loads every session (it takes precedence over
-    # ~/.claude/CLAUDE.md) and is reset on every create.
-    ensure_sandbox_memory(OPENCODE_CONFIG_DIR / "AGENTS.md", create=True)
+    # ~/.claude/CLAUDE.md) and is reset on every create. OpenCode also merges
+    # config.json and opencode.jsonc from this directory (.jsonc last), which
+    # could add instructions or override opencode.json, so remove both.
+    _reset_managed_files(
+        lambda: ensure_sandbox_memory(OPENCODE_CONFIG_DIR / "AGENTS.md"),
+        lambda: _remove_managed_name(OPENCODE_CONFIG_DIR / "config.json"),
+        lambda: _remove_managed_name(OPENCODE_CONFIG_DIR / "opencode.jsonc"),
+        write_config,
+    )
 
     # sqlite creates the DB file but not its parent. Everything below this
     # directory is an ordinary per-project path, so OpenCode's atomic updates
@@ -1730,7 +1874,7 @@ def apply_statusline() -> None:
         return
     settings["statusLine"] = {"type": "command", "command": STATUSLINE_COMMAND}
     try:
-        _safe_write_text(settings_file, json.dumps(settings, indent=2) + "\n")
+        _replace_managed_file(settings_file, json.dumps(settings, indent=2) + "\n")
     except OSError as e:
         log(f"warning: could not wire the statusline into {settings_file}: {e}")
         return
@@ -1954,40 +2098,64 @@ def refresh_ai_tools() -> None:
         _refresh_command("opencode", ["opencode", "upgrade"], 300, env)
 
 
-def main() -> None:
+def _run_step(step, failed: list[str]) -> None:
+    """Run one post-create step so its failure cannot skip the later ones.
+
+    The reset, lock, and statusline steps must still run when an earlier step
+    fails. A failed step is logged here and fails the command after all steps.
+    """
+    try:
+        step()
+    except Exception as error:  # noqa: BLE001 - every later step must still run
+        log(f"error: {step.__name__} failed: {type(error).__name__}: {error}")
+        failed.append(step.__name__)
+
+
+def main() -> int:
     log(f"starting (tools: {','.join(sorted(ENABLED_TOOLS)) or 'none'})")
-    fix_volume_ownership()
-    block_metadata()
-    refresh_ai_tools()
-    if "claude-code" in ENABLED_TOOLS:
-        setup_claude()
-    else:
-        log("skipping claude setup (not in AIC_TOOLS)")
-    if "codex" in ENABLED_TOOLS:
-        setup_codex()
-    else:
-        log("skipping codex setup (not in AIC_TOOLS)")
-    if "opencode" in ENABLED_TOOLS:
-        setup_opencode()
-    else:
-        log("skipping opencode setup (not in AIC_TOOLS)")
-    setup_cli_homes()
-    # semgrep: no setup needed. It is pointed at
-    # ~/.config/aic-auth/semgrep/settings.yml via SEMGREP_SETTINGS_FILE
-    # (devcontainer.json), inside a fixed subpath of the global auth volume —
-    # no leaf-file symlink to be clobbered by its atomic-rename writes.
-    setup_gitconfig()
-    setup_personal_shell()
-    setup_statusline()
-    lock_config()
-    # After the install, so it keys off the root-owned file that actually landed.
-    apply_statusline()
-    verify_socket_proxy()
-    run_project_hook()
-    # Last, so a missing-identity warning is the final thing in `aic rebuild`
-    # output rather than scrolling past mid-flow.
-    verify_git_identity()
+    steps = [fix_volume_ownership, block_metadata]
+    for tool, step in (
+        ("claude-code", setup_claude),
+        ("codex", setup_codex),
+        ("opencode", setup_opencode),
+    ):
+        if tool in ENABLED_TOOLS:
+            steps.append(step)
+        else:
+            log(f"skipping {tool.removesuffix('-code')} setup (not in AIC_TOOLS)")
+    steps += [
+        # After the resets: the updaters start the tools, which must not load a
+        # previous session's settings, memory, or config.
+        refresh_ai_tools,
+        setup_cli_homes,
+        # semgrep: no setup needed. It is pointed at
+        # ~/.config/aic-auth/semgrep/settings.yml via SEMGREP_SETTINGS_FILE
+        # (devcontainer.json), inside a fixed subpath of the global auth volume —
+        # no leaf-file symlink to be clobbered by its atomic-rename writes.
+        setup_gitconfig,
+        setup_personal_shell,
+        setup_statusline,
+        lock_config,
+        # After the install, so it keys off the root-owned file that actually landed.
+        apply_statusline,
+        verify_socket_proxy,
+        run_project_hook,
+        # Last, so a missing-identity warning is the final thing in `aic rebuild`
+        # output rather than scrolling past mid-flow.
+        verify_git_identity,
+    ]
+    failed: list[str] = []
+    for step in steps:
+        if step is apply_statusline and "setup_claude" in failed:
+            log("skipping apply_statusline: setup_claude failed")
+            continue
+        _run_step(step, failed)
+    if failed:
+        log(f"failed steps: {', '.join(failed)}; the sandbox may be half-configured. "
+            "Fix the error above, then run 'aic rebuild'.")
+        return 1
     log("done")
+    return 0
 
 
 if __name__ == "__main__":
@@ -1998,4 +2166,4 @@ if __name__ == "__main__":
     if sys.argv[1:]:
         log(f"unknown arguments: {' '.join(sys.argv[1:])}")
         raise SystemExit(2)
-    main()
+    raise SystemExit(main())

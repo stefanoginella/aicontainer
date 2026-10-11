@@ -411,6 +411,30 @@ homes. Keep the lists aligned with the "prompt/code persistence is
 project-isolated" smoke test: an empty new project must expose the same
 inspectable isolated surface as one where a CLI has already used the feature.
 
+The managed memory/config files (`CLAUDE.md`, `AGENTS.md`, Claude
+`settings.json`, Codex `config.toml`, `opencode.json`) are rewritten on every
+create by `_replace_managed_file()`: a new `O_EXCL` file renamed over the entry,
+with the parent opened one component at a time without following links. A
+directory at the name is moved aside first. A previous session owns these
+homes, so never "fix" this into an in-place write: a symlink or hard link would
+then keep its planted text. Names that load in place of or over a managed file
+(Codex `AGENTS.override.md`, OpenCode `config.json`/`opencode.jsonc`) are
+removed. `_ensure_tool_home()` replaces a tool home (or `tool-homes/`) that is
+a link, never its target, and restores the owner's write bit. Load-bearing:
+
+- In each `setup_*`, `_reset_managed_files()` attempts every reset even when
+  one fails, so a blocked config file cannot skip the memory reset.
+- The `setup_*` resets run before `refresh_ai_tools()`: the updaters start the
+  tools, which must not load a previous session's settings or memory.
+- `main()` runs every step through `_run_step()`, so one failure cannot skip
+  the lock or project-hook steps; any failure still exits nonzero.
+- The template sets `"waitFor": "postCreateCommand"` so VS Code opens no
+  terminal before the reset.
+
+Guarded by `tests/test-aic-post-create-reset.py`, the `waitFor` case in
+`tests/test-aic-host-security.sh`, and the "prompt/code persistence is
+project-isolated" smoke.
+
 Login-once behavior comes from `aic-auth-sync`, not shared tool homes. It is the
 only service that sees both the per-project sessions root and the five global
 tool-auth subpaths (`claude`, `codex`, `opencode`, `gh`, `npm`). It runs

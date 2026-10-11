@@ -72,5 +72,9 @@
   // compatible fallback before giving one actionable error.
   "initializeCommand": "sh -c 'supports_initialize() { [ -n \"$1\" ] && [ -x \"$1\" ] && grep -Eq \"^[[:space:]]*initialize\\\\)\" \"$1\" 2>/dev/null; }; aic_bin=; incompatible=0; for candidate in \"$(command -v aic 2>/dev/null || true)\" \"$HOME/.aicontainer/aic\" \"$HOME/.local/bin/aic\" \"$HOME/.npm-global/bin/aic\" \"$HOME/.npm/bin/aic\" \"$HOME/.volta/bin/aic\" \"$HOME/.asdf/shims/aic\" \"$HOME/.local/share/mise/shims/aic\" /opt/homebrew/bin/aic /usr/local/bin/aic /usr/bin/aic; do if [ -n \"$candidate\" ] && [ -x \"$candidate\" ]; then if supports_initialize \"$candidate\"; then aic_bin=$candidate; break; else incompatible=1; fi; fi; done; if [ -z \"$aic_bin\" ]; then for candidate in \"$HOME\"/.nvm/versions/node/*/bin/aic \"$HOME\"/.local/share/fnm/node-versions/*/installation/bin/aic; do if [ -x \"$candidate\" ]; then if supports_initialize \"$candidate\"; then aic_bin=$candidate; else incompatible=1; fi; fi; done; fi; if [ -z \"$aic_bin\" ]; then if [ \"$incompatible\" -eq 1 ]; then echo \"aic: installed host CLI is too old for this project. Upgrade it with: npm update -g aicontainer (then reopen/rebuild).\" >&2; else echo \"aic: required host CLI not found. Install it with: npm install -g aicontainer (then reopen/rebuild).\" >&2; fi; exit 1; fi; exec \"$aic_bin\" initialize'",
 
-  "postCreateCommand": "/usr/bin/python3 -I /opt/post-create.py"
+  "postCreateCommand": "/usr/bin/python3 -I /opt/post-create.py",
+
+  // VS Code opens terminals only after post-create, so no agent starts before
+  // the managed memory/config reset and the root-owned config lock are done.
+  "waitFor": "postCreateCommand"
 }

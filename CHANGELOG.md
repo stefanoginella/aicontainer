@@ -72,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (aliases, pager, `registry`, `script-shell`, …) are not carried over.
   (docker-compose, Dockerfile, post-create.py)
 
+- **Planted agent instructions no longer survive a rebuild.** A symlink, hard
+  link, or directory at `CLAUDE.md`, `AGENTS.md`, or a tool config file kept a
+  previous session's text or stopped setup half-way. Codex
+  `AGENTS.override.md` and OpenCode `opencode.jsonc`/`config.json` in the tool
+  home are now removed on each create. (post-create.py)
+
+- **VS Code opens a terminal only after container setup is done.** Before,
+  an agent could start before the managed instructions and config were reset.
+  Run `aic sync` once per project. (devcontainer.json)
+
 ### Changed
 
 - **`aic up` and VS Code starts now require a `.git` directory.** Without
