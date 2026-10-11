@@ -262,10 +262,28 @@ stack and its `_aic-sessions` volume. Two rules close this:
   against the CLI source when `@devcontainers/cli` changes its project-name
   lookup.
 
+The hash input is the **stored spelling** of the path. `canonical_root()` is the
+only way `aic` reads the checkout path: it runs `/bin/pwd -P`, because bash's
+builtin `pwd -P` keeps the case the user typed and macOS volumes ignore case,
+while Node, the Dev Containers CLI, and VS Code take the stored spelling from
+`getcwd()`. The builtin gave a second hash for the same folder, so validation,
+the `devcontainer.local_folder` ownership proof, and the sessions volume all
+disagreed. The validator's Node code uses `fs.realpathSync.native` for the same
+reason (the JS `realpathSync` keeps the typed case, and Compose spells bind
+sources from `$PWD`). Never reintroduce the builtin; a static check fails on it.
+A project hashed from a wrong-case path still has the old name in its Compose
+file. `previous_project_names()` finds earlier names of this workspace only from
+containers that carry the exact canonical workspace label, with this project's
+label and a 12-hex hash; `aic sync` (a name that differs from the expected one)
+and every start then copy the sessions volume and stop the old stack through the
+same ownership proof as the legacy basename migration. Without such a container
+the old volume is preserved and not imported.
+
 Do not pin the name in `validate`, `initialize`, or `trust`: without the pin
 they still see a repository override's top-level `name:`, which a direct start
-would use. Guarded by the root-`.env` cases in
-`tests/test-aic-host-security.sh` and the proj-b smoke in `smoke.yml`.
+would use. Guarded by the root-`.env` cases and the identity cases (static builtin-`pwd -P`
+check, earlier-identity migration, wrong-case start on a case-insensitive volume)
+in `tests/test-aic-host-security.sh` and the proj-b smoke in `smoke.yml`.
 
 Projects created before this scheme have no top-level name. `aic sync`, the
 next `up`, or VS Code's generated `initializeCommand` copies their transcript

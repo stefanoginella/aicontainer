@@ -1837,6 +1837,15 @@ if [ "$tool" = docker ]; then
     "context inspect") printf '%s\n' unix:///var/run/docker.sock; exit 0 ;;
     # Socket runtime detection is a read-only query; answer "no daemon".
     "-H unix://"*) [ "${3:-}" = info ] && exit 1 ;;
+    # Earlier-identity discovery lists the Compose project of every container
+    # that carries the workspace label. Silent unless a test names a project.
+    "ps -a")
+      if [ -n "${AIC_FAKE_PREVIOUS_PROJECT:-}" ]; then
+        log_call "$@"
+        printf '%s\n' "$AIC_FAKE_PREVIOUS_PROJECT"
+      fi
+      exit 0
+      ;;
     "ps -aq")
       if [ -n "${AIC_FAKE_LEGACY_CONTAINER:-}" ]; then
         log_call "$@"
@@ -2124,6 +2133,98 @@ hashed_owned_volume=$(sed -n 's/^name:[[:space:]]*//p' \
   "$TMP/legacy-owned/.devcontainer/docker-compose.yml")_aic-sessions
 grep -Fqx "$hashed_owned_volume" "$owned_state" \
   || fail "legacy migration did not create the path-unique destination volume"
+
+# A project set up from a wrong-case path (macOS volumes ignore case) carries a
+# Compose name hashed from that spelling, while Dev Containers and VS Code use
+# the stored one. Sync re-derives the name and copies the transcripts once, but
+# only from a name with this project's label and a 12-hex hash that a container
+# carrying the exact canonical workspace label proves; a foreign or malformed
+# name is never a source. The old stack is then stopped by the same proof.
+new_project "$TMP/prev-name"
+prev_project="aic-prev-name-0123456789ab"
+prev_volume="${prev_project}_aic-sessions"
+prev_state="$TMP/prev-name.volumes"
+prev_workspace=$(cd "$TMP/prev-name" && pwd -P)
+sed -E "s/^name:.*/name: $prev_project/" "$TMP/prev-name/.devcontainer/docker-compose.yml" \
+  > "$TMP/prev-name/.devcontainer/docker-compose.yml.tmp"
+mv "$TMP/prev-name/.devcontainer/docker-compose.yml.tmp" \
+  "$TMP/prev-name/.devcontainer/docker-compose.yml"
+printf '%s\n' "$prev_volume" > "$prev_state"
+for foreign in aic-other-0123456789ab aic-prev-name-nothexnothex; do
+  : > "$log"
+  out=$(cd "$TMP/prev-name" && PATH="$fakebin:$PATH" \
+    AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+    AIC_FAKE_VOLUME_STATE="$prev_state" AIC_FAKE_PREVIOUS_PROJECT="$foreign" \
+    AIC_FAKE_LEGACY_CONTAINER=prev-container \
+    AIC_FAKE_LEGACY_WORKSPACE="$prev_workspace" \
+    AIC_FAKE_LEGACY_PROJECT="$foreign" \
+    AIC_FAKE_LEGACY_VOLUME="${foreign}_aic-sessions" \
+    AIC_FAKE_LEGACY_DESTINATION=/home/vscode/.aic-sessions \
+    AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" sync 2>&1)
+  grep -q '<run>' "$log" && fail "sync copied from a project name that is not this project's earlier identity ($foreign)"
+  # Put the stale name back: the sync above already re-pinned the real one.
+  sed -E "s/^name:.*/name: $prev_project/" "$TMP/prev-name/.devcontainer/docker-compose.yml" \
+    > "$TMP/prev-name/.devcontainer/docker-compose.yml.tmp"
+  mv "$TMP/prev-name/.devcontainer/docker-compose.yml.tmp" \
+    "$TMP/prev-name/.devcontainer/docker-compose.yml"
+done
+: > "$log"
+out=$(cd "$TMP/prev-name" && PATH="$fakebin:$PATH" \
+  AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+  AIC_FAKE_VOLUME_STATE="$prev_state" AIC_FAKE_PREVIOUS_PROJECT="$prev_project" \
+  AIC_FAKE_LEGACY_CONTAINER=prev-container \
+  AIC_FAKE_LEGACY_WORKSPACE="$prev_workspace" \
+  AIC_FAKE_LEGACY_PROJECT="$prev_project" \
+  AIC_FAKE_LEGACY_VOLUME="$prev_volume" \
+  AIC_FAKE_LEGACY_DESTINATION=/home/vscode/.aic-sessions \
+  AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" sync 2>&1)
+echo "$out" | grep -q 'session migration complete' \
+  || fail "sync did not migrate the sessions volume of an earlier project identity"
+grep -q "<--filter> <label=devcontainer.local_folder=$prev_workspace> <--format>" "$log" \
+  || fail "earlier-identity discovery omitted the canonical workspace label"
+grep -q "<$prev_volume:/from:ro>" "$log" \
+  || fail "earlier-identity volume was not mounted read-only for copying"
+prev_new_name=$(sed -n 's/^name:[[:space:]]*//p' "$TMP/prev-name/.devcontainer/docker-compose.yml")
+[ "$prev_new_name" != "$prev_project" ] || fail "sync kept the earlier project name"
+grep -Fqx "${prev_new_name}_aic-sessions" "$prev_state" \
+  || fail "earlier-identity migration did not create the current sessions volume"
+# The old stack goes down only on the same proof, never by name alone.
+: > "$log"
+out=$(cd "$TMP/prev-name" && PATH="$fakebin:$PATH" \
+  AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+  AIC_FAKE_VOLUME_STATE="$prev_state" AIC_FAKE_PREVIOUS_PROJECT="$prev_project" \
+  AIC_FAKE_LEGACY_CONTAINER=prev-container \
+  AIC_FAKE_LEGACY_WORKSPACE="$prev_workspace" \
+  AIC_FAKE_LEGACY_PROJECT="$prev_project" \
+  AIC_FAKE_LEGACY_VOLUME="$prev_volume" \
+  AIC_FAKE_LEGACY_DESTINATION=/home/vscode/.aic-sessions \
+  AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" up </dev/null 2>&1)
+echo "$out" | grep -q "stopping this workspace's legacy Compose stack '$prev_project'" \
+  || fail "the stack of an earlier project identity was not stopped"
+grep -q "<compose> <-p> <$prev_project>.*<down>" "$log" \
+  || fail "the stack of an earlier project identity did not reach trusted compose down"
+grep -q "<--remove-orphans>" "$log" && fail "earlier-identity cleanup used --remove-orphans"
+
+# Identity comes from the stored spelling of the path, never the typed one.
+# Bash's builtin `pwd -P` keeps the typed case, so only /bin/pwd (canonical_root)
+# may sit in the identity code. The behavior itself needs a case-insensitive
+# volume (macOS default), so the second half skips on case-sensitive ones.
+if grep -v '^[[:space:]]*#' "$ROOT/aic" | grep 'pwd -P' | grep -vF '/bin/pwd -P; else pwd -P'; then
+  fail "aic uses the builtin pwd -P, which keeps the typed letter case"
+fi
+mkdir -p "$TMP/CaseProbe/Repo"
+if [ -d "$TMP/caseprobe/repo" ]; then
+  new_project "$TMP/CaseProbe/Repo"
+  real_name=$(sed -n 's/^name:[[:space:]]*//p' "$TMP/CaseProbe/Repo/.devcontainer/docker-compose.yml")
+  [ -n "$real_name" ] || fail "case probe project has no Compose name"
+  out=$(cd "$TMP/caseprobe/repo" && AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1) \
+    || fail "validate rejected the project when started from a wrong-case path: $out"
+  (cd "$TMP/caseprobe/repo" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1)
+  [ "$(sed -n 's/^name:[[:space:]]*//p' "$TMP/CaseProbe/Repo/.devcontainer/docker-compose.yml")" = "$real_name" ] \
+    || fail "sync from a wrong-case path changed the project identity"
+  grep -qx "AIC_STATUS_PROJECT_ID=$real_name" "$TMP/CaseProbe/Repo/.devcontainer/.env" \
+    || fail "the runtime environment file did not keep the stored-case identity"
+fi
 
 # Commands that call `devcontainer exec` must apply the full resolved-config
 # gate first; path/symlink validation alone is insufficient because the CLI

@@ -143,6 +143,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A project now keeps one identity whatever letter case you type in its path.**
+  On macOS, typing `~/projects/app` for the folder `~/Projects/App` gave a
+  different project name than VS Code, so validation failed and the session
+  history looked gone. An affected project moves its history to the new volume
+  once on `aic sync`, and the old stack is stopped. (aic)
+
 - **A too-old Docker Compose now gets a clear upgrade message.** aic needs
   Compose 2.35+; `aic doctor` accepted 2.24+, and validation then failed with
   an `aic sync` hint that could not help. (aic)

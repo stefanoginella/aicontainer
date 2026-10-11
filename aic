@@ -52,13 +52,24 @@ legacy_project_name () {
   printf '%s_devcontainer\n' "$base"
 }
 
+# Physical path of the current directory, spelled the way the filesystem stores
+# it. Bash's builtin `pwd -P` resolves symlinks but keeps the letter case the
+# user typed, and macOS volumes are case-insensitive by default. Node and the
+# Dev Containers CLI take the stored spelling from getcwd(), as does VS Code, so
+# the identity hash and every devcontainer.local_folder comparison must too:
+# /bin/pwd asks the kernel. Never call the builtin `pwd -P` for identity; a
+# test fails on it. Only a host with no /bin/pwd falls back to the builtin.
+canonical_root () {
+  if [ -x /bin/pwd ]; then /bin/pwd -P; else pwd -P; fi
+}
+
 # Deterministic Compose project name for newly generated configuration. The
 # readable basename is suffixed with a hash of the canonical absolute project
 # path, so two checkouts with the same basename never share containers or
 # per-project session volumes.
 expected_project_name () {
   local base root hash
-  root="$(pwd -P)"
+  root="$(canonical_root)"
   base="$(expected_project_label)"
   hash="$(node -e 'process.stdout.write(require("crypto").createHash("sha256").update(process.argv[1]).digest("hex").slice(0,12))' "$root")" \
     || die "Node.js 18+ is required to compute the project identity"
@@ -70,7 +81,7 @@ expected_project_name () {
 # hash in expected_project_name() remains the collision-resistant identifier.
 expected_project_label () {
   local base
-  base="$(basename -- "$(pwd -P)")"
+  base="$(basename -- "$(canonical_root)")"
   # toLowerCase().replace(/[^a-z0-9_-]/g, '') — strip, don't substitute. Keep
   # the readable portion bounded so Docker object names remain manageable.
   base="$(printf '%s' "$base" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -dc 'a-z0-9_-')"
@@ -1399,10 +1410,23 @@ check_dockerfile_project_base () {
 cmd_sync () {
   require_in_project
   local mode="" tools="" shell="" bump_base="" docker="" docker_explicit=0 was_legacy=0
+  local old_name
   # A missing top-level name is the only legacy form. A present but tampered
   # name is simply overwritten from the trusted template; never resolve it as
   # the old basename-scoped identity.
   compose_has_project_name || was_legacy=1
+  # A well-formed name that is not this path's current one (a hash taken from a
+  # wrong-case spelling, see canonical_root) also moves the sessions volume.
+  # Sync overwrites the name below, so look at it now; the copy itself needs a
+  # container that proves ownership, never the name alone.
+  if [ "$was_legacy" = "0" ] && [ -f .devcontainer/docker-compose.yml ] \
+      && [ ! -L .devcontainer/docker-compose.yml ]; then
+    old_name="$(sed -n 's/^name[[:space:]]*:[[:space:]]*\(aic-[a-z0-9_-]*-[0-9a-f]\{12\}\)[[:space:]]*$/\1/p' \
+      .devcontainer/docker-compose.yml | head -n1)"
+    if [ -n "$old_name" ] && [ "$old_name" != "$(expected_project_name)" ]; then
+      was_legacy=1
+    fi
+  fi
   while [ $# -gt 0 ]; do
     case "$1" in
       --pull)  mode="pull" ;;
@@ -1489,9 +1513,9 @@ cmd_sync () {
   if [ "$docker_explicit" != "0" ] || [ "$docker" = "none" ]; then
     set_docker_consent "$docker"
   fi
-  # A legacy project-name migration also changes the implicit per-project
-  # sessions volume. Copy it while Docker is available; otherwise first up /
-  # VS Code initialize performs the same zero-data-loss migration.
+  # A legacy or stale project-name migration also changes the implicit
+  # per-project sessions volume. Copy it while Docker is available; otherwise
+  # first up / VS Code initialize performs the same zero-data-loss migration.
   if [ "$was_legacy" = "1" ]; then
     migrate_legacy_session_volume defer
   fi
@@ -1804,7 +1828,7 @@ analyze_resolved_config () {
   node - \
     .devcontainer/devcontainer.json "$TEMPLATE_DIR/devcontainer.json" \
     "$base_json" "$expected_json" "$final_json" "$noenv_json" \
-    "$raw_base_json" "$raw_final_json" "$(pwd -P)" \
+    "$raw_base_json" "$raw_final_json" "$(canonical_root)" \
     "$(expected_project_name)" "$has_override" "$(runtime_user_id)" \
     "${AIC_STATUS_RELAY:-0}" "${AIC_STATUS_PROJECT:-$(expected_project_label)}" \
     "${AIC_STATUS_PROJECT_ID:-$(expected_project_name)}" >> "$out" <<'NODE'
@@ -1814,7 +1838,7 @@ const path = require('path');
 const [devFile, templateDevFile, baseFile, expectedFile, finalFile, noenvFile,
   rawBaseFile, rawFinalFile, rootArg, expectedName, hasOverrideRaw, runtimeUser,
   statusRelay, statusProject, statusProjectId] = process.argv.slice(2);
-const root = fs.realpathSync(rootArg);
+const root = fs.realpathSync.native(rootArg);
 const hasOverride = hasOverrideRaw === '1';
 // Findings include repository-controlled service names, paths, and values.
 // Render terminal controls visibly so validation itself cannot spoof prompts,
@@ -2121,7 +2145,7 @@ if (hasOverride) {
 }
 
 const canonical = value => {
-  try { return fs.realpathSync(value); } catch (_) { return path.resolve(value); }
+  try { return fs.realpathSync.native(value); } catch (_) { return path.resolve(value); }
 };
 // root is canonical, so each source below is its own real path only when no
 // component under root is a symlink. Docker follows such a symlink on the host.
@@ -2281,7 +2305,7 @@ function realpathLoose(input) {
     if (parent === current) break;
     suffix.unshift(path.basename(current)); current = parent;
   }
-  try { current = fs.realpathSync(current); } catch (_) { current = path.resolve(current); }
+  try { current = fs.realpathSync.native(current); } catch (_) { current = path.resolve(current); }
   return path.resolve(current, ...suffix);
 }
 const withinRoot = input => {
@@ -3312,7 +3336,7 @@ ensure_safe_docker_volume () {
 # inspect comparison is the security check.
 legacy_session_volume_owned_by_workspace () {
   local old_vol="$1" legacy="$2" workspace candidates users cid inspected proved=0
-  workspace="$(pwd -P)"
+  workspace="$(canonical_root)"
   candidates="$(docker ps -aq \
     --filter "label=devcontainer.local_folder=$workspace" \
     --filter "label=com.docker.compose.project=$legacy" 2>/dev/null)" || return 1
@@ -3370,9 +3394,40 @@ legacy_session_volume_owned_by_workspace () {
   return 0
 }
 
+# Project names this exact workspace ran under before the current one, other
+# than the basename-scoped legacy name: Compose names whose hash came from
+# another spelling of the path. Before canonical_root() existed, a project set
+# up from a wrong-case path on a case-insensitive volume got the hash of that
+# spelling, while VS Code and the Dev Containers CLI use the stored one.
+# Only containers that carry this exact canonical workspace label count, and
+# only a name with this project's label and a 12-hex hash. A name read from the
+# Compose file would not do: sync overwrites it before the copy can run.
+previous_project_names () {
+  local workspace label expected names name
+  workspace="$(canonical_root)"; label="$(expected_project_label)"
+  expected="$(expected_project_name)"
+  names="$(docker ps -a --filter "label=devcontainer.local_folder=$workspace" \
+    --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null)" || return 0
+  while IFS= read -r name; do
+    [[ "$name" =~ ^aic-${label}-[0-9a-f]{12}$ ]] || continue
+    [ "$name" != "$expected" ] || continue
+    printf '%s\n' "$name"
+  done <<< "$names" | sort -u
+}
+
+# Copy the old session transcripts into this workspace's current volume: from
+# the basename-scoped legacy name, then from every earlier spelling of the path.
 migrate_legacy_session_volume () {
-  local mode="${1:-strict}" legacy expected old_vol new_vol image reply
-  legacy="$(legacy_project_name)"; expected="$(expected_project_name)"
+  local mode="${1:-strict}" old
+  migrate_session_volume_from "$mode" "$(legacy_project_name)"
+  while IFS= read -r old; do
+    [ -z "$old" ] || migrate_session_volume_from "$mode" "$old"
+  done <<< "$(previous_project_names)"
+}
+
+migrate_session_volume_from () {
+  local mode="$1" legacy="$2" expected old_vol new_vol image reply
+  expected="$(expected_project_name)"
   [ "$legacy" != "$expected" ] || return 0
   old_vol="${legacy}_aic-sessions"
   new_vol="${expected}_aic-sessions"
@@ -3573,10 +3628,18 @@ initialize_managed_volumes () {
 # another same-basename checkout. Never use --remove-orphans here: those are
 # precisely the services the trusted managed template cannot attribute.
 stop_owned_legacy_stack () {
-  local legacy expected workspace containers cid inspected template proved=0
-  legacy="$(legacy_project_name)"; expected="$(expected_project_name)"
+  local old
+  stop_owned_stack_named "$(legacy_project_name)"
+  while IFS= read -r old; do
+    [ -z "$old" ] || stop_owned_stack_named "$old"
+  done <<< "$(previous_project_names)"
+}
+
+stop_owned_stack_named () {
+  local legacy="$1" expected workspace containers cid inspected template proved=0
+  expected="$(expected_project_name)"
   [ "$legacy" != "$expected" ] || return 0
-  workspace="$(pwd -P)"
+  workspace="$(canonical_root)"
   if ! containers="$(docker ps -aq \
       --filter "label=com.docker.compose.project=$legacy" 2>/dev/null)"; then
     err "could not verify ownership of legacy Compose stack '$legacy'; preserving it."
@@ -4093,8 +4156,8 @@ YAML
   if ! command -v git >/dev/null 2>&1; then
     doctor_fail "Git not found — install Git before creating an aicontainer project"
   elif git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-    git_root="$(cd "$git_root" && pwd -P)"
-    if [ "$git_root" = "$(pwd -P)" ]; then
+    git_root="$(cd "$git_root" && canonical_root)"
+    if [ "$git_root" = "$(canonical_root)" ]; then
       doctor_ok "Git project root is the current directory"
     else
       doctor_warn "current directory is below the Git root; run aic from $git_root"
