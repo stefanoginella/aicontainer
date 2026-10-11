@@ -242,6 +242,36 @@ jobs:
               || { echo "FAIL: overlay not sourced by login zsh"; exit 1; }
             echo "OK: personal shell overlay is root-locked, verbatim, and sourced after baseline"
           '
+      - name: Smoke test - a deleted host overlay seed leaves the sanitized volume
+        working-directory: /tmp/proj
+        run: |
+          # The sanitized volume outlives the container. When the human deletes
+          # ~/.config/aicontainer/rc.zsh, the next sanitizer run must remove the
+          # old copy, or it stays installed and sourced on every rebuild.
+          project_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
+            .devcontainer/docker-compose.yml)
+          sanitizer_id=$(docker ps -aq \
+            --filter "label=com.docker.compose.project=$project_name" \
+            --filter "label=com.docker.compose.service=aic-seed-sanitizer")
+          [ -n "$sanitizer_id" ] || { echo "FAIL: seed sanitizer container missing"; exit 1; }
+          run_sanitizer() {
+            docker start -a "$sanitizer_id" >/dev/null
+            [ "$(docker inspect -f '{{.State.ExitCode}}' "$sanitizer_id")" = 0 ] \
+              || { echo "FAIL: seed sanitizer failed"; exit 1; }
+          }
+          [ ! -e "$HOME/.config/aicontainer/rc.zsh" ] \
+            || { echo "FAIL: runner already has a host rc.zsh seed"; exit 1; }
+          mkdir -p "$HOME/.config/aicontainer"
+          printf '# aic smoke host seed\n' > "$HOME/.config/aicontainer/rc.zsh"
+          run_sanitizer
+          devcontainer exec --workspace-folder . grep -qx '# aic smoke host seed' /host-seed/shell-rc.zsh \
+            || { echo "FAIL: host rc.zsh seed was not copied"; exit 1; }
+          rm "$HOME/.config/aicontainer/rc.zsh"
+          run_sanitizer
+          if devcontainer exec --workspace-folder . test -e /host-seed/shell-rc.zsh; then
+            echo "FAIL: deleted host rc.zsh seed is still in the sanitized volume"; exit 1
+          fi
+          echo "OK: deleting a host overlay seed removes it from the sanitized volume"
       - name: Smoke test - managed zsh loads the pinned theme, plugins, and tools
         working-directory: /tmp/proj
         run: |

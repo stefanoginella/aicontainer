@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Deleting a host overlay file now removes it from the sandbox.** A
+  `~/.config/aicontainer/` `rc.zsh`, `p10k.zsh`, or `statusline.*` that you
+  delete, empty, or that is rejected no longer stays installed after
+  `aic rebuild`. (post-create.py)
+
 - **An override can no longer widen a managed mount.** Validation now compares
   each mount's full spec, so replacing a managed mount without its
   `volume.subpath` (the whole global auth volume) or with other bind options

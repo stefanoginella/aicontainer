@@ -130,6 +130,71 @@ class HostBoundaryTests(unittest.TestCase):
             sorted(["p10k.zsh", "shell-rc.zsh", *(n for n, _ in POST_CREATE.STATUSLINE_VARIANTS)]),
         )
 
+    def _run_sanitizer(self, raw: Path, sanitized: Path) -> int:
+        with mock.patch.object(POST_CREATE, "RAW_HOST_SEED", raw), \
+                mock.patch.object(POST_CREATE, "SANITIZED_HOST_SEED", sanitized), \
+                mock.patch.object(POST_CREATE.os, "geteuid", lambda: 0), \
+                mock.patch.object(POST_CREATE, "_sanitize_claude_seed", dict), \
+                mock.patch.object(POST_CREATE, "_sanitize_codex_seed", dict), \
+                mock.patch.object(POST_CREATE, "_sanitize_opencode_seed", dict), \
+                mock.patch.object(POST_CREATE, "_sanitize_git_seed", dict), \
+                redirect_stderr(io.StringIO()):
+            return POST_CREATE.sanitize_seeds()
+
+    def test_removed_or_rejected_host_overlay_is_removed_from_the_volume(self) -> None:
+        """The sanitized volume outlives the container. Deleting a host overlay
+        file must opt out on the next create; a stale copy would stay installed
+        and sourced, and a stale statusline.sh would beat a new statusline.py."""
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            tmp = Path(tmp_raw).resolve()
+            raw = tmp / "raw"
+            aic_config = raw / "aic-config"
+            sanitized = tmp / "sanitized"
+            aic_config.mkdir(parents=True)
+            sanitized.mkdir()
+            outside = tmp / "outside"
+            outside.write_text("keep\n")
+            # Leftovers from an earlier run, one of them a planted link.
+            (sanitized / "shell-rc.zsh").write_text("export TOKEN=old\n")
+            (sanitized / "p10k.zsh").write_text("# old prompt\n")
+            (sanitized / "statusline.sh").write_text("echo old\n")
+            (sanitized / "statusline.js").symlink_to(outside)
+            (sanitized / "statusline.mjs").write_text("// old\n")
+            # Current host inputs: rc.zsh deleted, p10k.zsh emptied, a symlinked
+            # and an oversized statusline (both rejected), and a new statusline.py.
+            (aic_config / "p10k.zsh").write_text("")
+            (aic_config / "statusline.js").symlink_to(outside)
+            (aic_config / "statusline.mjs").write_bytes(
+                b"x" * (POST_CREATE.MAX_PERSONAL_OVERLAY_BYTES + 1)
+            )
+            (aic_config / "statusline.py").write_text("print('new')\n")
+            try:
+                self.assertEqual(self._run_sanitizer(raw, sanitized), 0)
+                overlay = sorted(
+                    p.name for p in sanitized.iterdir()
+                    if not p.name.endswith(".json")
+                )
+                self.assertEqual(overlay, ["statusline.py"])
+                self.assertEqual((sanitized / "statusline.py").read_text(), "print('new')\n")
+                self.assertEqual(outside.read_text(), "keep\n", "unlink must not follow a link")
+            finally:
+                sanitized.chmod(0o755)
+
+    def test_unremovable_stale_overlay_fails_the_sanitizer(self) -> None:
+        """Fail closed: the devcontainer depends on a successful sanitizer run,
+        so a stale copy that cannot be removed must stop the start."""
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            tmp = Path(tmp_raw).resolve()
+            raw = tmp / "raw"
+            sanitized = tmp / "sanitized"
+            (raw / "aic-config").mkdir(parents=True)
+            (sanitized / "shell-rc.zsh").mkdir(parents=True)
+            try:
+                with self.assertRaises(OSError):
+                    self._run_sanitizer(raw, sanitized)
+            finally:
+                sanitized.chmod(0o755)
+
     def test_seed_dir_is_the_only_new_raw_mount(self) -> None:
         """The statusline seed rides the existing aic-config mount; adding a new
         raw host mount to the sanitizer would be a boundary change."""

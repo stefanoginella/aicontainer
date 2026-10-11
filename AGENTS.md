@@ -481,8 +481,12 @@ exception to JSON sanitization: `rc.zsh`/`p10k.zsh`/`statusline.{sh,mjs,js,py}`
 are **code**, copied verbatim (bounded, root-owned `0444`) into that same volume
 — never field-stripped, never merged into main's config, and never executed by
 the sanitizer itself. Every one of those names is a literal in `sanitize_seeds()`;
-the seed dir is never globbed. Do not mount a raw input into main, add a
-non-JSON output beyond that overlay, or make sanitizer failure soft.
+the seed dir is never globbed. The sanitized volume outlives the container, so
+each run removes an overlay output whose source is absent, empty, or rejected;
+an output it cannot remove fails the run. Otherwise a file the human deleted
+(for example, because it held a token) stays installed and sourced. Do not
+mount a raw input into main, add a non-JSON output beyond that overlay, or make
+sanitizer failure soft.
 
 All Claude/Codex/OpenCode/gh/npm config, memory, skills/plugins, prompt
 history, and sessions live in one path-unique `aic-sessions` volume below

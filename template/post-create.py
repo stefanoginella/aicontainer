@@ -796,6 +796,20 @@ def _write_sanitized_seed(name: str, value: dict) -> None:
             pass
 
 
+def _remove_verbatim_seed(name: str) -> None:
+    """Remove one fixed overlay output whose host source is gone or rejected.
+
+    unlink never follows a link. Any error except "already absent" propagates
+    and fails the sanitizer, and with it the devcontainer start: a stale copy
+    that cannot be removed would still be installed and sourced.
+    """
+    try:
+        os.unlink(SANITIZED_HOST_SEED / name)
+    except FileNotFoundError:
+        return
+    log(f"sanitizer: removed personal {name} (host source absent or rejected)")
+
+
 def _copy_verbatim_seed(name: str, raw_src: Path) -> None:
     """Copy one opt-in personal overlay file verbatim into the sanitized volume.
 
@@ -805,18 +819,23 @@ def _copy_verbatim_seed(name: str, raw_src: Path) -> None:
     downgrade of the sanitizer: the file lands root-owned 0444 (an in-container
     agent cannot tamper with it) and its contents still execute only as the
     unprivileged `vscode` user — the same authority the agent already has.
-    Absent/oversized/non-regular inputs are simply skipped (opt-in by presence).
+    Absent/empty/oversized/non-regular inputs are skipped (opt-in by presence),
+    and a copy left by an earlier run is removed: the volume outlives the
+    container, so deleting the host file must opt out on the next create.
     """
     try:
         if raw_src.is_symlink() or not raw_src.is_file():
+            _remove_verbatim_seed(name)
             return
         data = raw_src.read_bytes()
     except OSError as e:
         log(f"sanitizer: skipping personal {name} ({e})")
+        _remove_verbatim_seed(name)
         return
     if not data or len(data) > MAX_PERSONAL_OVERLAY_BYTES:
         if len(data) > MAX_PERSONAL_OVERLAY_BYTES:
             log(f"sanitizer: personal {name} exceeds {MAX_PERSONAL_OVERLAY_BYTES} bytes; skipping")
+        _remove_verbatim_seed(name)
         return
     SANITIZED_HOST_SEED.mkdir(parents=True, exist_ok=True)
     os.chmod(SANITIZED_HOST_SEED, 0o700)

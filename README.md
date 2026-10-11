@@ -605,7 +605,7 @@ cp ~/.p10k.zsh ~/.config/aicontainer/p10k.zsh     # your host p10k prompt
 cp ~/.zsh_aliases ~/.config/aicontainer/rc.zsh    # or any personal rc snippet
 ```
 
-The host seed is read **read-only** by the seed sanitizer and copied verbatim; a project-owned `.devcontainer/` file wins over it when both exist. Run `aic sync` (host-side) then `aic rebuild`. A project-owned `shell-rc.zsh` or `p10k.zsh` comes from the repository, so it needs `aic trust` like `post-create.project.sh`. Your host seed needs no approval.
+The host seed is read **read-only** by the seed sanitizer and copied verbatim; a project-owned `.devcontainer/` file wins over it when both exist. Run `aic sync` (host-side) then `aic rebuild`. To stop using a host seed file, delete it and run `aic rebuild`; the old copy is removed. A project-owned `shell-rc.zsh` or `p10k.zsh` comes from the repository, so it needs `aic trust` like `post-create.project.sh`. Your host seed needs no approval.
 
 > ⚠️ **These files are copied verbatim — they can't be sanitized like the JSON configs.** They're shell *code*, executed inside a sandbox an autonomous agent can read. **Don't put secrets in them** (no tokens, no `export API_KEY=…`). Keep them to prompt/alias cosmetics. They run only as the unprivileged `vscode` user and, once installed, are root-locked so the agent can't modify them.
 

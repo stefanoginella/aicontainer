@@ -200,7 +200,8 @@ services:
       - ${HOME}/.config/opencode/opencode.json:/raw-host-seed/opencode.json:ro
       # Opt-in personal shell overlay: rc.zsh / p10k.zsh here are copied verbatim
       # into the sanitized volume (they are code, not allowlist-sanitizable) and
-      # installed root-owned. Absent/empty -> nothing seeded (opt-in by presence).
+      # installed root-owned. Absent/empty -> nothing seeded, and a copy from an
+      # earlier run is removed (opt-in by presence).
       - ${HOME}/.config/aicontainer:/raw-host-seed/aic-config:ro
       - aic-sanitized-seed:/sanitized-host-seed
 
