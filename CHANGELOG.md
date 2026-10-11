@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **An agent can no longer plant code in the next human shell.** oh-my-zsh,
+  powerlevel10k, the plugins, and fnm are now root-owned, and shell startup
+  ignores `~/.bash_aliases`, writable caches, and tools earlier in PATH.
+  (Dockerfile, .zshrc)
+
 - **Project code from a cloned repository now needs `aic trust` before it
   runs.** `post-create.project.sh`, `shell-rc.zsh`, `p10k.zsh`, `statusline.*`,
   and VS Code extensions or settings in `devcontainer.json` beyond aic's own ran
@@ -98,6 +103,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   went on. (aic)
 
 ### Fixed
+
+- **Personal `rc.zsh` aliases now win over oh-my-zsh, as documented.** The
+  image loaded oh-my-zsh after the personal overlay, so its aliases replaced
+  yours. (.zshrc)
+
+- **zsh no longer forces `TERM=xterm`.** It sets `TERM` only when it is
+  empty, so a terminal's own value (such as `xterm-256color`) stays. (.zshrc)
 
 - **A build-mode `aic trust` approval no longer depends on the host `TZ`.**
   Approving in a terminal that exports `TZ`, then reopening from a GUI editor

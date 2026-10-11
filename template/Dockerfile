@@ -319,7 +319,9 @@ RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
 # Python toolchain (per-user; survives image rebuilds via base layer caching)
 RUN uv python install 3.13 --default
 
-# Node LTS via fnm (per-user; lets projects override with their own version)
+# Node LTS via fnm (per-user; lets projects override with their own version).
+# The root stage below moves the fnm binary to a root-owned /usr/local/bin/fnm;
+# Node versions stay in the vscode-owned $FNM_DIR.
 # renovate: datasource=node-version depName=node
 ARG NODE_VERSION=24
 ENV FNM_DIR="/home/vscode/.fnm"
@@ -335,7 +337,9 @@ RUN curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$FNM_D
 RUN uv tool install semgrep \
     && semgrep --version
 
-# oh-my-zsh + powerlevel10k + plugins
+# oh-my-zsh + powerlevel10k + plugins. zsh-in-docker only fetches them; the
+# .zshrc it generates is discarded for the managed template/.zshrc, and the
+# root stage below moves the whole tree to a root-owned path.
 # renovate: datasource=github-releases depName=deluan/zsh-in-docker
 ARG ZSH_IN_DOCKER_VERSION=1.2.1
 RUN sh -c "$(curl -fsSL https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
@@ -344,35 +348,91 @@ RUN sh -c "$(curl -fsSL https://github.com/deluan/zsh-in-docker/releases/downloa
       -p fzf \
       -p https://github.com/zsh-users/zsh-autosuggestions \
       -p https://github.com/zsh-users/zsh-syntax-highlighting \
-      -a 'export HISTFILE=/home/vscode/.shell-history/.zsh_history' \
-      -a 'export HISTSIZE=50000' \
-      -a 'export SAVEHIST=50000' \
-      -a 'setopt SHARE_HISTORY' \
-      -a 'export PATH="$FNM_DIR:$PATH"' \
-      -a 'eval "$(fnm env --use-on-cd)"' \
-      -a '[[ ! -r /etc/aic/user-config/shell/p10k.zsh ]] || source /etc/aic/user-config/shell/p10k.zsh' \
-      -a '[[ ! -r /etc/aic/user-config/shell/rc.zsh ]] || source /etc/aic/user-config/shell/rc.zsh' \
       -x
 
-# Keep a root-owned reference copy alongside the generated managed startup file.
-COPY .zshrc /etc/aic/shell/zshrc.reference
-
 # ---------------------------------------------------------------------------
-# Bash + fish: minimal parity with the zsh setup for users who pick
-# AIC_SHELL=bash|fish via `aic init`. Bash gets persistent history (shared
-# volume with zsh) and fnm on PATH; fish gets fnm on PATH. Managed startup
-# files live under root-owned system directories, not replaceable files in a
-# vscode-owned $HOME. Raw host rc/p10k code is never auto-forwarded; only the
-# opt-in personal overlay (root-owned /etc/aic/user-config/shell, zsh only) is
-# sourced after this managed baseline.
+# Root-managed shell startup (zsh, bash, fish). Every file a managed shell
+# reads or runs at startup is root-owned: the rc files, oh-my-zsh with the
+# theme and plugins, gitstatusd, and the fnm binary. Startup PATH lookups use
+# system directories only, and no startup file comes from the vscode-owned
+# $HOME, so an agent cannot plant code for the next human shell. Bash and fish
+# keep minimal parity with zsh: persistent history (shared volume) and fnm.
+# Raw host rc/p10k code is never auto-forwarded; only the opt-in personal
+# overlay (root-owned /etc/aic/user-config/shell, zsh only) is sourced after
+# this managed baseline.
 # ---------------------------------------------------------------------------
 USER root
 
+# oh-my-zsh tree -> root-owned /usr/local/share/oh-my-zsh. Prefetch the
+# gitstatusd that powerlevel10k runs into the theme's own usrbin/ (its
+# installer checks the pinned sha256 from install.info), so p10k never looks
+# for one in the vscode-owned ~/.cache/gitstatus. The base image ships a
+# theme symlink into the old home path; drop links that leave the tree.
+RUN mv /home/vscode/.oh-my-zsh /usr/local/share/oh-my-zsh \
+    && p10k=/usr/local/share/oh-my-zsh/custom/themes/powerlevel10k \
+    && GITSTATUS_CACHE_DIR="$p10k/gitstatus/usrbin" sh "$p10k/gitstatus/install" -f \
+    && ls "$p10k"/gitstatus/usrbin/gitstatusd-linux-* \
+    && find /usr/local/share/oh-my-zsh -type l -lname '/home/*' -delete \
+    && chown -R root:root /usr/local/share/oh-my-zsh \
+    && chmod -R go-w /usr/local/share/oh-my-zsh \
+    && install -d -o root -g root -m 0755 \
+      /usr/local/share/aic /usr/local/share/aic/zsh-cache \
+      /usr/local/share/aic/zsh-cache/oh-my-zsh \
+      /usr/local/share/aic/zsh-cache/oh-my-zsh/completions \
+    && install -o root -g root -m 0444 /dev/null \
+      /usr/local/share/aic/zsh-cache/oh-my-zsh/.zsh-update \
+    && install -o root -g root -m 0755 /home/vscode/.fnm/fnm /usr/local/bin/fnm \
+    && rm -f /home/vscode/.fnm/fnm /home/vscode/.zshrc
+
 RUN install -d -o root -g root -m 0755 \
       /etc/aic/shell/zsh /etc/aic/shell /etc/aic/user-config /etc/aic/user-config/shell \
-      /etc/aic/user-config/statusline \
-    && mv /home/vscode/.zshrc /etc/aic/shell/zsh/.zshrc \
-    && cp /home/vscode/.bashrc /etc/aic/shell/bashrc \
+      /etc/aic/user-config/statusline
+COPY .zshrc /etc/aic/shell/zsh/.zshrc
+
+# zsh reads ZDOTDIR/.zshenv before the global rc files. The global zshrc (the
+# distro's plus the base image's additions) runs PATH-resolved commands (git,
+# whoami, mkdir) before the managed .zshrc can set a system-only PATH; its
+# keymaps and compinit come from oh-my-zsh anyway.
+RUN cat > /etc/aic/shell/zsh/.zshenv <<'ZSHENV_EOF'
+# Managed aicontainer zsh environment (root-owned). Skip the global
+# /etc/zsh/{zprofile,zshrc,zlogin,zlogout}: they run before the managed .zshrc.
+unsetopt GLOBAL_RCS
+ZSHENV_EOF
+
+# Interactive Bash reads /etc/bash.bashrc before --rcfile, and no flag skips
+# only that file. The distro and base-image version runs PATH-resolved
+# commands (groups, git) and reads files in $HOME, so replace it.
+RUN cat > /etc/bash.bashrc <<'BASHBASHRC_EOF'
+# Managed by aicontainer (root-owned). Interactive Bash reads this before
+# /etc/aic/shell/bashrc: run no PATH-resolved command and read no $HOME file.
+[ -z "${PS1-}" ] && return
+shopt -s checkwinsize
+if [ -x /usr/lib/command-not-found ]; then
+  command_not_found_handle() {
+    /usr/lib/command-not-found -- "$1"
+    return $?
+  }
+fi
+BASHBASHRC_EOF
+
+# Managed bashrc: the Ubuntu skel file between a system-only PATH prologue and
+# the aicontainer additions. Its ~/.bash_aliases and ~/.dircolors reads are
+# removed, bash-completion's user file/dir are pointed away from $HOME, and
+# readline ignores ~/.inputrc. The build fails if a home read is left.
+RUN { printf '%s\n' \
+        '# Managed aicontainer Bash startup (root-owned). Startup uses a system-only' \
+        '# PATH and reads no file in the vscode-owned home; the end of this file' \
+        '# restores the full PATH.' \
+        '_aic_path=$PATH' \
+        'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+        'BASH_COMPLETION_USER_FILE=/dev/null' \
+        'BASH_COMPLETION_USER_DIR=/usr/local/share/aic/no-bash-completion' \
+        'INPUTRC=/etc/inputrc' \
+        ''; \
+      sed -e '/^if \[ -f ~\/\.bash_aliases \]; then$/,/^fi$/d' \
+          -e 's#test -r ~/\.dircolors && eval "\$(dircolors -b ~/\.dircolors)" || ##' \
+          /home/vscode/.bashrc; \
+    } > /etc/aic/shell/bashrc \
     && rm -f /home/vscode/.bashrc \
     && cat >> /etc/aic/shell/bashrc <<'BASHRC_EOF'
 
@@ -381,9 +441,26 @@ export HISTFILE=/home/vscode/.shell-history/.bash_history
 export HISTSIZE=50000
 export HISTFILESIZE=50000
 shopt -s histappend
-export PATH="$FNM_DIR:$PATH"
-eval "$(fnm env --use-on-cd)"
+PATH=$_aic_path
+unset _aic_path
+# fnm: root-owned binary; the function keeps fnm's cd hook on it.
+fnm() { /usr/local/bin/fnm "$@"; }
+eval "$(/usr/local/bin/fnm env --use-on-cd --shell bash)"
+# VS Code terminals open commit messages in the editor (replaces the base
+# image's /etc/bash.bashrc snippet).
+if [ -z "${GIT_EDITOR-}" ] && [ "${TERM_PROGRAM-}" = vscode ] \
+    && [ -z "$(/usr/bin/git config --get core.editor 2>/dev/null)" ]; then
+  if command -v code >/dev/null 2>&1; then
+    export GIT_EDITOR='code --wait'
+  elif command -v code-insiders >/dev/null 2>&1; then
+    export GIT_EDITOR='code-insiders --wait'
+  fi
+fi
 BASHRC_EOF
+RUN if grep -hEv '^[[:space:]]*#' /etc/aic/shell/bashrc /etc/bash.bashrc \
+        | grep -E '~/|\$HOME|\$\{HOME'; then \
+      echo "managed Bash startup still reads a file in \$HOME" >&2; exit 1; \
+    fi
 
 RUN cat > /etc/profile.d/aic-bash.sh <<'PROFILE_EOF'
 # Managed aicontainer Bash startup for login shells.
@@ -394,10 +471,13 @@ PROFILE_EOF
 
 RUN mkdir -p /etc/fish/conf.d \
     && cat > /etc/fish/conf.d/aic.fish <<'FISH_EOF'
-# Managed aicontainer fish config (baked at image build)
+# Managed aicontainer fish config (baked at image build). fnm is root-owned;
+# the function keeps fnm's cd hook on it.
 set -gx FNM_DIR /home/vscode/.fnm
-set -gx PATH $FNM_DIR $PATH
-fnm env --use-on-cd | source
+function fnm
+    /usr/local/bin/fnm $argv
+end
+/usr/local/bin/fnm env --use-on-cd --shell fish | source
 FISH_EOF
 
 # Managed launcher for the opt-in personal Claude Code statusline overlay
@@ -446,11 +526,11 @@ GITIGNORE_EOF
 
 RUN chown -R root:root /etc/aic/shell /etc/aic/user-config \
                        /etc/profile.d/aic-bash.sh /etc/fish/conf.d/aic.fish \
-                       /etc/aic/gitignore /usr/local/bin/aic-statusline \
+                       /etc/bash.bashrc /etc/aic/gitignore /usr/local/bin/aic-statusline \
     && chmod 0755 /etc/aic/shell /etc/aic/shell/zsh /etc/aic/user-config \
                   /etc/aic/user-config/shell /etc/aic/user-config/statusline \
-    && chmod 0444 /etc/aic/shell/zsh/.zshrc /etc/aic/shell/zshrc.reference \
-                  /etc/aic/shell/bashrc /etc/profile.d/aic-bash.sh \
+    && chmod 0444 /etc/aic/shell/zsh/.zshrc /etc/aic/shell/zsh/.zshenv \
+                  /etc/aic/shell/bashrc /etc/bash.bashrc /etc/profile.d/aic-bash.sh \
                   /etc/fish/conf.d/aic.fish /etc/aic/gitignore \
     && chmod 0555 /usr/local/bin/aic-statusline
 

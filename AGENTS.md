@@ -638,6 +638,47 @@ Guarded by the "aic sync merges project-owned vscode-extensions /
 vscode-settings.json" test and the project-code cases in
 `tests/test-aic-host-security.sh`.
 
+**Root-managed shell startup.** The managed launch paths (`aic shell`, the
+VS Code terminal profiles) start zsh, bash, and fish from root-owned files
+only, so an agent cannot plant code that runs in the next human shell.
+`template/.zshrc` is the real managed zsh rc (copied to
+`/etc/aic/shell/zsh/.zshrc`); zsh-in-docker only fetches the framework.
+Load-bearing, don't undo:
+
+1. **Everything sourced or run at startup is root-owned.** oh-my-zsh with the
+   theme and plugins lives in `/usr/local/share/oh-my-zsh`; fnm is
+   `/usr/local/bin/fnm` (Node versions stay in the vscode-owned `$FNM_DIR` so
+   `fnm install` works). Each rc defines an `fnm` function that calls the
+   absolute binary, because fnm's cd hook calls `fnm` through PATH.
+2. **Startup PATH lookups use system directories only.** oh-my-zsh and its
+   plugins run `git`, `rm`, `tee`, and `eval "$(fzf --zsh)"`; the skel bashrc
+   evals `lesspipe` and `dircolors`. The zsh and bash rc set a system-only
+   PATH while they load and restore the full one at the end.
+3. **Caches that get sourced again are root-owned.** p10k sources
+   `$XDG_CACHE_HOME/p10k-dump-*.zsh` at theme load and oh-my-zsh adds its cache
+   to `fpath`. The `.zshrc` points the non-exported `XDG_CACHE_HOME` at the
+   root-owned `/usr/local/share/aic/zsh-cache` while the framework loads.
+   gitstatusd is baked into the theme's `usrbin/`, which p10k checks before
+   `~/.cache/gitstatus`. A writable cache dir is not a fix: the agent can
+   rename a root-owned child of its own `~/.cache`.
+4. **No global rc runs first.** The distro and base-image `/etc/zsh/zshrc`
+   and `/etc/bash.bashrc` run PATH-resolved commands. The managed
+   `ZDOTDIR/.zshenv` sets `unsetopt GLOBAL_RCS`; Bash has no flag that skips
+   only `/etc/bash.bashrc`, so the image replaces it.
+5. **No startup file comes from `$HOME`.** The bashrc drops the skel
+   `~/.bash_aliases` and `~/.dircolors` reads, points bash-completion's user
+   file/dir away from `$HOME`, and sets `INPUTRC=/etc/inputrc`; the image build
+   fails if a home read is left. Bash and fish run with `--noprofile --rcfile`
+   and `--no-config`.
+
+Residual, documented in the README threat model: after startup, PATH starts
+with vscode-owned tool directories (`~/.local/bin`, fnm's Node), so a typed
+command or a prompt helper can run a binary the agent replaced, and VS Code
+terminals run through the vscode-owned VS Code server. Startup hardening does
+not make a container shell more trusted than the agent. Guarded by the
+"self-protection files are root-owned 0444" smoke in both workflows and the
+shell-startup assertions in `tests/test-aic-host-security.sh`.
+
 **Personal config overlay** (`shell-rc.zsh`, `p10k.zsh`, `statusline.*`) — lets
 the trusted human bring a familiar zsh prompt/aliases and Claude statusline into
 the sandbox. Two sources feed one overlay, project file winning: a project-owned

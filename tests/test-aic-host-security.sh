@@ -160,8 +160,49 @@ for tool in gh npm; do
     "$ROOT/template/Dockerfile" \
     || fail "image does not link ~/.config/$tool into the per-project sessions volume"
 done
+# Shell startup must run only root-owned code: an agent could otherwise plant
+# code in a vscode-owned oh-my-zsh, fnm, cache, home rc file, or a same-named
+# tool earlier in PATH, and it would run in the next human shell.
+zshrc="$ROOT/template/.zshrc"
+dockerfile="$ROOT/template/Dockerfile"
+zshrc_line() { grep -nFx "$1" "$zshrc" | head -n 1 | cut -d: -f1 || true; }
+omz_source=$(zshrc_line 'source "$ZSH/oh-my-zsh.sh"')
+[ -n "$omz_source" ] || fail ".zshrc does not source oh-my-zsh"
+for line in 'export ZSH=/usr/local/share/oh-my-zsh' \
+  'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+  'XDG_CACHE_HOME=/usr/local/share/aic/zsh-cache'; do
+  n=$(zshrc_line "$line")
+  [ -n "$n" ] && [ "$n" -lt "$omz_source" ] \
+    || fail ".zshrc does not set '$line' before oh-my-zsh loads"
+done
+n=$(zshrc_line 'PATH=$_aic_path')
+[ -n "$n" ] && [ "$n" -gt "$omz_source" ] \
+  || fail ".zshrc does not restore the full PATH after oh-my-zsh loads"
+grep -Fqx 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell zsh)"' "$zshrc" \
+  || fail ".zshrc does not run the root-owned fnm"
+if grep -Ev '^[[:space:]]*#' "$zshrc" | grep -Eq '~/|\$HOME|\$\{HOME'; then
+  fail ".zshrc reads a file in the vscode-owned home"
+fi
+for line in 'COPY .zshrc /etc/aic/shell/zsh/.zshrc' \
+  'RUN mv /home/vscode/.oh-my-zsh /usr/local/share/oh-my-zsh \' \
+  '    && chown -R root:root /usr/local/share/oh-my-zsh \' \
+  '    && GITSTATUS_CACHE_DIR="$p10k/gitstatus/usrbin" sh "$p10k/gitstatus/install" -f \' \
+  '    && install -o root -g root -m 0755 /home/vscode/.fnm/fnm /usr/local/bin/fnm \' \
+  'unsetopt GLOBAL_RCS' \
+  'RUN cat > /etc/bash.bashrc <<'"'"'BASHBASHRC_EOF'"'"'' \
+  'eval "$(/usr/local/bin/fnm env --use-on-cd --shell bash)"' \
+  '/usr/local/bin/fnm env --use-on-cd --shell fish | source'; do
+  grep -Fqx -- "$line" "$dockerfile" || fail "Dockerfile lost root-managed shell startup: $line"
+done
+grep -Fq "sed -e '/^if \\[ -f ~\\/\\.bash_aliases \\]; then\$/,/^fi\$/d'" "$dockerfile" \
+  || fail "managed bashrc still sources ~/.bash_aliases"
+# zsh-in-docker -a lines would land in a generated .zshrc that is discarded.
+grep -Eq "^[[:space:]]+-a '" "$dockerfile" \
+  && fail "Dockerfile passes rc lines to zsh-in-docker; edit template/.zshrc instead"
 for workflow in "$ROOT/.github/workflows/rebuild.yml" \
   "$ROOT/.github/workflows/release.yml"; do
+  grep -Fq 'FAIL: shell startup ran vscode-writable code' "$workflow" \
+    || fail "$(basename "$workflow") lost the shell-startup plant smoke"
   grep -Fq '"$GITHUB_WORKSPACE/aic" init --build --force' "$workflow" \
     || fail "workflow pre-created override is not passed through explicit init --force"
   grep -Fq 'CODEX_NON_INTERACTIVE=1' "$workflow" \

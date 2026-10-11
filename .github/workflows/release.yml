@@ -539,7 +539,9 @@ jobs:
             set -euo pipefail
             for f in /etc/aic/user-config/gitconfig \
                      /etc/aic/shell/zsh/.zshrc \
+                     /etc/aic/shell/zsh/.zshenv \
                      /etc/aic/shell/bashrc \
+                     /etc/bash.bashrc \
                      /etc/fish/conf.d/aic.fish; do
               [ -e "$f" ] || { echo "FAIL: $f missing (should be locked)"; exit 1; }
               perms=$(stat -c "%U %a" "$f")
@@ -560,6 +562,42 @@ jobs:
               [ ! -e "$marker" ] || { echo "FAIL: planted home startup file executed ($marker)"; exit 1; }
             done
             rm -f "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.config/fish/config.fish"
+            # Everything shell startup sources or runs is root-owned: oh-my-zsh
+            # with the theme and plugins, gitstatusd, fnm, and the root-owned
+            # zsh cache. Startup must also ignore home files, writable caches,
+            # and same-named tools earlier in PATH.
+            bad=$(find /usr/local/share/oh-my-zsh /usr/local/share/aic /usr/local/bin/fnm \
+                    /etc/aic/shell /etc/bash.bashrc ! -type l \( ! -user root -o -perm /022 \) -print)
+            [ -z "$bad" ] || { echo "FAIL: vscode-writable shell startup code: $bad"; exit 1; }
+            ls /usr/local/share/oh-my-zsh/custom/themes/powerlevel10k/gitstatus/usrbin/gitstatusd-linux-* >/dev/null \
+              || { echo "FAIL: gitstatusd is not baked into the root-owned theme"; exit 1; }
+            orig_path=$PATH
+            export PATH=/usr/local/bin:/usr/bin:/bin
+            plant() { mkdir -p "$(dirname "$1")"; printf ": > /tmp/aic-plant-%s\n" "$2" > "$1"; }
+            plant "$HOME/.bash_aliases" bash-aliases
+            plant "$HOME/.bash_completion" bash-completion
+            plant "$HOME/.oh-my-zsh/oh-my-zsh.sh" home-oh-my-zsh
+            plant "$HOME/.cache/p10k-dump-vscode.zsh" p10k-dump
+            plant "$HOME/.cache/oh-my-zsh/.zsh-update" oh-my-zsh-update
+            shadows="git fzf rm mkdir tee dircolors lesspipe groups whoami fnm"
+            for bin in $shadows; do
+              [ ! -e "$HOME/.local/bin/$bin" ] || { echo "precondition: $HOME/.local/bin/$bin exists"; exit 1; }
+              printf "#!/bin/sh\n: > /tmp/aic-plant-bin-%s\n" "$bin" > "$HOME/.local/bin/$bin"
+              chmod +x "$HOME/.local/bin/$bin"
+            done
+            printf "#!/bin/sh\n: > /tmp/aic-plant-fnm-dir\n" > "$FNM_DIR/fnm"
+            chmod +x "$FNM_DIR/fnm"
+            env PATH="$orig_path" zsh -lic true
+            env PATH="$orig_path" bash --noprofile --rcfile /etc/aic/shell/bashrc -ic true
+            env PATH="$orig_path" fish --no-config -C "source /etc/fish/conf.d/aic.fish" -lc true
+            ran=$(ls /tmp/aic-plant-* 2>/dev/null || true)
+            [ -z "$ran" ] || { echo "FAIL: shell startup ran vscode-writable code: $ran"; exit 1; }
+            for bin in $shadows; do rm -f "$HOME/.local/bin/$bin"; done
+            rm -rf "$HOME/.bash_aliases" "$HOME/.bash_completion" "$HOME/.oh-my-zsh" \
+                   "$HOME/.cache/p10k-dump-vscode.zsh" "$HOME/.cache/oh-my-zsh" "$FNM_DIR/fnm"
+            export PATH=$orig_path
+            env PATH="$orig_path" zsh -ic "node --version" >/dev/null \
+              || { echo "FAIL: fnm Node is not on the zsh PATH"; exit 1; }
             echo "OK: managed git/shell config is locked and home startup replacements are ignored"
           '
 

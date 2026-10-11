@@ -310,6 +310,9 @@ Uninstall the plugin and drop the marketplace:
   `root:root 0444`; credential helpers, aliases, includes, hooks, remotes, and
   command/path-bearing settings never cross. Zsh, Bash, and fish likewise start
   from root-owned aicontainer profiles, never writable user or host rc files.
+  The code those profiles load (oh-my-zsh, powerlevel10k, the plugins, fnm) is
+  root-owned too, and startup finds commands in system directories only, so an
+  agent cannot plant code that runs when you open a shell.
 - **PreToolUse hook** (Claude, Codex + OpenCode, fires even with bypass/auto-approve/allow on) blocks:
   - reads of `.env*` files — via `Read`/`Edit`/`Write`/`Grep`/`Glob` and in Bash commands (allowing `.env.example|.sample|.template|.defaults`),
   - `curl|sh` / `wget|bash` fetch-and-execute in Bash (including `| sudo bash`, `| tee | sh`, and `bash -c "$(curl …)"` variants),
@@ -450,7 +453,7 @@ ARG PLAYWRIGHT_VERSION=1.50.0
 USER root
 # Chromium's system libraries. apt is root-only and runtime `sudo apt` is
 # blocked, so this step has to live in the image.
-RUN export PATH="$FNM_DIR:$PATH" && eval "$(fnm env)" \
+RUN eval "$(fnm env)" \
     && npx --yes playwright@${PLAYWRIGHT_VERSION} install-deps chromium
 
 USER vscode
@@ -458,7 +461,7 @@ USER vscode
 # This explicit step is REQUIRED: the base image sets NPM_CONFIG_IGNORE_SCRIPTS
 # =true, so `npm i @playwright/test` won't auto-download the browser via its
 # postinstall — you have to run `playwright install` yourself.
-RUN export PATH="$FNM_DIR:$PATH" && eval "$(fnm env)" \
+RUN eval "$(fnm env)" \
     && npx --yes playwright@${PLAYWRIGHT_VERSION} install chromium
 ```
 
@@ -1159,6 +1162,14 @@ there is no live unlock/update primitive.
     entirely and write `.git/config.worktree`. If an agent could have been
     compromised in a checkout, review `.git/config` and
     `.git/config.worktree` on the host once.
+- **Commands you run in a container shell**: shell startup runs only
+  root-owned code, but after startup `PATH` starts with tool directories the
+  agent can write (`~/.local/bin`, fnm's Node versions), because the AI CLIs
+  update themselves there. A command you type, or a prompt helper, can run a
+  binary the agent replaced. VS Code terminals also run through the VS Code
+  server in the container, which the agent can change. Treat a shell in the
+  container as running with the agent's authority: don't type secrets there
+  that the agent must not see.
 - **Network**: outbound is otherwise open by default — anything inside the container can reach `api.openai.com`, `api.anthropic.com`, and your LAN (cloud metadata excepted, see above). To restrict the rest, opt in to the [iptables allowlist](#opt-in-network-allowlist) below.
 - **Git identity**: safe identity/workflow preferences are copied from the host,
   so the agent can commit as that identity and push with credentials you log
