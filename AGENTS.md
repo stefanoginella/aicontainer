@@ -139,7 +139,12 @@ Docs:
 for test in tests/*.sh; do bash "$test"; done
 for test in tests/*.py; do PYTHONDONTWRITEBYTECODE=1 python3 -I "$test"; done
 for test in tests/*.mjs; do node "$test"; done
+bash tests/test-aic-shellcheck.sh --require   # needs a local shellcheck
 ```
+
+When you add a shell script, add it to `SCRIPTS` in
+`tests/test-aic-shellcheck.sh`. See
+[development.md](docs/contributing/development.md#lint-the-shell-scripts).
 
 For a real container run, follow
 [development.md](docs/contributing/development.md).

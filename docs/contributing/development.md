@@ -62,9 +62,10 @@ PR must pass it.
   - Run `bash -n` to check the syntax.
   - Do not use `eval`.
   - A module in `lib/aic/` gets these options from `aic`. Start it with
-    `# shellcheck shell=bash`, and check it with
-    `shellcheck -x -S warning aic lib/aic/*.sh`. The rules for the modules
-    are in [Repository layout](architecture.md).
+    `# shellcheck shell=bash`. The rules for the modules are in
+    [Repository layout](architecture.md).
+  - Every shell script must pass ShellCheck with no warnings. See
+    [Lint the shell scripts](#lint-the-shell-scripts).
   - Quote every variable expansion in a condition.
 - **Python (`post-create.py`)**:
   - Use only the standard library by default.
@@ -85,13 +86,50 @@ PR must pass it.
   - Use a 2-space indent.
   - Do not use anchors, unless the duplication is a real problem.
 
+## Lint the shell scripts
+
+`tests/test-aic-shellcheck.sh` runs `shellcheck -x -S warning` on every shell
+script that the repository owns. Its `SCRIPTS` list is the only list of
+these scripts.
+
+- Run it locally:
+
+  ```bash
+  bash tests/test-aic-shellcheck.sh            # skips when shellcheck is not installed
+  bash tests/test-aic-shellcheck.sh --require  # fails when shellcheck is not installed
+  ```
+
+  The `for test in tests/*.sh` loop also runs it. Install ShellCheck
+  (`brew install shellcheck`, `apt-get install shellcheck`) to lint locally.
+  CI uses version 0.11.0.
+- When you add a shell script, add its path to `SCRIPTS`. The test fails
+  when a tracked shell script is not in the list, and when a listed file is
+  missing. A tracked file is a shell script when its name ends in `.sh`, or
+  when its first line is a `sh`/`bash` shebang or `# shellcheck shell=`.
+- Do not list `.devcontainer/`. It is the generated copy of `template/`.
+- Fix a warning. In `template/` (a security review trigger), change the code
+  only when the fix cannot change the behavior. Otherwise, add a line-level
+  `# shellcheck disable=SCxxxx # <reason>` comment.
+
+The "Static test - shell scripts pass a pinned ShellCheck" step in
+`smoke.yml` downloads a pinned ShellCheck release and checks its sha256
+before it runs the test with `--require`. Thus CI never skips the check and
+never uses the ShellCheck of the runner. To change the version:
+
+1. Download `shellcheck-<version>.linux.x86_64.tar.xz` from the
+   koalaman/shellcheck GitHub release into an empty scratch directory.
+2. Run `shasum -a 256` (macOS) or `sha256sum`, and compare the value with the
+   asset digest on the GitHub release page.
+3. Change `SHELLCHECK_VERSION` and `SHELLCHECK_SHA256` in the same commit.
+
 ## Submit a change
 
 1. Open an issue first if the change is more than a few lines. It is easier
    to agree on the approach before you write the code.
 2. Make a branch from `main`. Keep each PR focused: one logical change per PR.
 3. Make sure that CI passes.
-   - The host CLI and privileged-helper tests in `tests/` run first.
+   - The pinned ShellCheck and the host CLI and privileged-helper tests in
+     `tests/` run first.
    - Then `rebuild.yml` and `release.yml` call the real-devcontainer smoke
      suite in `smoke.yml` after their `build` job.
    - The tests make sure that `claude`, `codex`, `gh`, and `uv` resolve, and

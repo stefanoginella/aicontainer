@@ -199,5 +199,6 @@ The full release rules are in [Releasing](releasing.md).
 - Checkout credentials are never persisted.
 - Every `uses:` is pinned to a full commit SHA with a `# vX.Y.Z` comment, never to a tag. The reason: a moved upstream tag would run in a job that holds the OIDC token and package write permission.
 - Renovate (`helpers:pinGitHubActionDigests`) bumps the SHA and the comment together.
+- A tool that a workflow downloads is pinned by version and sha256, and the step checks the sha256 before it runs the tool. Example: the ShellCheck step in `smoke.yml` (see [Development](development.md)). Never use the copy that the runner image happens to have.
 
 Guarded by the action-pin check in `tests/test-aic-host-security.sh`.
