@@ -2679,7 +2679,10 @@ initialize_managed_volumes () {
   # networkless sidecar reconciles four validated credential files and the
   # login entries of gh hosts.yml and npm npmrc between the two. Create the
   # volume.subpath roots before Compose resolves them, and align ownership
-  # with Dev Containers' host-UID mapping.
+  # with Dev Containers' host-UID mapping. Both helpers re-own only entries
+  # with the wrong owner or group: a full `chown -R` rewrote every inode of
+  # the growing transcript tree on each start. `find` does not follow links
+  # and `chown -h` changes a link itself, as `chown -h -R` did.
   if ! docker run --rm --network none --read-only --cap-drop ALL \
     --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
     --security-opt no-new-privileges:true \
@@ -2696,8 +2699,9 @@ initialize_managed_volumes () {
       do
         ensure_dir "$p"
       done
-      chown -h -R "$AIC_UID:$AIC_GID" \
-        /v/claude /v/codex /v/opencode /v/gh /v/npm /v/signing /v/semgrep /history
+      find /v/claude /v/codex /v/opencode /v/gh /v/npm /v/signing /v/semgrep /history \
+        \( ! -user "$AIC_UID" -o ! -group "$AIC_GID" \) \
+        -exec chown -h "$AIC_UID:$AIC_GID" {} +
     '; then
     die "could not prepare managed auth-volume subpaths"
   fi
@@ -2706,6 +2710,11 @@ initialize_managed_volumes () {
   # physical per-project volume. A clean destination is renamed atomically;
   # after a partial prior migration, copy only missing entries and preserve the
   # legacy source so recovery never destroys the sole copy.
+  #
+  # Keep this a separate helper run from the one above. This volume is
+  # agent-writable: a planted `tool-homes` symlink would send the `mv`/`cp`
+  # below into any volume that the same helper also mounts. Here it can only
+  # point into the helper's read-only rootfs.
   if ! docker run --rm --network none --read-only --cap-drop ALL \
     --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
     --security-opt no-new-privileges:true \
@@ -2760,7 +2769,8 @@ initialize_managed_volumes () {
       do
         ensure_dir "$p"
       done
-      chown -h -R "$AIC_UID:$AIC_GID" /v
+      find /v \( ! -user "$AIC_UID" -o ! -group "$AIC_GID" \) \
+        -exec chown -h "$AIC_UID:$AIC_GID" {} +
     '; then
     die "could not migrate/prepare the per-project tool homes"
   fi

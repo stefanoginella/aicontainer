@@ -584,6 +584,8 @@ a link, never its target, and restores the owner's write bit. Load-bearing:
   one fails, so a blocked config file cannot skip the memory reset.
 - The `setup_*` resets run before `refresh_ai_tools()`: the updaters start the
   tools, which must not load a previous session's settings or memory.
+  `lock_config()` also runs before it, so a slow network cannot hold back the
+  Git identity and the root-locked config.
 - `main()` runs every step through `_run_step()`, so one failure cannot skip
   the lock or project-hook steps; any failure still exits nonzero.
 - The template sets `"waitFor": "postCreateCommand"` so VS Code opens no
@@ -657,6 +659,14 @@ container path `.claude-sessions` migrates to neutral `.aic-sessions` without
 data loss. `postCreateCommand` uses `/usr/bin/python3 -I` and hash-pinned offline
 `tomli-w` under `/opt/aic-python`; don't reintroduce runtime dependency
 resolution before policy/config setup.
+
+The two BusyBox helpers in `initialize_managed_volumes()` stay separate runs.
+Do not merge them to save a container start: the sessions volume is
+agent-writable, so a planted `tool-homes` symlink would send the migration's
+`mv`/`cp` into the global auth or shell-history volume if the same helper
+mounted it. Both re-own only entries with the wrong owner or group (`find …
+-exec chown -h {} +`), never the whole tree with `chown -R`. Guarded by the
+initialize case in `tests/test-aic-host-security.sh`.
 
 ## Project-owned override files (don't break the auto-wire)
 
@@ -894,9 +904,9 @@ Guarded by `tests/test-aic-statusline-overlay.py`, the personal-overlay
 assertions in the host-security test, and the runtime shell-lock + statusline
 smokes.
 
-**AI-tool refresh on every create.** `refresh_ai_tools()` runs early in
-`main()` and floats Claude Code + Codex + OpenCode to latest on every
-container (re)create, so a plain `aic rebuild` lands current CLIs without a
+**AI-tool refresh on every create.** `refresh_ai_tools()` runs after
+`lock_config()` and before the project hook, and floats Claude Code + Codex +
+OpenCode to latest on every container (re)create, so a plain `aic rebuild` lands current CLIs without a
 new image. The Dockerfile bakes each as an offline *floor*; updates run via
 `claude update`, Codex's official `install.sh` with
 `CODEX_NON_INTERACTIVE=1`, and `opencode upgrade`. `AIC_TOOLS`-gated,
@@ -906,8 +916,10 @@ installer is downloaded completely before execution, HTTPS-only and bounded;
 keep `CODEX_HOME` on its separate rootfs package cache and
 `CODEX_INSTALL_DIR=~/.local/bin` so project state remains isolated and no shell
 startup file is edited. OpenCode installs with `--no-modify-path` and upgrades
-in place, never touching rc files. Guarded by the "tool self-update works with
-rc files root-locked" test.
+in place, never touching rc files. The three updaters run in parallel; each
+writes only its own binary and package directory. Guarded by the "tool
+self-update works with rc files root-locked" test and the parallel-updater case
+in `tests/test-aic-auth-sync.py`.
 
 **Dockerfile.project base-tag drift.** `aic sync` re-pins
 `docker-compose.yml` but never touches a `FROM

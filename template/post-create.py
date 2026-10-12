@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -2083,12 +2084,17 @@ def refresh_ai_tools() -> None:
     the documented unattended-installer variables only to its updater preserves
     that split.
     (`opencode upgrade` replaces the binary in place and was installed with
-    --no-modify-path.)"""
+    --no-modify-path.)
+
+    The updaters run in parallel: each one writes only its own binary and
+    package directory, so the wait is the slowest updater, not the sum of
+    their time limits."""
     freeze = os.environ.get("AIC_FREEZE_TOOLS", "").strip().lower()
     if freeze not in ("", "0", "false", "no"):
         log("AIC_FREEZE_TOOLS set — keeping the baked Claude/Codex versions")
         return
     env = {**os.environ, "PATH": f"{HOME / '.local' / 'bin'}:{HOME / '.opencode' / 'bin'}:{os.environ.get('PATH', '')}"}
+    updaters = []
     if "claude-code" in ENABLED_TOOLS:
         # Claude's native updater records its install method in this ordinary
         # per-project state file. Seed only a missing file so a brand-new
@@ -2104,7 +2110,7 @@ def refresh_ai_tools() -> None:
                 )
             except OSError as error:
                 log(f"warning: could not initialize Claude updater state: {error}")
-        _refresh_command("claude", ["claude", "update"], 180, env)
+        updaters.append(lambda: _refresh_command("claude", ["claude", "update"], 180, env))
     if "codex" in ENABLED_TOOLS:
         codex_update_env = {
             **env,
@@ -2112,9 +2118,15 @@ def refresh_ai_tools() -> None:
             "CODEX_HOME": str(CODEX_RUNTIME_HOME),
             "CODEX_INSTALL_DIR": str(HOME / ".local" / "bin"),
         }
-        _refresh_codex(codex_update_env)
+        updaters.append(lambda: _refresh_codex(codex_update_env))
     if "opencode" in ENABLED_TOOLS:
-        _refresh_command("opencode", ["opencode", "upgrade"], 300, env)
+        updaters.append(lambda: _refresh_command("opencode", ["opencode", "upgrade"], 300, env))
+    if not updaters:
+        return
+    with ThreadPoolExecutor(max_workers=len(updaters)) as pool:
+        futures = [pool.submit(updater) for updater in updaters]
+    for future in futures:
+        future.result()
 
 
 def _run_step(step, failed: list[str]) -> None:
@@ -2143,9 +2155,6 @@ def main() -> int:
         else:
             log(f"skipping {tool.removesuffix('-code')} setup (not in AIC_TOOLS)")
     steps += [
-        # After the resets: the updaters start the tools, which must not load a
-        # previous session's settings, memory, or config.
-        refresh_ai_tools,
         setup_cli_homes,
         # semgrep: no setup needed. It is pointed at
         # ~/.config/aic-auth/semgrep/settings.yml via SEMGREP_SETTINGS_FILE
@@ -2158,6 +2167,11 @@ def main() -> int:
         # After the install, so it keys off the root-owned file that actually landed.
         apply_statusline,
         verify_socket_proxy,
+        # After the resets: the updaters start the tools, which must not load a
+        # previous session's settings, memory, or config. After the lock too: a
+        # slow or offline network must not hold back the git identity and the
+        # config. Before the project hook, which can use the updated tools.
+        refresh_ai_tools,
         run_project_hook,
         # Last, so a missing-identity warning is the final thing in `aic rebuild`
         # output rather than scrolling past mid-flow.

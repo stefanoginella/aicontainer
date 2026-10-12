@@ -257,13 +257,15 @@ class MainStepIsolationTests(unittest.TestCase):
             step.__name__ = name
             return step
 
-        # The resets run before the updaters start the tools.
+        # The resets run before the updaters start the tools, and the lock
+        # runs before the updaters can wait on a slow network.
         names = [
             "fix_volume_ownership", "block_metadata",
-            "setup_claude", "setup_codex", "setup_opencode", "refresh_ai_tools",
+            "setup_claude", "setup_codex", "setup_opencode",
             "setup_cli_homes", "setup_gitconfig", "setup_personal_shell",
             "setup_statusline", "lock_config", "apply_statusline",
-            "verify_socket_proxy", "run_project_hook", "verify_git_identity",
+            "verify_socket_proxy", "refresh_ai_tools", "run_project_hook",
+            "verify_git_identity",
         ]
         patches: list = [
             mock.patch.object(POST_CREATE, name, make(name, fail=name == "setup_claude"))
@@ -291,10 +293,11 @@ class MainStepIsolationTests(unittest.TestCase):
 
     def test_clean_run_returns_zero(self) -> None:
         names = [
-            "fix_volume_ownership", "block_metadata", "refresh_ai_tools",
+            "fix_volume_ownership", "block_metadata",
             "setup_cli_homes", "setup_gitconfig", "setup_personal_shell",
             "setup_statusline", "lock_config", "apply_statusline",
-            "verify_socket_proxy", "run_project_hook", "verify_git_identity",
+            "verify_socket_proxy", "refresh_ai_tools", "run_project_hook",
+            "verify_git_identity",
         ]
         patches: list = [mock.patch.object(POST_CREATE, name, lambda: None) for name in names]
         patches.append(mock.patch.object(POST_CREATE, "ENABLED_TOOLS", frozenset()))

@@ -832,7 +832,8 @@ Claude Code, Codex and OpenCode refresh to their latest release **on every `aic
 rebuild`**, in both pull and build mode: `post-create.py` runs `claude update`,
 reruns Codex's official unattended installer, and runs `opencode upgrade` each
 time the container is (re)created. The pinned image is just the baseline they're
-layered on.
+layered on. The three updates run at the same time, after your Git identity and
+settings are in place.
 
 ```bash
 aic rebuild   # in a project: recreate the container → all enabled CLIs update to latest

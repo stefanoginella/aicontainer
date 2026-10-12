@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import redirect_stderr
@@ -49,6 +50,38 @@ class ToolRefreshTests(unittest.TestCase):
         self.assertEqual(install.args[0], ["sh"])
         self.assertEqual(install.kwargs["input"], script)
         self.assertEqual(install.kwargs["env"], env)
+
+    def test_updaters_run_in_parallel(self) -> None:
+        # Each fake updater waits until all three run at the same time. In
+        # sequence, the first one waits alone and the barrier times out.
+        barrier = threading.Barrier(3, timeout=10)
+        started: list[str] = []
+
+        def fake_command(name, _cmd, _timeout, _env) -> None:
+            started.append(name)
+            barrier.wait()
+
+        def fake_codex(env) -> None:
+            started.append("codex")
+            self.assertEqual(env["CODEX_NON_INTERACTIVE"], "1")
+            barrier.wait()
+
+        with tempfile.TemporaryDirectory() as temp:
+            claude_home = Path(temp)
+            (claude_home / ".claude.json").write_text("{}\n")
+            with (
+                mock.patch.dict(os.environ, {"AIC_FREEZE_TOOLS": ""}),
+                mock.patch.object(POST_CREATE, "CLAUDE_HOME", claude_home),
+                mock.patch.object(
+                    POST_CREATE, "ENABLED_TOOLS",
+                    frozenset({"claude-code", "codex", "opencode"}),
+                ),
+                mock.patch.object(POST_CREATE, "_refresh_command", fake_command),
+                mock.patch.object(POST_CREATE, "_refresh_codex", fake_codex),
+            ):
+                POST_CREATE.refresh_ai_tools()
+
+        self.assertEqual(sorted(started), ["claude", "codex", "opencode"])
 
 
 class ToolHomeInitializationTests(unittest.TestCase):

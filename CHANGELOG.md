@@ -108,6 +108,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Container setup no longer waits for the AI-tool updates one by one.**
+  Claude Code, Codex, and OpenCode now update at the same time, after the Git
+  identity and settings are installed. (post-create.py)
+
+- **Container starts no longer re-own every file in the session volumes.**
+  Only files with the wrong owner change, so a long transcript history no
+  longer slows each start. (aic)
+
 - **A validator error is now a clear validation failure.** It used to stop
   `aic` with a bare Node error, and the legacy `check-drift` warning skipped
   it. The validator now ships in the package as `lib/validate.mjs`. (aic)

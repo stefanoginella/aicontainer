@@ -2319,6 +2319,16 @@ grep -q '<volume> <create> <aic-auth-global>' "$log" || fail "initialize did not
 grep -q '_aic-sessions>' "$log" || fail "initialize did not prepare hashed sessions volume"
 grep -q '<rm> <-sf> <aic-seed-sanitizer>' "$log" || fail "initialize did not force-refresh sanitizer service"
 grep -q 'busybox@sha256:fd8d9aa' "$log" || fail "initialize helper image was not digest-pinned"
+# Re-own only entries with the wrong owner or group; a full chown -R rewrote
+# the whole transcript tree on every start.
+! grep -q 'chown -h -R' "$log" || fail "initialize re-owned whole volumes with chown -R"
+[ "$(grep -c '! -user "$AIC_UID" -o ! -group "$AIC_GID"' "$log")" -ge 2 ] \
+  || fail "initialize helpers did not limit chown to wrong-owner entries"
+# The agent-writable sessions volume never shares a helper run with the
+# global auth or shell-history volume.
+grep -q '_aic-sessions:/v>' "$log" || fail "initialize did not run the sessions migration helper"
+grep '_aic-sessions:/v' "$log" | grep -q 'aic-auth-global\|aic-shell-history' \
+  && fail "sessions migration helper also mounted a global volume"
 for placeholder in \
   tool-homes/claude tool-homes/codex tool-homes/opencode-config \
   tool-homes/opencode-data tool-homes/gh tool-homes/npm \
