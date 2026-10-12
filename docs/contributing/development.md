@@ -61,6 +61,10 @@ PR must pass it.
   - Use `set -euo pipefail`.
   - Run `bash -n` to check the syntax.
   - Do not use `eval`.
+  - A module in `lib/aic/` gets these options from `aic`. Start it with
+    `# shellcheck shell=bash`, and check it with
+    `shellcheck -x -S warning aic lib/aic/*.sh`. The rules for the modules
+    are in [Repository layout](architecture.md).
   - Quote every variable expansion in a condition.
 - **Python (`post-create.py`)**:
   - Use only the standard library by default.

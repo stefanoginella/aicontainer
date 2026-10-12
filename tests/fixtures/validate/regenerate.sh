@@ -3,9 +3,10 @@
 # template. Run it after a change to template/devcontainer.json or a Compose
 # template, then review the diff. It needs Docker Compose 2.35+ but no daemon.
 #
-# The models are resolved the way validate_project_security() in aic resolves
-# them, for a pull-mode project without an override. Host values are fixed so
-# the output does not depend on the machine: the project root becomes @ROOT@
+# The models are resolved the way validate_project_security() in
+# lib/aic/validation.sh resolves them, for a pull-mode project without an
+# override. Host values are fixed so the output does not depend on the
+# machine: the project root becomes @ROOT@
 # (the test puts its own temporary root there), this checkout becomes
 # @AIC_HOME@ (the expected model resolves the template's relative paths from
 # it), and the Compose name, HOME, runtime user, Docker socket, status relay,

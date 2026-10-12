@@ -1,6 +1,6 @@
 # Security review checklist
 
-Read this page before you change `lib/validate.mjs`, `template/Dockerfile`, `template/aic-firewall`, the files in `template/hooks/`, the privileged helper scripts, or `.github/workflows/*.yml`.
+Read this page before you change `aic`, the modules in `lib/aic/`, `lib/validate.mjs`, `lib/trust-hash.mjs`, `lib/docker-inspect.mjs`, `lib/project-identity.mjs`, `template/Dockerfile`, `template/aic-firewall`, the files in `template/hooks/`, the privileged helper scripts, or `.github/workflows/*.yml`.
 
 ## Security stance
 
@@ -9,6 +9,38 @@ This container sandboxes autonomous AI tools that run in bypass-permissions mode
 When you must choose between two implementations, choose the more restrictive one.
 
 Review every change to the files below for security regressions. Each note is complete, so you can use this page as a checklist. Where another page owns the full rule, the note links to it.
+
+## `aic` and `lib/aic/*.sh`
+
+The host CLI makes every decision before Docker starts a container. The layout is in [Repository layout](architecture.md).
+
+- `aic` loads the modules from an explicit, ordered list. Never use a glob: it would source a file that somebody planted in `lib/aic/`.
+- A missing or unreadable module must stop the command before it does anything, with a message that names the file.
+- A module only defines functions and constants. A top-level command in a module runs on every `aic` call, `aic __supports` included.
+- `aic` sets the bind-source cache of `export_runtime_environment()` at the top. Keep that assignment above the module load list, so that a value from the environment never seeds the cache.
+- `lib/aic/validation.sh` holds the pre-Docker gate (`validate_project_security()`), the exact-trust store, and Docker consent. The rules are in [Validation](validation.md).
+- The commands in `lifecycle.sh` and `signing.sh` call the gate before they give the project configuration to Dev Containers. The list of commands is in [Validation](validation.md). Do not remove a gate call, and do not move it after a Docker call.
+- The other modules hold boundary checks too: the control-path and `.git` checks and the Compose name (`identity.sh`, see [Project identity](project-identity.md)), the socket and the status relay marker (`runtime.sh`, see [Host state](host-state.md)), the volume checks and ownership proofs (`volumes.sh`, see [Project identity](project-identity.md)), the Docker consent reset in `aic sync` (`init-sync.sh`), and the `is_semver()` gate on registry output (`versions.sh`, see [Version drift](version-drift.md)).
+
+Guarded by the broken-install cases in `tests/test-aic-host-security.sh` and the load-list checks in `tests/test-aic-package.sh`.
+
+## `lib/trust-hash.mjs`
+
+This file computes the exact-trust hash. The full rules are in [Validation](validation.md).
+
+- Do not change what goes into the hash or the order. A different digest for the same project makes every stored approval stale.
+- A helper that cannot run, or a value that is not a sha256 hex digest, must never store or match an approval.
+
+Guarded by the trust-hash cases in `tests/test-aic-host-security.sh` and `tests/test-aic-host-helpers.mjs`.
+
+## `lib/docker-inspect.mjs` and `lib/project-identity.mjs`
+
+These files hold the Node half of the identity and volume checks. The full rules are in [Project identity](project-identity.md).
+
+- `docker-inspect.mjs` accepts only local volumes with no driver options, and proves container ownership from the inspected labels and mounts.
+- `project-identity.mjs` finds a `COMPOSE_PROJECT_NAME` that would replace the managed name, and creates the `.git` control files without following a link.
+
+Guarded by `tests/test-aic-host-helpers.mjs`.
 
 ## `lib/validate.mjs`
 

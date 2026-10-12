@@ -1,6 +1,6 @@
 # Host-side validation
 
-Read this page before you change `validate_project_security()`, `lib/validate.mjs`, `lib/validate-cli.mjs`, the trust flow (`aic trust`, `--allow-unsafe`), or the diagnostic commands (`doctor`, `status`, `validate`).
+Read this page before you change `validate_project_security()` (in `lib/aic/validation.sh`), `lib/validate.mjs`, `lib/validate-cli.mjs`, `lib/trust-hash.mjs`, the trust flow (`aic trust`, `--allow-unsafe`), or the diagnostic commands (`doctor`, `status`, `validate`).
 
 This page continues [Project identity and the host control boundary](project-identity.md). The generated `.env` and the status relay consent are in [Generated host state](host-state.md).
 
@@ -23,7 +23,7 @@ Any managed mismatch is untrustable and requires `aic sync`.
 
 ### Split between `aic` and `lib/`
 
-- The Compose calls and the trust decision stay in `aic`.
+- The Compose calls and the trust decision stay in the shell code, in `lib/aic/validation.sh`.
 - The structural checks are in `lib/validate.mjs`. `aic` runs them through `lib/validate-cli.mjs`.
 - The exact-trust hash is in `lib/trust-hash.mjs`. `aic` runs it through `lib/cli.mjs`. Do not change its output: stored approvals hold it.
 

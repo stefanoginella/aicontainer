@@ -2,7 +2,7 @@
 
 Read this page before you change `warn_compose_drift()`, `check_for_update()`, `aic initialize`, `cmd_check_drift`, or the CLI lookup of the generated initializer.
 
-Two best-effort checks live next to `read_aic_version()` in `aic`.
+Two best-effort checks live next to `read_aic_version()` in `lib/aic/versions.sh`.
 
 - Both fail soft. Every error path does `return 0`. They must never stop the
   command of the user.
@@ -50,6 +50,9 @@ New templates run the trusted `aic initialize` entry point.
 6. A `grep` for `initialize)` stays as the second check. Thus a plain-script
    CLI that has `initialize`, but is older than the probe, is not reported as
    "too old".
+7. The dispatcher stays in the `aic` file, not in a module. Thus when a
+   module in `lib/aic/` is missing, the probe fails but the `grep` still
+   finds the CLI. `aic initialize` then stops and names the missing module.
 
 Guarded by the initializer cases in `tests/test-aic-host-security.sh` (nvm,
 fnm, Volta, asdf, mise, pre-probe CLI; `/bin/sh`, and dash when installed).

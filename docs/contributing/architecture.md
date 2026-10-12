@@ -12,17 +12,65 @@ Do not weaken the test.
 
 ## The `aic` CLI
 
-`aic` is the host-side bash CLI. It is a single file.
+`aic` is the host-side bash CLI. The `aic` file is the entry script. The
+code of the commands is in the bash modules in `lib/aic/`.
 
 - npm exposes it as the bins `aic` and `aicontainer`.
 - Git installs expose it as `~/.aicontainer/aic`.
-- It finds its template and `lib/` through `$AIC_HOME`. The default is the
-  directory of the script, after `aic` follows symlinks.
+- It finds its template, its modules, and `lib/` through `$AIC_HOME`. The
+  default is the directory of the script, after `aic` follows symlinks. Thus
+  a symlink to `aic` (npm, `install.sh`, the VS Code initializer lookup)
+  still finds the modules.
+- The `aic` file keeps only these items:
+  - `set -euo pipefail` and the `$AIC_HOME` resolution,
+  - the globals that must overwrite a value from the environment (the
+    bind-source cache of `export_runtime_environment()`),
+  - `err()`, `die()`, and `aic_helper()`,
+  - the module load list,
+  - the `case "${1:-help}"` dispatcher at the end. `tests/test-aic-cli-spec.mjs`
+    reads the dispatcher from the `aic` file.
+
+## `lib/aic/`
+
+`lib/aic/` holds the bash modules of the CLI. `aic` sources them. Each module
+holds one concern. A module only defines functions and constants: it has no
+other top-level command.
+
+The rules for the load list in `aic`:
+
+- The list is explicit and ordered. Never load the modules with a glob. A
+  glob would also source a file that somebody planted in `lib/aic/`.
+- A missing or unreadable module fails closed before the command starts. The
+  message names the file:
+  `incomplete aicontainer install: lib/aic/<name>.sh is missing in $AIC_HOME`.
+- When you add a module, add it to the list. `tests/test-aic-package.sh`
+  fails when the files in `lib/aic/` and the list differ, or when the
+  package does not have a listed module.
+- Keep the modules compatible with macOS `/bin/bash` 3.2 and with bash 5.
+
+The modules, in load order:
+
+| Module | Contents |
+|---|---|
+| `runtime.sh` | The Dev Containers CLI lookup, the Docker context socket, the runtime kind and bind source, the runtime user, the status relay marker, and the managed `.devcontainer/.env`. See [Host state](host-state.md). |
+| `identity.sh` | The path-unique Compose project name, `canonical_root()`, the `.devcontainer/` control-path checks, and the `.git` control paths. See [Project identity](project-identity.md). |
+| `selection.sh` | The tool and shell selection: the known values, the checks, the prompts, and the reads from `devcontainer.json`. |
+| `versions.sh` | The `aic` version, the version comparison, the drift warning, and the update check. See [Version drift](version-drift.md). |
+| `template.sh` | The Docker exposure toggles, the `devcontainer.json` patch (tools, shell, VS Code merge), the atomic copies, `apply_template()`, and the trusted Compose template path. See [Project-owned overrides](project-overrides.md). |
+| `init-sync.sh` | `aic init`, `aic sync`, and the `Dockerfile.project` base check. |
+| `validation.sh` | The pre-Docker gate (`validate_project_security()`), the exact-trust store, Docker consent, the early override scan, and `aic trust`. See [Validation](validation.md). |
+| `status.sh` | `aic status`, and the trust-boundary summary of `aic up` and `aic preflight`. |
+| `signing.sh` | `aic signing`. See [Host seeds, tool homes, and reusable auth](seeds-and-auth.md). |
+| `volumes.sh` | The managed-volume checks, the legacy session-volume migration, the host seed paths, the volume bootstrap, and the stop of an owned legacy stack. |
+| `lifecycle.sh` | `up`, `preflight`, `check-drift`, `__supports`, `initialize`, `rebuild`, `shell`, `run`, `down`, `destroy`, `validate`, `upgrade`, and `version`. |
+| `doctor.sh` | `aic doctor`. |
+| `help.sh` | `aic help` and `aic completion`. |
 
 ## `lib/`
 
-`lib/` holds the host-side Node modules that `aic` runs. The npm package
-ships them. They use only `node:` built-ins and have no dependencies.
+`lib/` holds the host-side Node modules that `aic` runs, and the bash
+modules in `lib/aic/` (see above). The npm package ships them. The Node
+modules use only `node:` built-ins and have no dependencies.
 
 - `validate.mjs` is the structural validator (`analyzeResolvedConfig()`). It
   takes file contents and returns findings.

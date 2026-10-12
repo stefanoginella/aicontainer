@@ -44,7 +44,23 @@ LOADER.exec_module(LOCK)
 DOCKERFILE = (ROOT / "template" / "Dockerfile").read_text()
 COMPOSE_PULL = (ROOT / "template" / "docker-compose.pull.yml").read_text()
 COMPOSE_BUILD = (ROOT / "template" / "docker-compose.build.yml").read_text()
-AIC = (ROOT / "aic").read_text()
+
+
+def aic_source() -> str:
+    """The text of aic plus every module in its load list, in load order.
+
+    Only the listed modules run, so a definition in an unlisted file in
+    lib/aic/ must not satisfy a test.
+    """
+    text = (ROOT / "aic").read_text()
+    match = re.search(r"^for aic_module in ((?:[^;\\\n]|\\\n)+); do$", text, re.M)
+    assert match is not None, "aic has no module load list"
+    names = match.group(1).replace("\\\n", " ").split()
+    assert names, "the aic module load list is empty"
+    return text + "".join((ROOT / "lib" / "aic" / f"{name}.sh").read_text() for name in names)
+
+
+AIC = aic_source()
 
 MANAGED_DIR = "/etc/aic/user-config/statusline"
 

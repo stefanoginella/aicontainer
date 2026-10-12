@@ -10,7 +10,11 @@ repository is a security boundary. The threat model is
 
 ## Repository map
 
-- `aic` — the host-side bash CLI (one file). npm bin `aic` / `aicontainer`.
+- `aic` — the entry script of the host-side bash CLI. npm bin `aic` /
+  `aicontainer`. It loads the modules in `lib/aic/` from an explicit list,
+  then dispatches the command.
+- `lib/aic/` — the bash modules of the CLI, one file for each concern. They
+  only define functions and constants.
 - `lib/` — host-side Node modules that `aic` runs. Only `node:` built-ins.
   `validate.mjs` is the structural validator; `validate-cli.mjs` runs it.
 - `template/` — copied into every user project's `.devcontainer/` by
@@ -32,11 +36,11 @@ its area and the tests that guard them.
 | When you touch | Read |
 |---|---|
 | Dev setup, conventions, local test runs | [development.md](docs/contributing/development.md) |
-| Repository layout, `template/` file list, package contents | [architecture.md](docs/contributing/architecture.md) |
+| Repository layout, the `aic` module list and `lib/aic/`, `template/` file list, package contents | [architecture.md](docs/contributing/architecture.md) |
 | `template/Dockerfile` downloads, pins, checksums, GHCR tag pinning | [image-integrity.md](docs/contributing/image-integrity.md) |
 | Drift warnings, update checks, `aic initialize` CLI lookup | [version-drift.md](docs/contributing/version-drift.md) |
 | Project name, `COMPOSE_PROJECT_NAME`, path spelling, migration, `.devcontainer/` and `.git` control paths | [project-identity.md](docs/contributing/project-identity.md) |
-| `validate_project_security()`, `lib/validate.mjs`, `aic trust`, diagnostics | [validation.md](docs/contributing/validation.md) |
+| `validate_project_security()` (`lib/aic/validation.sh`), `lib/validate.mjs`, `lib/trust-hash.mjs`, `aic trust`, diagnostics | [validation.md](docs/contributing/validation.md) |
 | Docker socket in `.env`, runtime detection, agent-status relay | [host-state.md](docs/contributing/host-state.md) |
 | Seed sanitizer, tool homes, post-create resets, `aic-auth-sync`, volumes, `aic signing` | [seeds-and-auth.md](docs/contributing/seeds-and-auth.md) |
 | Project-owned override files, `docker-compose.override.yml`, `chown-paths`, `post-create.project.sh`, VS Code files | [project-overrides.md](docs/contributing/project-overrides.md) |
@@ -50,7 +54,10 @@ its area and the tests that guard them.
 Review a change to these files for security regressions. Read
 [security-review.md](docs/contributing/security-review.md) first:
 
-- `lib/validate.mjs`
+- `aic` and `lib/aic/*.sh` (`lib/aic/validation.sh` holds the pre-Docker
+  gate and the trust store)
+- `lib/validate.mjs`, `lib/trust-hash.mjs`, `lib/docker-inspect.mjs`,
+  `lib/project-identity.mjs`
 - `template/Dockerfile`
 - `template/aic-firewall`
 - `template/hooks/pre-tool-use.sh`, `template/hooks/opencode-guardrail.js`,

@@ -984,13 +984,39 @@ broken_home="$TMP/broken-aic-home"
 mkdir -p "$broken_home"
 cp "$ROOT/aic" "$ROOT/package.json" "$broken_home/"
 cp -R "$ROOT/template" "$broken_home/template"
+# aic sources its CLI modules from lib/aic/. An install without them refuses
+# every command and names the first missing module.
+out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
+  && fail "aic validate passed without lib/"
+echo "$out" | grep -q 'incomplete aicontainer install: lib/aic/[a-z-]*\.sh is missing' \
+  || fail "an install without lib/ did not name a missing lib/aic/ module"
+# One missing module is named, and the command refuses before it changes
+# anything. The initializer capability probe fails too.
+mkdir -p "$broken_home/lib"
+cp -R "$ROOT/lib/aic" "$broken_home/lib/aic"
+rm -f "$broken_home/lib/aic/validation.sh"
+out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
+  && fail "aic validate passed without lib/aic/validation.sh"
+echo "$out" | grep -q 'incomplete aicontainer install: lib/aic/validation.sh is missing' \
+  || fail "an install without lib/aic/validation.sh did not name it"
+mkdir -p "$TMP/module-missing"
+git -C "$TMP/module-missing" init -q
+(cd "$TMP/module-missing" && AIC_HOME="$broken_home" "$broken_home/aic" init --with codex --shell zsh \
+  </dev/null >/dev/null 2>&1) && fail "aic init passed without lib/aic/validation.sh"
+[ ! -e "$TMP/module-missing/.devcontainer" ] \
+  || fail "aic init wrote .devcontainer/ without lib/aic/validation.sh"
+AIC_HOME="$broken_home" "$broken_home/aic" __supports initialize </dev/null >/dev/null 2>&1 \
+  && fail "the initializer probe passed without lib/aic/validation.sh"
+cp "$ROOT/lib/aic/validation.sh" "$broken_home/lib/aic/validation.sh"
 # The other helpers in lib/ fail closed too (lib/cli.mjs, see
-# tests/test-aic-host-helpers.mjs), so an install without lib/ also refuses.
+# tests/test-aic-host-helpers.mjs), so an install with the CLI modules but
+# without the lib/*.mjs helpers also refuses.
 out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
   && fail "aic validate passed without its lib/ modules"
 echo "$out" | grep -q 'incomplete aicontainer install: lib/cli.mjs is missing' \
   || fail "an install without lib/ did not name the missing lib/cli.mjs"
 # A module that lib/cli.mjs imports is named too, not hidden behind Node's error.
+rm -rf "$broken_home/lib"
 cp -R "$ROOT/lib" "$broken_home/lib"
 rm -f "$broken_home/lib/project-identity.mjs"
 out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
@@ -2258,7 +2284,11 @@ grep -q "<--remove-orphans>" "$log" && fail "earlier-identity cleanup used --rem
 # Bash's builtin `pwd -P` keeps the typed case, so only /bin/pwd (canonical_root)
 # may sit in the identity code. The behavior itself needs a case-insensitive
 # volume (macOS default), so the second half skips on case-sensitive ones.
-if grep -v '^[[:space:]]*#' "$ROOT/aic" | grep 'pwd -P' | grep -vF '/bin/pwd -P; else pwd -P'; then
+# Scan aic and every module in lib/aic/; canonical_root must be among them.
+grep -qF '/bin/pwd -P; else pwd -P' "$ROOT/aic" "$ROOT"/lib/aic/*.sh \
+  || fail "canonical_root is not in aic or lib/aic/; update this test"
+if grep -hv '^[[:space:]]*#' "$ROOT/aic" "$ROOT"/lib/aic/*.sh | grep 'pwd -P' \
+    | grep -vF '/bin/pwd -P; else pwd -P'; then
   fail "aic uses the builtin pwd -P, which keeps the typed letter case"
 fi
 mkdir -p "$TMP/CaseProbe/Repo"

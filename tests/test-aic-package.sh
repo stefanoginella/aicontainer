@@ -105,10 +105,39 @@ grep -Fxq lib/validate-cli.mjs "$TMP/lib.list" || fail "repository has no lib/va
 while IFS= read -r path; do
   has "$path" || fail "package is missing $path"
 done < "$TMP/lib.list"
-grep -o '\$AIC_HOME/lib/[A-Za-z0-9._-]*' "$ROOT/aic" | sed 's|^\$AIC_HOME/||' | LC_ALL=C sort -u \
-  | while IFS= read -r path; do
-      has "$path" || fail "package is missing $path, which aic runs"
-    done
+
+# aic sources the CLI modules in its explicit load list. Every listed module
+# is in the package, and lib/aic/ holds no file that the list leaves out (an
+# unlisted module never loads, so its functions would be missing at run time).
+sed -n '/^for aic_module in /,/; do$/p' "$ROOT/aic" \
+  | sed -e 's/^for aic_module in //' -e 's/; do$//' -e 's/\\$//' \
+  | tr -s ' ' '\n' | sed '/^$/d' > "$TMP/aic-load.list"
+[ -s "$TMP/aic-load.list" ] || fail "aic has no module load list"
+while IFS= read -r name; do
+  case "$name" in
+    *[!a-z0-9-]*) fail "unexpected aic module name in the load list: $name" ;;
+  esac
+  has "lib/aic/$name.sh" || fail "package is missing lib/aic/$name.sh, which aic loads"
+done < "$TMP/aic-load.list"
+sed 's|.*|lib/aic/&.sh|' "$TMP/aic-load.list" | LC_ALL=C sort > "$TMP/aic-modules.list"
+grep '^lib/aic/' "$TMP/lib.list" > "$TMP/aic-module-files.list" || true
+cmp -s "$TMP/aic-modules.list" "$TMP/aic-module-files.list" \
+  || fail "the files in lib/aic/ and the module load list in aic differ"
+
+# The code of aic is in aic and its modules; read all of them below.
+aic_sources=("$ROOT/aic" "$ROOT"/lib/aic/*.sh)
+
+grep -oh '\$AIC_HOME/lib/[A-Za-z0-9._-]*' "${aic_sources[@]}" | sed 's|^\$AIC_HOME/||' \
+  | LC_ALL=C sort -u > "$TMP/aic-runs.list"
+# The two helpers that every install needs; an empty list means the scan broke.
+for path in lib/cli.mjs lib/validate-cli.mjs; do
+  grep -Fxq "$path" "$TMP/aic-runs.list" || fail "aic no longer runs $path; update this test"
+done
+while IFS= read -r path; do
+  # lib/aic is the module directory of the load loop; the checks above cover it.
+  [ "$path" != lib/aic ] || continue
+  has "$path" || fail "package is missing $path, which aic runs"
+done < "$TMP/aic-runs.list"
 
 # Every template file in the repository is in the package.
 while IFS= read -r path; do
@@ -116,7 +145,7 @@ while IFS= read -r path; do
 done < "$TMP/template.list"
 
 # Every literal template path that aic reads, and the names the review named.
-grep -o '"\$src/[A-Za-z0-9._-]*"\|\$TEMPLATE_DIR/[A-Za-z0-9._-]*' "$ROOT/aic" \
+grep -oh '"\$src/[A-Za-z0-9._-]*"\|\$TEMPLATE_DIR/[A-Za-z0-9._-]*' "${aic_sources[@]}" \
   | sed -e 's/^"//' -e 's/"$//' -e 's|^\$src/||' -e 's|^\$TEMPLATE_DIR/||' \
   | LC_ALL=C sort -u > "$TMP/aic-reads.list"
 grep -Fxq gitignore "$TMP/aic-reads.list" \
