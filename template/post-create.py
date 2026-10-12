@@ -77,7 +77,7 @@ PROJECT_DEVCONTAINER = Path("/workspace/.devcontainer")
 # aic-lock-user-config into the managed shell dir, then sourced by the baked
 # .zshrc AFTER the managed baseline. It is code, not data: it cannot be
 # allowlist-sanitized, so it is copied verbatim from the trusted human's config.
-# See AGENTS.md, "personal config overlay". The project file wins over the host
+# See docs/contributing/shell-and-overlays.md. The project file wins over the host
 # seed; each MUST match aic-lock-user-config's TARGETS staging paths.
 SHELL_MANAGED_DIR = Path("/etc/aic/user-config/shell")
 SHELL_RC_MANAGED = SHELL_MANAGED_DIR / "rc.zsh"
@@ -102,8 +102,8 @@ MAX_PERSONAL_OVERLAY_BYTES = 1024 * 1024
 # paths do not exist here. What aic writes into settings.json is the fixed
 # launcher path, and the launcher picks the interpreter from the installed
 # file's fixed extension — so no host-provided string is ever executed and no
-# command-line rewriting heuristic is involved. See AGENTS.md, "personal config
-# overlay".
+# command-line rewriting heuristic is involved. See
+# docs/contributing/shell-and-overlays.md.
 STATUSLINE_MANAGED_DIR = Path("/etc/aic/user-config/statusline")
 STATUSLINE_COMMAND = "/usr/local/bin/aic-statusline"
 # (managed filename, staging path) in fixed resolution order. MUST stay aligned
@@ -803,7 +803,7 @@ def setup_claude() -> None:
     #
     # Auto memory (projects/<path>/memory/MEMORY.md), skills, agents, commands,
     # and plugins are kept on purpose: they are the project's working state.
-    # They can still carry planted text; the README threat model says so.
+    # They can still carry planted text; docs/user/security.md says so.
     _reset_managed_files(
         lambda: ensure_sandbox_memory(claude_dir / "CLAUDE.md"),
         write_settings,

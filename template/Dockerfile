@@ -20,7 +20,7 @@ ENV TZ="$TZ"
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ---------------------------------------------------------------------------
-# Downloads (AGENTS.md "Image download integrity")
+# Downloads (docs/contributing/image-integrity.md)
 # ---------------------------------------------------------------------------
 # Every curl or git fetch runs under `set -eu` (no `||`, no `set +e`) and
 # writes to a file first:
@@ -667,7 +667,7 @@ end
 FISH_EOF
 
 # Managed launcher for the opt-in personal Claude Code statusline overlay
-# (post-create's STATUSLINE_* constants; AGENTS.md "personal config overlay").
+# (post-create's STATUSLINE_* constants; docs/contributing/shell-and-overlays.md).
 # This fixed path is the ONLY thing written into settings.json's statusLine
 # command, so no host-provided command string is ever executed and there is no
 # command-line rewriting heuristic. The interpreter comes from the installed

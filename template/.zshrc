@@ -6,7 +6,7 @@
 # root-owned cache directory; the managed .zshenv beside this file skips the
 # global zshrc, which runs PATH-resolved commands. Commands typed after startup
 # resolve through the full PATH, which starts with vscode-owned tool
-# directories (README "Threat model").
+# directories (docs/user/security.md, "Threat model").
 
 export LANG='en_US.UTF-8'
 export LANGUAGE='en_US:en'

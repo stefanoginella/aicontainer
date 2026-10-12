@@ -2093,7 +2093,7 @@ cmd_trust () {
 # since a freshly (re)created container never has the opt-in firewall applied)
 # and exposed standalone as `aic preflight` (live-detects the firewall state).
 # The protections are real but otherwise invisible — this makes them auditable.
-# See the README "What crosses the boundary" table for the canonical version.
+# See docs/user/security.md "What crosses the boundary" for the canonical table.
 print_boundary_summary () {
   local mode="${1:-preflight}" project net
   project="$(project_name)"
@@ -2195,7 +2195,7 @@ print_boundary_summary () {
     fi
   fi
 
-  printf "\n  %sFull model:%s README \"Threat model\" + \"What crosses the boundary\".\n\n" "$dim" "$rst"
+  printf "\n  %sFull model:%s docs/user/security.md (\"What crosses the boundary\", \"Threat model\").\n\n" "$dim" "$rst"
 }
 
 # ---------------------------------------------------------------------------

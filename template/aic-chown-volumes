@@ -8,8 +8,8 @@
 #
 #   1. The hardcoded list below — aic's own auth/session/history volumes.
 #   2. Optional project-declared mountpoints, one path per line in
-#      /workspace/.devcontainer/chown-paths (see README "Persisting a named
-#      volume"). Only exact Docker named-volume mountpoints under /workspace/
+#      /workspace/.devcontainer/chown-paths (see docs/user/customization.md,
+#      "named volume"). Only exact Docker named-volume mountpoints under /workspace/
 #      or /home/vscode/.cache/ are honored.
 #
 # Targets are NEVER read from this script's arguments. The scoped sudoers entry

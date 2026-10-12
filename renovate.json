@@ -10,11 +10,11 @@
       "commitMessageTopic": "{{depName}} (Dockerfile)"
     },
     {
-      "description": "These Dockerfile downloads are pinned by per-architecture *_SHA256 ARGs that Renovate does not update. The image build fails until a maintainer updates them (AGENTS.md \"Image download integrity\").",
+      "description": "These Dockerfile downloads are pinned by per-architecture *_SHA256 ARGs that Renovate does not update. The image build fails until a maintainer updates them (docs/contributing/image-integrity.md).",
       "matchManagers": ["custom.regex"],
       "matchDepNames": ["dandavison/delta", "junegunn/fzf", "Schniz/fnm"],
       "prBodyNotes": [
-        "**Checksums needed.** This version is pinned by sha256 in `template/Dockerfile`. Download the new amd64 and arm64 assets, check them against upstream, and update the matching `*_SHA256_AMD64` / `*_SHA256_ARM64` ARGs in this PR (AGENTS.md, \"Image download integrity\"). The image build fails until they match."
+        "**Checksums needed.** This version is pinned by sha256 in `template/Dockerfile`. Download the new amd64 and arm64 assets, check them against upstream, and update the matching `*_SHA256_AMD64` / `*_SHA256_ARM64` ARGs in this PR (docs/contributing/image-integrity.md). The image build fails until they match."
       ]
     },
     {
@@ -22,7 +22,7 @@
       "matchManagers": ["custom.regex"],
       "matchDepNames": ["https://github.com/nodejs/release-keys"],
       "prBodyNotes": [
-        "**Keyring review needed.** If this commit changed `gpg-only-active-keys/pubring.kbx`, review the added or removed Node.js releaser keys, then update `NODE_RELEASE_KEYS_SHA256` in `template/Dockerfile` in this PR (AGENTS.md, \"Image download integrity\"). The image build fails until it matches."
+        "**Keyring review needed.** If this commit changed `gpg-only-active-keys/pubring.kbx`, review the added or removed Node.js releaser keys, then update `NODE_RELEASE_KEYS_SHA256` in `template/Dockerfile` in this PR (docs/contributing/image-integrity.md). The image build fails until it matches."
       ]
     }
   ],

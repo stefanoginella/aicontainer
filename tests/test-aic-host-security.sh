@@ -335,7 +335,7 @@ for line in 'COPY .zshrc /etc/aic/shell/zsh/.zshrc' \
 done
 grep -Fq "sed -e '/^if \\[ -f ~\\/\\.bash_aliases \\]; then\$/,/^fi\$/d'" "$dockerfile" \
   || fail "managed bashrc still sources ~/.bash_aliases"
-# Image download integrity (AGENTS.md). `sh -c "$(curl …)"` exits 0 when curl
+# Image download integrity (docs/contributing/image-integrity.md). `sh -c "$(curl …)"` exits 0 when curl
 # fails, and a pipe into a shell or an unpacker runs whatever arrived. Every
 # curl or git fetch must start with `set -eu`, use no `||` or `set +e`, and be
 # `curl -f --proto '=https' --tlsv1.2 -o FILE`. The first use of each pinned
@@ -474,7 +474,7 @@ const PINNED = [
   { name: 'GitHub CLI apt key', kind: 'fingerprints', url: /^https:\/\/cli\.github\.com\/packages\/githubcli-archive-keyring\.gpg$/, args: ['GH_KEYRING_FINGERPRINTS'] },
   { name: 'Docker apt key', kind: 'fingerprints', url: /^https:\/\/download\.docker\.com\/linux\/[a-z]+\/gpg$/, args: ['DOCKER_KEYRING_FINGERPRINTS'] },
 ];
-// Official self-updating installers: deliberately floating (AGENTS.md).
+// Official self-updating installers: deliberately floating (docs/contributing/image-integrity.md).
 const FLOATING = ['https://claude.ai/install.sh', 'https://chatgpt.com/codex/install.sh', 'https://opencode.ai/install'];
 // zsh theme and plugins: [repository, commit ARG]; the branch comes from the
 // ARG's renovate comment.

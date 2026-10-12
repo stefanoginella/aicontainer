@@ -87,7 +87,7 @@ services:
       # the raw host git/Claude/Codex/OpenCode files.
       - aic-sanitized-seed:/host-seed:ro
 
-      # Persistence — see README "Multi-project model". All Claude/Codex/
+      # Persistence — see docs/user/multi-project.md. All Claude/Codex/
       # OpenCode/gh/npm config, prompts, plugins, and sessions live below this
       # one per-project volume (~/.config/gh and ~/.config/npm are image-baked
       # symlinks into it). Only the credential-sync sidecar sees the global

@@ -28,7 +28,7 @@ Targets fall into two classes:
       3. root only OWNS the file — its contents still execute as the
          unprivileged ``vscode`` user when sourced or rendered, so they grant no
          privilege the agent does not already have.
-    See AGENTS.md, "personal config overlay".
+    See docs/contributing/shell-and-overlays.md, "Personal config overlay".
 """
 
 from __future__ import annotations
