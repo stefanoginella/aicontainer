@@ -90,6 +90,10 @@ An intentional expansion of the host boundary requires one of these:
 - `aic trust`: an interactive approval for the exact relevant hash. `aic` stores it under `$XDG_STATE_HOME/aicontainer/trust`. Any change makes it invalid.
 - `aic up|rebuild --allow-unsafe`: a one-run hash that `aic` passes to the trusted initialize child. It is never a reusable boolean.
 
+A build context outside `.devcontainer/` cannot get persistent trust. Only `--allow-unsafe` or a "yes" at the `aic up` prompt starts it, for one run.
+
+Guarded by the gate decision cases in `tests/test-aic-host-security.sh`. A pseudo-terminal answers the prompts there.
+
 ## Docker consent and the override scan
 
 Docker read/write consent is separate state outside the repository. A Compose edit cannot give itself daemon visibility.
@@ -121,6 +125,8 @@ Guarded by `tests/test-aic-host-security.sh` and the matching workflow smoke tes
 - the source of the Dev Containers project name.
 
 Warnings exit 0. Blockers exit nonzero.
+
+`cmd_doctor()` runs one helper for each check group, in the order above. Guarded by the doctor cases in `tests/test-aic-docker-runtime.sh`: they check the order of the groups and the missing-tool, endpoint, and project-state reports.
 
 `aic status` reports these items and does not change them:
 

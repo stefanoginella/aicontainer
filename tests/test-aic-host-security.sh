@@ -2020,6 +2020,9 @@ fi
 if [ "$tool" = devcontainer ] && [ -n "${AIC_TEST_ENV_LOG:-}" ]; then
   printf 'COMPOSE_PROJECT_NAME=%s\n' "${COMPOSE_PROJECT_NAME-<unset>}" >> "$AIC_TEST_ENV_LOG"
 fi
+if [ "$tool" = devcontainer ] && [ -n "${AIC_TEST_ONCE_LOG:-}" ]; then
+  printf '%s\n' "${AIC_UNSAFE_ONCE_HASH-<unset>}" >> "$AIC_TEST_ONCE_LOG"
+fi
 log_call "$@"
 SH
 chmod +x "$fakebin/tool"
@@ -2690,5 +2693,177 @@ fw_established=$(grep -E '(ipt|ip6t) -A "\$out6?_chain" .*ctstate' "$ROOT/templa
 if printf '%s\n' "$fw_established" | grep -vqF -- '--ctdir REPLY'; then
   fail "aic-firewall OUTPUT accepts ESTABLISHED,RELATED without --ctdir REPLY"
 fi
+
+# The decision paths of the pre-Docker gate (validate_project_security):
+# exact trust, the trust prompt, --allow-unsafe, the one-run hash, and each
+# refusal. A pseudo-terminal answers the prompts. The fake devcontainer logs
+# every start, so a refused gate must leave no `up` in the log.
+on_tty() {
+  local answer="$1"; shift
+  python3 -I -c '
+import os, subprocess, sys
+master, slave = os.openpty()
+os.write(master, (sys.argv[1] + "\n").encode())
+proc = subprocess.Popen(sys.argv[2:], stdin=slave)
+os.close(slave)
+rc = proc.wait()
+os.close(master)
+sys.exit(rc)
+' "$answer" "$@"
+}
+gate_state="$TMP/gate-state"
+once_log="$TMP/gate-once.log"
+gate_run() {
+  local dir="$1"; shift
+  (cd "$dir" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" AIC_TEST_ONCE_LOG="$once_log" \
+    AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+    XDG_STATE_HOME="$gate_state" AIC_HOME="$ROOT" "$@")
+}
+gate_project() {
+  mkdir -p "$1"
+  git -C "$1" init -q
+  gate_run "$1" "$ROOT/aic" init --with codex --shell zsh >/dev/null
+}
+gate_trust_count() {
+  find "$gate_state/aicontainer" -path '*/trust/*' -type f 2>/dev/null | wc -l | tr -d ' '
+}
+gate_started() { grep -q '^devcontainer <up>' "$log"; }
+
+gate_project "$TMP/gate-clean"
+out=$(gate_run "$TMP/gate-clean" on_tty y "$ROOT/aic" trust 2>&1) \
+  || fail "aic trust failed on a clean project: $out"
+echo "$out" | grep -Fq 'no unsafe host-boundary expansions found; no trust exception is needed.' \
+  || fail "aic trust did not report that a clean project needs no trust: $out"
+[ "$(gate_trust_count)" = 0 ] || fail "aic trust stored an approval for a clean project"
+
+gate_project "$TMP/gate-unsafe"
+cat > "$TMP/gate-unsafe/.devcontainer/docker-compose.override.yml" <<'YAML'
+services:
+  devcontainer:
+    cap_add:
+      - NET_RAW
+YAML
+gate_run "$TMP/gate-unsafe" "$ROOT/aic" sync >/dev/null
+out=$(gate_run "$TMP/gate-unsafe" "$ROOT/aic" validate </dev/null 2>&1) \
+  && fail "validate accepted an untrusted cap_add"
+echo "$out" | grep -Fq "aic: unsafe configuration is not trusted; review it, then run 'aic trust' interactively" \
+  || fail "validate did not name the trust fix: $out"
+out=$(gate_run "$TMP/gate-unsafe" "$ROOT/aic" trust </dev/null 2>&1) \
+  && fail "aic trust ran without a terminal"
+echo "$out" | grep -Fq "'aic trust' requires an interactive confirmation" \
+  || fail "aic trust without a terminal did not refuse: $out"
+: > "$log"
+out=$(gate_run "$TMP/gate-unsafe" "$ROOT/aic" up </dev/null 2>&1) \
+  && fail "up started an untrusted configuration without a terminal"
+echo "$out" | grep -Fq "run 'aic trust' interactively or pass --allow-unsafe for one run" \
+  || fail "up did not name the trust options: $out"
+gate_started && fail "a refused gate still started the devcontainer"
+out=$(gate_run "$TMP/gate-unsafe" on_tty n "$ROOT/aic" trust 2>&1) \
+  && fail "aic trust accepted the answer 'n'"
+echo "$out" | grep -Fq 'aborted — configuration was not trusted' \
+  || fail "aic trust did not abort on 'n': $out"
+out=$(gate_run "$TMP/gate-unsafe" on_tty n "$ROOT/aic" up 2>&1) \
+  && fail "up accepted the answer 'n'"
+gate_started && fail "up started the devcontainer after the answer 'n'"
+[ "$(gate_trust_count)" = 0 ] || fail "a refused trust prompt stored an approval"
+
+# --allow-unsafe passes the exact hash to the child; only that hash passes.
+: > "$once_log"
+out=$(gate_run "$TMP/gate-unsafe" "$ROOT/aic" up --allow-unsafe </dev/null 2>&1) \
+  || fail "up --allow-unsafe failed: $out"
+echo "$out" | grep -Fq 'proceeding once because --allow-unsafe was explicitly supplied' \
+  || fail "up --allow-unsafe did not say that it proceeds once: $out"
+gate_started || fail "up --allow-unsafe did not start the devcontainer"
+once_hash=$(tail -n1 "$once_log")
+printf '%s\n' "$once_hash" | grep -Eqx '[0-9a-f]{64}' \
+  || fail "up --allow-unsafe did not hand a sha256 to the child: '$once_hash'"
+[ "$(gate_trust_count)" = 0 ] || fail "up --allow-unsafe stored a persistent approval"
+out=$(gate_run "$TMP/gate-unsafe" env AIC_UNSAFE_ONCE_HASH="$once_hash" \
+  "$ROOT/aic" initialize </dev/null 2>&1) \
+  || fail "initialize refused the exact one-run hash: $out"
+out=$(gate_run "$TMP/gate-unsafe" env AIC_UNSAFE_ONCE_HASH="$(printf '%064d' 0)" \
+  "$ROOT/aic" initialize </dev/null 2>&1) \
+  && fail "initialize accepted a one-run hash for another configuration"
+echo "$out" | grep -Fq 'unsafe configuration is not trusted' \
+  || fail "initialize did not refuse a wrong one-run hash: $out"
+
+# Exact trust: stored on 'y', honored by validate, broken by any edit, revoked.
+out=$(gate_run "$TMP/gate-unsafe" on_tty y "$ROOT/aic" trust 2>&1) \
+  || fail "aic trust failed on 'y': $out"
+echo "$out" | grep -Fq 'trusted this exact configuration' || fail "aic trust did not confirm: $out"
+[ "$(gate_trust_count)" = 1 ] || fail "aic trust did not store one approval"
+gate_run "$TMP/gate-unsafe" "$ROOT/aic" validate </dev/null >/dev/null 2>&1 \
+  || fail "validate did not honor exact trust"
+gate_run "$TMP/gate-unsafe" "$ROOT/aic" trust --revoke >/dev/null
+gate_run "$TMP/gate-unsafe" "$ROOT/aic" validate </dev/null >/dev/null 2>&1 \
+  && fail "validate honored a revoked approval"
+: > "$log"
+out=$(gate_run "$TMP/gate-unsafe" on_tty y "$ROOT/aic" up 2>&1) \
+  || fail "up did not continue after the answer 'y': $out"
+gate_started || fail "up did not start the devcontainer after the answer 'y'"
+gate_run "$TMP/gate-unsafe" "$ROOT/aic" validate </dev/null >/dev/null 2>&1 \
+  || fail "the trust prompt of up did not store exact trust"
+printf '      - NET_BIND_SERVICE\n' >> "$TMP/gate-unsafe/.devcontainer/docker-compose.override.yml"
+gate_run "$TMP/gate-unsafe" "$ROOT/aic" validate </dev/null >/dev/null 2>&1 \
+  && fail "an edited override kept the old approval"
+
+# A build context outside .devcontainer can never be trusted persistently.
+gate_project "$TMP/gate-volatile"
+printf 'FROM ghcr.io/stefanoginella/aicontainer:v%s\n' "$version" \
+  > "$TMP/gate-volatile/.devcontainer/Dockerfile.project"
+cat > "$TMP/gate-volatile/.devcontainer/docker-compose.override.yml" <<'YAML'
+services:
+  devcontainer:
+    image: gate-volatile-devcontainer:local
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile.project
+YAML
+gate_run "$TMP/gate-volatile" "$ROOT/aic" sync >/dev/null
+trust_before=$(gate_trust_count)
+out=$(gate_run "$TMP/gate-volatile" "$ROOT/aic" validate </dev/null 2>&1) \
+  && fail "validate accepted a build context outside .devcontainer"
+echo "$out" | grep -Fq 'configuration includes an unbounded build context' \
+  || fail "validate did not name the unbounded build context: $out"
+out=$(gate_run "$TMP/gate-volatile" on_tty y "$ROOT/aic" trust 2>&1) \
+  && fail "aic trust stored trust for a build context outside .devcontainer"
+echo "$out" | grep -Fq 'persistent trust is unavailable for build contexts outside .devcontainer' \
+  || fail "aic trust did not refuse the unbounded build context: $out"
+: > "$log"
+out=$(gate_run "$TMP/gate-volatile" on_tty y "$ROOT/aic" up 2>&1) \
+  || fail "up did not proceed once after the answer 'y': $out"
+echo "$out" | grep -Fq 'proceeding once; persistent trust is unavailable for this build context.' \
+  || fail "up did not say that it proceeds once: $out"
+gate_started || fail "up did not start the devcontainer for the one run"
+[ "$(gate_trust_count)" = "$trust_before" ] \
+  || fail "an unbounded build context got a persistent approval"
+
+# The phases of aic sync: flag parsing, the report of project-owned files, and
+# the Docker-mode reset of inconsistent toggles.
+gate_project "$TMP/sync-phases"
+out=$(gate_run "$TMP/sync-phases" "$ROOT/aic" sync --bogus 2>&1) && fail "sync accepted --bogus"
+echo "$out" | grep -Fq 'unknown sync flag: --bogus' || fail "sync did not name the unknown flag: $out"
+printf 'true\n' > "$TMP/sync-phases/.devcontainer/statusline.py"
+printf '# comment\nms-python.python\n\nesbenp.prettier-vscode\n' \
+  > "$TMP/sync-phases/.devcontainer/vscode-extensions"
+printf 'FROM ghcr.io/stefanoginella/aicontainer:latest\n' \
+  > "$TMP/sync-phases/.devcontainer/Dockerfile.project"
+sed -E 's/^([[:space:]]*)CONTAINERS:[[:space:]]*0[[:space:]]*$/\1CONTAINERS: 1/' \
+  "$TMP/sync-phases/.devcontainer/docker-compose.yml" > "$TMP/sync-phases/compose.tmp"
+mv "$TMP/sync-phases/compose.tmp" "$TMP/sync-phases/.devcontainer/docker-compose.yml"
+out=$(gate_run "$TMP/sync-phases" "$ROOT/aic" sync --with=claude-code --shell=bash 2>&1) \
+  || fail "sync failed: $out"
+for want in \
+  "existing Docker proxy toggles are inconsistent; resetting them to the secure 'none' mode" \
+  'synced pull-mode template → .devcontainer/ (tools: claude-code, shell: bash, docker: none)' \
+  'personal statusline present (statusline.py)' \
+  'merged vscode-extensions (2 listed) into customizations.vscode.extensions' \
+  'project-owned code runs in the container' \
+  'Dockerfile.project tracks ghcr.io/stefanoginella/aicontainer:latest (floating base)'; do
+  echo "$out" | grep -Fq -- "$want" || fail "sync did not report '$want': $out"
+done
+grep -qE '^[[:space:]]*CONTAINERS:[[:space:]]*0[[:space:]]*$' \
+  "$TMP/sync-phases/.devcontainer/docker-compose.yml" \
+  || fail "sync kept an inconsistent Docker toggle"
 
 echo "OK: host CLI symlink, merge, provenance, naming, and fail-closed checks passed"

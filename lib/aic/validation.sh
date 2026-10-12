@@ -289,11 +289,17 @@ validation_compose_config () {
 # resolved configuration after confirmation. mode=validate: apply the same
 # managed/resolved gate non-interactively; an existing exact trust record is
 # honored, but the command never prompts or writes trust state.
+#
+# The phases run in this order: host-state checks
+# (validation_check_host_state), the Compose models
+# (validation_resolve_compose_models), the structural checks
+# (analyze_resolved_config), the classification of the findings, then the
+# decision. Every phase appends to the one findings file. The decision paths
+# remove the temporary files before they return or die.
 validate_project_security () {
   local mode="${1:-gate}" allow_once="${2:-0}"
   local base_json expected_json final_json noenv_json raw_base_json raw_final_json
-  local findings managed compose_problem unsafe volatile docker_unsafe docker_mode hash expected_compose
-  local compose_ver
+  local findings managed compose_problem unsafe volatile docker_unsafe docker_mode hash
   base_json="$(mktemp "${TMPDIR:-/tmp}/aic-base.XXXXXX")"
   expected_json="$(mktemp "${TMPDIR:-/tmp}/aic-expected.XXXXXX")"
   final_json="$(mktemp "${TMPDIR:-/tmp}/aic-final.XXXXXX")"
@@ -302,6 +308,67 @@ validate_project_security () {
   raw_final_json="$(mktemp "${TMPDIR:-/tmp}/aic-raw-final.XXXXXX")"
   findings="$(mktemp "${TMPDIR:-/tmp}/aic-findings.XXXXXX")"
 
+  validation_check_host_state "$findings"
+  validation_resolve_compose_models "$findings" "$base_json" "$expected_json" \
+    "$final_json" "$noenv_json" "$raw_base_json" "$raw_final_json"
+
+  if [ -s "$base_json" ] && [ -s "$expected_json" ] && [ -s "$final_json" ] \
+     && [ -s "$noenv_json" ] && [ -s "$raw_base_json" ] && [ -s "$raw_final_json" ]; then
+    analyze_resolved_config "$base_json" "$expected_json" "$final_json" "$noenv_json" \
+      "$raw_base_json" "$raw_final_json" "$findings"
+  fi
+
+  managed="$(grep '^MANAGED' "$findings" 2>/dev/null || true)"
+  compose_problem="$(grep '^COMPOSE' "$findings" 2>/dev/null || true)"
+  unsafe="$(grep '^UNSAFE' "$findings" 2>/dev/null || true)"
+  volatile="$(grep '^VOLATILE' "$findings" 2>/dev/null || true)"
+  docker_unsafe="$(grep '^DOCKER' "$findings" 2>/dev/null || true)"
+  docker_mode="$(read_compose_docker_mode)"
+  if [ -n "$docker_unsafe" ] && ! docker_consent_matches "$docker_mode"; then
+    unsafe="${unsafe}${unsafe:+
+}${docker_unsafe}"
+  fi
+  if ! hash="$(hash_validation_inputs "$final_json")"; then
+    hash=""
+    managed="${managed}${managed:+
+}MANAGED could not compute the trust hash (is the aicontainer install complete?)"
+  fi
+  rm -f "$base_json" "$expected_json" "$final_json" "$noenv_json" \
+    "$raw_base_json" "$raw_final_json"
+
+  if [ -n "$managed" ] || [ -n "$compose_problem" ]; then
+    printf 'aic: managed devcontainer validation failed:\n' >&2
+    printf '%s\n%s\n' "$compose_problem" "$managed" | sed -e '/^$/d' \
+      -e 's/^COMPOSE[[:space:]]*/  ! /' -e 's/^MANAGED[[:space:]]*/  ! /' >&2
+    rm -f "$findings"
+    [ "$mode" = "warn" ] && return 1
+    validation_refuse_managed "$mode" "$compose_problem"
+  fi
+
+  if [ -z "$unsafe" ] && [ -z "$volatile" ]; then
+    rm -f "$findings"
+    if [ "$mode" = "trust" ]; then
+      echo "aic: no unsafe host-boundary expansions found; no trust exception is needed."
+    fi
+    return 0
+  fi
+
+  printf 'aic: resolved project configuration requests extra host access or runs project code:\n' >&2
+  printf '%s\n%s\n' "$unsafe" "$volatile" | sed -e '/^$/d' -e 's/^UNSAFE[[:space:]]*/  ! /' \
+    -e 's/^DOCKER[[:space:]]*/  ! /' -e 's/^VOLATILE[[:space:]]*/  ! /' >&2
+  rm -f "$findings"
+
+  if [ "$mode" = "warn" ]; then
+    return 1
+  fi
+  validation_accept_unsafe "$mode" "$allow_once" "$hash" "$volatile"
+}
+
+# Phase 1 of the gate: append to findings file $1 the host-state findings. They
+# are the runtime environment and .devcontainer/.env, the managed build files,
+# the project code files, and the Git control paths.
+validation_check_host_state () {
+  local findings="$1"
   if ! export_runtime_environment; then
     printf 'MANAGED\t%s\n' 'could not resolve the managed host runtime environment (Docker context or status-relay marker)' >> "$findings"
     AIC_DOCKER_SOCKET=/var/run/docker.sock
@@ -319,6 +386,15 @@ validate_project_security () {
   git_control_path_problems | while IFS= read -r line; do
     printf 'MANAGED\t%s\n' "$line"
   done >> "$findings"
+}
+
+# Phase 2 of the gate: resolve the Compose models into the six JSON files
+# $2..$7 (base, expected, final, noenv, raw base, raw final). Append to
+# findings file $1 a finding for each model that cannot be resolved.
+validation_resolve_compose_models () {
+  local findings="$1" base_json="$2" expected_json="$3" final_json="$4"
+  local noenv_json="$5" raw_base_json="$6" raw_final_json="$7"
+  local expected_compose compose_ver
   if [ -f .devcontainer/Dockerfile ]; then
     expected_compose="$TEMPLATE_DIR/docker-compose.build.yml"
   else
@@ -370,63 +446,28 @@ validate_project_security () {
       printf '{}\n' > "$raw_final_json"
     fi
   fi
+}
 
-  if [ -s "$base_json" ] && [ -s "$expected_json" ] && [ -s "$final_json" ] \
-     && [ -s "$noenv_json" ] && [ -s "$raw_base_json" ] && [ -s "$raw_final_json" ]; then
-    analyze_resolved_config "$base_json" "$expected_json" "$final_json" "$noenv_json" \
-      "$raw_base_json" "$raw_final_json" "$findings"
+# The gate found a MANAGED or COMPOSE finding in mode $1 (not warn). Die with
+# the fix: $2 holds the COMPOSE findings. This function never returns.
+validation_refuse_managed () {
+  local mode="$1" compose_problem="$2"
+  # 'aic sync' cannot fix the host's Compose, so name the real fix instead.
+  if [ -n "$compose_problem" ]; then
+    [ "$mode" = "validate" ] \
+      && die "configuration cannot be validated: upgrade Docker Compose to $AIC_MIN_COMPOSE_LABEL+ (see 'aic doctor')"
+    die "refusing to start unverified configuration: upgrade Docker Compose to $AIC_MIN_COMPOSE_LABEL+ (see 'aic doctor')"
   fi
+  [ "$mode" = "validate" ] && die "configuration is invalid (run 'aic sync', then review the diff)"
+  die "refusing to start unverified managed configuration (run 'aic sync', then review the diff)"
+}
 
-  managed="$(grep '^MANAGED' "$findings" 2>/dev/null || true)"
-  compose_problem="$(grep '^COMPOSE' "$findings" 2>/dev/null || true)"
-  unsafe="$(grep '^UNSAFE' "$findings" 2>/dev/null || true)"
-  volatile="$(grep '^VOLATILE' "$findings" 2>/dev/null || true)"
-  docker_unsafe="$(grep '^DOCKER' "$findings" 2>/dev/null || true)"
-  docker_mode="$(read_compose_docker_mode)"
-  if [ -n "$docker_unsafe" ] && ! docker_consent_matches "$docker_mode"; then
-    unsafe="${unsafe}${unsafe:+
-}${docker_unsafe}"
-  fi
-  if ! hash="$(hash_validation_inputs "$final_json")"; then
-    hash=""
-    managed="${managed}${managed:+
-}MANAGED could not compute the trust hash (is the aicontainer install complete?)"
-  fi
-  rm -f "$base_json" "$expected_json" "$final_json" "$noenv_json" \
-    "$raw_base_json" "$raw_final_json"
-
-  if [ -n "$managed" ] || [ -n "$compose_problem" ]; then
-    printf 'aic: managed devcontainer validation failed:\n' >&2
-    printf '%s\n%s\n' "$compose_problem" "$managed" | sed -e '/^$/d' \
-      -e 's/^COMPOSE[[:space:]]*/  ! /' -e 's/^MANAGED[[:space:]]*/  ! /' >&2
-    rm -f "$findings"
-    [ "$mode" = "warn" ] && return 1
-    # 'aic sync' cannot fix the host's Compose, so name the real fix instead.
-    if [ -n "$compose_problem" ]; then
-      [ "$mode" = "validate" ] \
-        && die "configuration cannot be validated: upgrade Docker Compose to $AIC_MIN_COMPOSE_LABEL+ (see 'aic doctor')"
-      die "refusing to start unverified configuration: upgrade Docker Compose to $AIC_MIN_COMPOSE_LABEL+ (see 'aic doctor')"
-    fi
-    [ "$mode" = "validate" ] && die "configuration is invalid (run 'aic sync', then review the diff)"
-    die "refusing to start unverified managed configuration (run 'aic sync', then review the diff)"
-  fi
-
-  if [ -z "$unsafe" ] && [ -z "$volatile" ]; then
-    rm -f "$findings"
-    if [ "$mode" = "trust" ]; then
-      echo "aic: no unsafe host-boundary expansions found; no trust exception is needed."
-    fi
-    return 0
-  fi
-
-  printf 'aic: resolved project configuration requests extra host access or runs project code:\n' >&2
-  printf '%s\n%s\n' "$unsafe" "$volatile" | sed -e '/^$/d' -e 's/^UNSAFE[[:space:]]*/  ! /' \
-    -e 's/^DOCKER[[:space:]]*/  ! /' -e 's/^VOLATILE[[:space:]]*/  ! /' >&2
-  rm -f "$findings"
-
-  if [ "$mode" = "warn" ]; then
-    return 1
-  fi
+# The gate found UNSAFE or VOLATILE findings ($4 holds the VOLATILE ones) in
+# mode $1 (gate, validate, or trust). Accept the configuration with hash $3
+# through exact trust, the one-run hash, --allow-unsafe ($2 = 1), or a prompt,
+# and return 0. Every other path dies.
+validation_accept_unsafe () {
+  local mode="$1" allow_once="$2" hash="$3" volatile="$4"
   if [ -z "$volatile" ] && { [ "$mode" = "gate" ] || [ "$mode" = "validate" ]; } && project_trust_matches "$hash"; then
     return 0
   fi
@@ -451,24 +492,32 @@ validate_project_security () {
     die "persistent trust is unavailable for build contexts outside .devcontainer; use --allow-unsafe per run"
   fi
   if [ "$mode" = "trust" ] || [ -t 0 ]; then
-    local reply
-    printf "aic: trust this exact configuration%s? [y/N] " "$([ "$mode" = "trust" ] && printf '' || printf ' and continue')" >&2
-    IFS= read -r reply || reply=""
-    case "$reply" in
-      y|Y|yes|YES)
-        if [ -n "$volatile" ]; then
-          export AIC_UNSAFE_ONCE_HASH="$hash"
-          echo "aic: proceeding once; persistent trust is unavailable for this build context."
-        else
-          store_project_trust "$hash"
-          echo "aic: trusted this exact configuration; any relevant change invalidates the approval."
-        fi
-        return 0
-        ;;
-      *) die "aborted — configuration was not trusted" ;;
-    esac
+    validation_prompt_trust "$mode" "$hash" "$volatile"
+    return 0
   fi
   die "unsafe configuration is not trusted; run 'aic trust' interactively or pass --allow-unsafe for one run"
+}
+
+# Ask the user to trust the configuration with hash $2 in mode $1 (trust, or
+# gate on a TTY). On yes, store exact trust, or, with VOLATILE findings ($3),
+# allow one run. Return 0 on yes; die on anything else.
+validation_prompt_trust () {
+  local mode="$1" hash="$2" volatile="$3" reply
+  printf "aic: trust this exact configuration%s? [y/N] " "$([ "$mode" = "trust" ] && printf '' || printf ' and continue')" >&2
+  IFS= read -r reply || reply=""
+  case "$reply" in
+    y|Y|yes|YES)
+      if [ -n "$volatile" ]; then
+        export AIC_UNSAFE_ONCE_HASH="$hash"
+        echo "aic: proceeding once; persistent trust is unavailable for this build context."
+      else
+        store_project_trust "$hash"
+        echo "aic: trusted this exact configuration; any relevant change invalidates the approval."
+      fi
+      return 0
+      ;;
+    *) die "aborted — configuration was not trusted" ;;
+  esac
 }
 
 cmd_trust () {

@@ -326,4 +326,86 @@ printf '%s\n' "$out" | grep -q 'aic sync' && fail "validate told the user to run
 printf '%s\n' "$out" | grep -q 'fake-resolved-secret' && fail "validate printed Compose stderr: $out"
 printf '%s\n' "$out" | grep -q 'unknown flag' && fail "validate printed raw Compose stderr: $out"
 
+# aic doctor runs its check groups in a fixed order and reports each one.
+# in_order <text> <substring>... fails unless each substring is on a later line.
+in_order() {
+  local text="$1" line; shift
+  while IFS= read -r line; do
+    [ "$#" -gt 0 ] || break
+    case "$line" in *"$1"*) shift ;; esac
+  done <<< "$text"
+  [ "$#" -eq 0 ]
+}
+out=$(AIC_FAKE_COMPOSE_VERSION=2.40.0 run_aic doctor || true)
+in_order "$out" 'aic doctor' 'Node.js' 'Docker daemon' 'Docker context socket is available' \
+  'Docker runtime' 'Docker Compose 2.40.0' 'Compose accepts config --no-env-resolution' \
+  'Compose accepts volume.subpath' 'Dev Container CLI' 'Git project root is the current directory' \
+  'Git control paths are real' 'aic installation and managed template are present' \
+  'managed control paths are regular' 'managed host runtime environment matches' \
+  'managed project identity matches' 'Dev Containers will use the managed Compose project name' \
+  'Result:' || fail "doctor changed the order of its checks: $out"
+
+# A PATH without the named tools: links to every other command on PATH.
+path_without() {
+  local drop=" $* " dir d f n
+  dir="$TMP/path-without-$(printf '%s' "$*" | tr ' ' '-')"
+  rm -rf "$dir"; mkdir -p "$dir"
+  local IFS=:
+  for d in $darwinbin:$fakebin:$PATH; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      n=${f##*/}
+      case "$drop" in *" $n "*) continue ;; esac
+      if [ -x "$f" ] && [ ! -e "$dir/$n" ]; then ln -s "$f" "$dir/$n"; fi
+    done
+  done
+  printf '%s\n' "$dir"
+}
+doctor_rc=0
+out=$(cd "$project" && PATH="$(path_without node docker git devcontainer)" "$ROOT/aic" doctor 2>&1) \
+  || doctor_rc=$?
+[ "$doctor_rc" -ne 0 ] || fail "doctor passed without node, docker, git, and devcontainer: $out"
+in_order "$out" 'FAIL  Node.js 18+ is required' 'FAIL  Docker CLI not found' \
+  'FAIL  Dev Container CLI not found' 'FAIL  Git not found' 'blocker(s) found' \
+  || fail "doctor did not report the missing tools: $out"
+
+# Context endpoints: remote, not inspectable, and a missing socket.
+out=$(cd "$project" && PATH="$darwinbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT=tcp://10.0.0.1:2375 \
+  AIC_FAKE_COMPOSE_VERSION=2.40.0 "$ROOT/aic" doctor 2>&1 || true)
+printf '%s\n' "$out" | grep -Fq 'FAIL  selected Docker context is remote' \
+  || fail "doctor did not refuse a remote context: $out"
+out=$(cd "$project" && PATH="$darwinbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT='' \
+  AIC_FAKE_COMPOSE_VERSION=2.40.0 "$ROOT/aic" doctor 2>&1 || true)
+printf '%s\n' "$out" | grep -Fq 'WARN  could not inspect the Docker context endpoint' \
+  || fail "doctor did not warn about an endpoint it cannot inspect: $out"
+out=$(cd "$project" && PATH="$darwinbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$TMP/no.sock" \
+  AIC_FAKE_COMPOSE_VERSION=2.40.0 "$ROOT/aic" doctor 2>&1 || true)
+printf '%s\n' "$out" | grep -Fq "FAIL  Docker context socket is missing ($TMP/no.sock)" \
+  || fail "doctor did not report a missing context socket: $out"
+
+# Project state: not a Git project, not initialized, .env absent or stale, and
+# a legacy project identity.
+mkdir -p "$TMP/empty"
+out=$(cd "$TMP/empty" && PATH="$darwinbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$socket" \
+  AIC_FAKE_COMPOSE_VERSION=2.40.0 "$ROOT/aic" doctor 2>&1 || true)
+in_order "$out" "WARN  not in a Git project" "WARN  this directory is not initialized" \
+  || fail "doctor did not warn about an empty directory: $out"
+cp "$project/.devcontainer/.env" "$TMP/env.saved"
+rm "$project/.devcontainer/.env"
+out=$(AIC_FAKE_COMPOSE_VERSION=2.40.0 run_aic doctor || true)
+printf '%s\n' "$out" | grep -Fq 'WARN  .devcontainer/.env is absent' \
+  || fail "doctor did not warn about an absent .env: $out"
+{ cat "$TMP/env.saved"; echo 'EXTRA=1'; } > "$project/.devcontainer/.env"
+out=$(AIC_FAKE_COMPOSE_VERSION=2.40.0 run_aic doctor || true)
+printf '%s\n' "$out" | grep -Fq 'FAIL  .devcontainer/.env is stale or modified' \
+  || fail "doctor did not fail a modified .env: $out"
+cp "$TMP/env.saved" "$project/.devcontainer/.env"
+sed '/^name:/d' "$project/.devcontainer/docker-compose.yml" > "$TMP/compose.legacy"
+cp "$project/.devcontainer/docker-compose.yml" "$TMP/compose.saved"
+cp "$TMP/compose.legacy" "$project/.devcontainer/docker-compose.yml"
+out=$(AIC_FAKE_COMPOSE_VERSION=2.40.0 run_aic doctor || true)
+printf '%s\n' "$out" | grep -Fq 'FAIL  legacy project identity blocks verified startup' \
+  || fail "doctor did not fail a legacy project identity: $out"
+cp "$TMP/compose.saved" "$project/.devcontainer/docker-compose.yml"
+
 echo "docker runtime bind-source tests passed"

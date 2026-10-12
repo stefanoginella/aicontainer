@@ -127,9 +127,24 @@ check_dockerfile_project_base () {
   echo "aic: bumped Dockerfile.project base → ${repo}:${want} (was :${cur_tag})"
 }
 
+# aic sync. The sync_detect_*, sync_parse_args, and sync_resolve_* helpers
+# set the locals of this function (bash dynamic scope), so call them only from
+# here. Each helper names the locals that it sets.
 cmd_sync () {
   require_in_project
   local mode="" tools="" shell="" bump_base="" docker="" docker_explicit=0 was_legacy=0
+  sync_detect_legacy_identity
+  sync_parse_args "$@"
+  sync_resolve_docker_mode
+  sync_resolve_selection
+  sync_apply "$mode" "$tools" "$shell" "$docker" "$docker_explicit" "$was_legacy"
+  sync_report "$mode" "$tools" "$shell" "$docker"
+  check_dockerfile_project_base "$(read_aic_version)" "$bump_base"
+}
+
+# Set was_legacy=1 when the managed Compose project name is missing or is not
+# this path's current one. Sync overwrites the name, so look at it first.
+sync_detect_legacy_identity () {
   local old_name
   # A missing top-level name is the only legacy form. A present but tampered
   # name is simply overwritten from the trusted template; never resolve it as
@@ -147,6 +162,11 @@ cmd_sync () {
       was_legacy=1
     fi
   fi
+}
+
+# Parse the sync flags into mode, tools, shell, bump_base, docker, and
+# docker_explicit. Die on an unknown flag.
+sync_parse_args () {
   while [ $# -gt 0 ]; do
     case "$1" in
       --pull)  mode="pull" ;;
@@ -163,7 +183,11 @@ cmd_sync () {
     esac
     shift
   done
+}
 
+# Set docker to the Docker exposure mode to write: the explicit flag, else the
+# current mode when the host consent for it matches, else 'none'.
+sync_resolve_docker_mode () {
   # Preserve the project's Docker daemon exposure mode across syncs (the
   # compose file is regenerated wholesale) unless an explicit mode overrides it.
   # Read it from the CURRENT compose before apply_template overwrites the file.
@@ -197,7 +221,11 @@ cmd_sync () {
         ;;
     esac
   fi
+}
 
+# Set mode, tools, and shell: the flag values, else the values of the current
+# project, else the defaults. Die on an invalid tool or shell.
+sync_resolve_selection () {
   # Auto-detect: presence of .devcontainer/Dockerfile means the project was
   # initialized with --build; otherwise it's the pull-mode 2-file layout.
   if [ -z "$mode" ]; then
@@ -223,7 +251,13 @@ cmd_sync () {
     [ -n "$shell" ] || shell="$DEFAULT_SHELL"
   fi
   shell="$(validate_shell "$shell")"
+}
 
+# Write the template for mode $1, tools $2, shell $3, and Docker mode $4. Then
+# record the Docker consent ($5 = 1 for an explicit flag) and, for a legacy
+# project ($6 = 1), move the sessions volume.
+sync_apply () {
+  local mode="$1" tools="$2" shell="$3" docker="$4" docker_explicit="$5" was_legacy="$6"
   resolve_docker_socket >/dev/null || die "cannot sync aicontainer with the selected Docker context"
   status_relay_mode >/dev/null || die "fix the host status-relay marker before syncing"
   apply_template "$mode" "$TEMPLATE_DIR" ".devcontainer" "$docker"
@@ -239,6 +273,12 @@ cmd_sync () {
   if [ "$was_legacy" = "1" ]; then
     migrate_legacy_session_volume defer
   fi
+}
+
+# Print the sync result for mode $1, tools $2, shell $3, and Docker mode $4,
+# and name the project-owned files that the next start uses.
+sync_report () {
+  local mode="$1" tools="$2" shell="$3" docker="$4"
   echo "aic: synced $mode-mode template → .devcontainer/ (tools: $tools, shell: $shell, docker: $docker)"
   case "$docker" in
     ro)
@@ -279,5 +319,4 @@ cmd_sync () {
       break
     fi
   done
-  check_dockerfile_project_base "$(read_aic_version)" "$bump_base"
 }
