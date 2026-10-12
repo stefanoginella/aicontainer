@@ -36,6 +36,9 @@ cannot plant code that runs in the next human shell.
      directory before `~/.cache/gitstatus`.
    - A writable cache directory is not a fix. The agent can rename a
      root-owned child of its own `~/.cache`.
+   - p10k instant prompt writes a cache that a later startup sources. The
+     `.zshrc` sets `POWERLEVEL9K_INSTANT_PROMPT=off` after the personal
+     overlay, so a `p10k configure` config cannot turn it on.
 4. **No global rc runs first.** The distro and base-image `/etc/zsh/zshrc`
    and `/etc/bash.bashrc` run commands that they find through PATH. The
    managed `ZDOTDIR/.zshenv` sets `unsetopt GLOBAL_RCS`. Bash has no flag

@@ -138,7 +138,7 @@ jobs:
           # 0444 and the baked .zshrc sources them after the managed baseline.
           printf '# aic smoke overlay rc\nexport AIC_SMOKE_RC=1\ntouch /tmp/aic-smoke-rc-sourced\n' \
             > /tmp/proj/.devcontainer/shell-rc.zsh
-          printf '# aic smoke overlay p10k\ntouch /tmp/aic-smoke-p10k-sourced\n' \
+          printf '# aic smoke overlay p10k\ntypeset -g POWERLEVEL9K_INSTANT_PROMPT=verbose\ntouch /tmp/aic-smoke-p10k-sourced\n' \
             > /tmp/proj/.devcontainer/p10k.zsh
           # Opt-in personal statusline overlay: the script lands root-owned 0444
           # and Claude Code is pointed at the fixed baked launcher, never at a
@@ -220,6 +220,11 @@ jobs:
             zsh -lic true
             [ -e /tmp/aic-smoke-rc-sourced ] && [ -e /tmp/aic-smoke-p10k-sourced ] \
               || { echo "FAIL: overlay not sourced by login zsh"; exit 1; }
+            # The overlay p10k.zsh asks for instant prompt. Its cache directory
+            # is root-owned, so the managed .zshrc must turn it off again.
+            instant=$(zsh -lic "print -r -- \$POWERLEVEL9K_INSTANT_PROMPT")
+            [ "$instant" = off ] \
+              || { echo "FAIL: p10k instant prompt is \"$instant\" after the overlay, expected off"; exit 1; }
             echo "OK: personal shell overlay is root-locked, verbatim, and sourced after baseline"
           '
       - name: Smoke test - a deleted host overlay seed leaves the sanitized volume

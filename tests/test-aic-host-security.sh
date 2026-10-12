@@ -331,6 +331,14 @@ n=$(zshrc_line 'PATH=$_aic_path')
   || fail ".zshrc does not restore the full PATH after oh-my-zsh loads"
 grep -Fqx 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell zsh)"' "$zshrc" \
   || fail ".zshrc does not run the root-owned fnm"
+# p10k instant prompt writes a cache that a later startup sources. The cache
+# directory is root-owned, so the managed rc turns it off after the overlays.
+n=$(zshrc_line 'typeset -g POWERLEVEL9K_INSTANT_PROMPT=off')
+for overlay in p10k rc; do
+  o=$(grep -nF "source /etc/aic/user-config/shell/$overlay.zsh" "$zshrc" | head -n 1 | cut -d: -f1 || true)
+  [ -n "$n" ] && [ -n "$o" ] && [ "$n" -gt "$o" ] \
+    || fail ".zshrc does not turn off p10k instant prompt after the $overlay.zsh overlay"
+done
 # shellcheck disable=SC2088 # '~/' is a literal grep pattern, not a path to expand
 if grep -Ev '^[[:space:]]*#' "$zshrc" | grep -Eq '~/|\$HOME|\$\{HOME'; then
   fail ".zshrc reads a file in the vscode-owned home"

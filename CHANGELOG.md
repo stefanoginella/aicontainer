@@ -173,6 +173,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `p10k.zsh` overlay no longer shows a `mkdir` error at the first prompt.**
+  A `p10k configure` config turns on instant prompt, which needs a writable
+  cache. The shell caches stay root-owned, so the managed zsh startup now turns
+  instant prompt off. (.zshrc)
+
 - **A project now keeps one identity whatever letter case you type in its path.**
   On macOS, typing `~/projects/app` for the folder `~/Projects/App` gave a
   different project name than VS Code, so validation failed and the session

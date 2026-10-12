@@ -71,3 +71,8 @@ fi
 # auto-forwarded.
 [[ ! -r /etc/aic/user-config/shell/p10k.zsh ]] || source /etc/aic/user-config/shell/p10k.zsh
 [[ ! -r /etc/aic/user-config/shell/rc.zsh ]] || source /etc/aic/user-config/shell/rc.zsh
+# p10k instant prompt writes a cache that a later startup sources, so it needs
+# a writable cache directory. The startup caches stay root-owned (see above),
+# and the write fails with a mkdir error at the first prompt. p10k reads this
+# setting at the first prompt, so it wins over a `p10k configure` overlay.
+typeset -g POWERLEVEL9K_INSTANT_PROMPT=off
