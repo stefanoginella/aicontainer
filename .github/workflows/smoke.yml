@@ -1228,6 +1228,42 @@ jobs:
             echo "OK: sandbox signing key wired; managed gitconfig still root-locked; commit signed"
           '
 
+      - name: Smoke test - managed gitconfig wires only the gh credential helper for GitHub
+        working-directory: /tmp/proj
+        run: |
+          # `gh auth setup-git` cannot write the root-locked global config, so
+          # aic writes the same helper itself, by the absolute path of the
+          # root-owned gh (~/.local/bin is agent-writable and first on PATH).
+          # Assert the exact value list for both URLs, no other credential key,
+          # a still root-locked config, and that git really asks gh (GH_TOKEN
+          # is a dummy) for github.com and nothing for another host.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            cd "$HOME"
+            managed=/etc/aic/user-config/gitconfig
+            perms=$(stat -c "%U:%G %a" "$managed")
+            [ "$perms" = "root:root 444" ] || { echo "FAIL: managed gitconfig not root-locked ($perms)"; exit 1; }
+            [ "$(stat -c "%U %a" /usr/bin/gh)" = "root 755" ] || { echo "FAIL: /usr/bin/gh is not root-owned 0755"; exit 1; }
+            expected=$(printf "\n!/usr/bin/gh auth git-credential")
+            for url in https://github.com https://gist.github.com; do
+              got=$(git config --global --get-all "credential.$url.helper")
+              [ "$got" = "$expected" ] || { echo "FAIL: credential.$url.helper is not the exact gh helper list"; printf "%s\n" "$got" | od -c; exit 1; }
+            done
+            names=$(git config --global --name-only --get-regexp "^(credential|url)\." | sort -u | tr "\n" " ")
+            [ "$names" = "credential.https://gist.github.com.helper credential.https://github.com.helper " ] \
+              || { echo "FAIL: unexpected credential/url keys in managed gitconfig: $names"; exit 1; }
+            out=$(printf "protocol=https\nhost=github.com\n\n" \
+              | GH_TOKEN=aic-smoke-dummy-token GIT_TERMINAL_PROMPT=0 git credential fill)
+            printf "%s\n" "$out" | grep -qx "password=aic-smoke-dummy-token" \
+              || { echo "FAIL: git did not get the github.com credential from gh"; exit 1; }
+            if other=$(printf "protocol=https\nhost=gitlab.com\n\n" \
+                | GH_TOKEN=aic-smoke-dummy-token GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= git credential fill 2>/dev/null); then
+              echo "FAIL: git found a credential for gitlab.com"; exit 1
+            fi
+            case "$other" in *aic-smoke-dummy-token*) echo "FAIL: gh token offered to another host"; exit 1 ;; esac
+            echo "OK: exact gh credential helper for GitHub only; managed gitconfig still root-locked"
+          '
+
       - name: CLI test - aic sync warns on / bumps a stale Dockerfile.project base
         run: |
           # Host-only (no container). A project-owned Dockerfile.project that

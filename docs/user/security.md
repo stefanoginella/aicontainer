@@ -189,10 +189,17 @@ to the network row.
     container can reach the host only on TCP 8787, and only when the
     [status relay](status-relay.md) is enabled.
 - **Git identity.** aic copies safe identity/workflow preferences from the
-  host. Thus the agent can commit as that identity. It can push with the
-  credentials that you log in with inside the container. aic does not forward
+  host. Thus the agent can commit as that identity. aic does not forward
   host credential helpers and signing keys. For a sandbox-only key, use
   [`aic signing`](signing.md).
+- **Git push to GitHub.** The managed Git config sets one credential helper:
+  the root-owned `/usr/bin/gh`, for `https://github.com` and
+  `https://gist.github.com` only. Thus the agent can push over HTTPS with the
+  `gh` login that you make inside the container. This gives the agent no new
+  power: it can already read the `gh` token in `~/.config/gh/hosts.yml`.
+  Other hosts (GitHub Enterprise, GitLab, and others) get no helper, and the
+  container has no SSH key. See
+  [Push to GitHub from the container](install.md#push-to-github-from-the-container).
 - **Sandbox signing key.** The agent in every project can read the key that
   `aic signing` creates. See [Commit signing](signing.md).
 - **Secrets in the project directory.** The `.env*` check is a best-effort

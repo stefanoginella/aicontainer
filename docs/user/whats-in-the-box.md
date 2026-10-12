@@ -27,6 +27,10 @@ developer-experience defaults.
   time at `/etc/aic/user-config/gitconfig` as `root:root 0444`.
 - These items never cross: credential helpers, aliases, includes, hooks,
   remotes, and settings that contain a command or a path.
+- aic adds one credential helper of its own: `/usr/bin/gh auth git-credential`
+  for `https://github.com` and `https://gist.github.com`. Thus `git push` over
+  HTTPS uses your container `gh` login. See
+  [Push to GitHub from the container](install.md#push-to-github-from-the-container).
 - Zsh, Bash, and fish also start from root-owned aicontainer profiles. They
   never start from user rc files or host rc files that are writable.
 - The code that these profiles load is also root-owned: oh-my-zsh,

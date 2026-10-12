@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`git push` over HTTPS to GitHub now works with your container `gh` login.**
+  The managed Git config now sets the `gh` credential helper for `github.com`
+  and `gist.github.com`. Other hosts still get no helper. (post-create.py,
+  aic-lock-user-config)
+
 ## [0.10.0] - 2026-10-12
 
 ### Security

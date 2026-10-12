@@ -1,6 +1,6 @@
 # Host seeds, tool homes, and reusable auth
 
-Read this page before you change the seed sanitizer, the tool homes, the `setup_*` resets of post-create (`post_create_tools.py`, `post_create_claude_reset.py`), the `aic-auth-sync` credential bridge, managed volume initialization, or `aic signing`.
+Read this page before you change the seed sanitizer, the tool homes, the `setup_*` resets of post-create (`post_create_tools.py`, `post_create_claude_reset.py`), the `aic-auth-sync` credential bridge, managed volume initialization, the GitHub credential helper in the managed Git config, or `aic signing`.
 
 For the user view of these features, see [Multi-project model](../user/multi-project.md) and [Commit signing](../user/signing.md).
 
@@ -247,6 +247,51 @@ The two BusyBox helpers in `initialize_managed_volumes()` stay separate runs.
 Both helpers re-own only the entries with the wrong owner or group (`find … -exec chown -h {} +`). They never re-own the whole tree with `chown -R`.
 
 Guarded by the initialize case in `tests/test-aic-host-security.sh`.
+
+## GitHub credential helper
+
+`GIT_CONFIG_GLOBAL` points to the root-owned `0444` file
+`/etc/aic/user-config/gitconfig`, and `/workspace/.git/config` is read-only.
+So `gh auth setup-git` cannot write its helper. Instead, `setup_gitconfig()`
+appends the same block as the last block of the staging config
+(`GH_CREDENTIAL_CONFIG` in `post_create_git.py`):
+
+```ini
+[credential "https://github.com"]
+    helper =
+    helper = !/usr/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+    helper =
+    helper = !/usr/bin/gh auth git-credential
+```
+
+The empty `helper =` resets the helpers from earlier config scopes. So only
+`gh` answers for these two URLs.
+
+This helper gives the agent no new power. The agent can already read the `gh`
+token in `~/.config/gh/hosts.yml` and run `gh` itself.
+
+### Rules (do not change)
+
+1. The helper names the apt-installed, root-owned `/usr/bin/gh` by absolute
+   path. Never use a bare `gh`: `~/.local/bin` is agent-writable and comes
+   first on `PATH`.
+2. The seed sanitizer still drops every host `credential.*` and `url.*` key.
+   The helper comes only from aic.
+3. `aic-lock-user-config` requires each of the two keys to hold exactly the
+   value list `("", "!/usr/bin/gh auth git-credential")`, in that order, with
+   the exact subsection spelling (`REQUIRED_EXACT_VALUE_LISTS`). So no value
+   can come before or after the aic values. Every other `credential.*` key
+   (`credential.helper`, another URL, `username`, `useHttpPath`) and every
+   `url.*` key stays forbidden. Keep `GH_CREDENTIAL_CONFIG` and
+   `REQUIRED_EXACT_VALUE_LISTS` aligned.
+4. There is no helper for other hosts (GitHub Enterprise, GitLab). Do not add
+   a helper for a host that the user configures. That needs a validator that
+   accepts a value from outside aic.
+
+Guarded by `GitHubCredentialHelperTests` and `GeneratedGitConfigTests` in
+`tests/test-aic-lock-user-config.py`, and by the "managed gitconfig wires only
+the gh credential helper for GitHub" smoke.
 
 ## Commit signing (`aic signing`)
 

@@ -169,7 +169,7 @@ The overlay rules are in "Personal config overlay" in [Shell startup and overlay
 - It installs a fixed `TARGETS` table, never argv.
 - It opens each `vscode`-owned staging inode without following links.
 - It atomically creates (never replaces) a `root:root 0444` destination under `/etc/aic/user-config/`.
-- The **required** `gitconfig` target is parsed with Git `--no-includes` under a minimal environment. It allows only fixed safe keys and exact aic values.
+- The **required** `gitconfig` target is parsed with Git `--no-includes` under a minimal environment. It allows only fixed safe keys and exact aic values. The only `credential.*` keys are the two required GitHub helper keys, each with an exact value list. See "GitHub credential helper" in [Host seeds, tool homes, and reusable auth](seeds-and-auth.md#github-credential-helper).
 - The **optional** personal overlay targets are `shell/rc.zsh`, `shell/p10k.zsh`, and `statusline/statusline.{sh,mjs,js,py}`. The helper installs them **without** content validation, because zsh and a statusline script cannot be allowlisted.
 
 The unvalidated install is safe only when all three of these conditions are true:
