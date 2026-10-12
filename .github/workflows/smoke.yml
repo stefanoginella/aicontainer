@@ -766,6 +766,66 @@ jobs:
             echo "OK: managed sandbox note in CLAUDE.md + AGENTS.md; reset is idempotent"
           '
 
+      - name: Smoke test - post-create package is root-owned and read-only
+        working-directory: /tmp/proj
+        run: |
+          # post-create.py imports its code only from the aic_post_create
+          # package in /opt/aic-post-create. The seed sanitizer runs it as root,
+          # so vscode must not change, add, or cache a module there. The steps
+          # above ran post-create again, so they must not have left bytecode.
+          devcontainer exec --workspace-folder . bash -c '
+            set -euo pipefail
+            parent=/opt/aic-post-create
+            pkg=$parent/aic_post_create
+            [ "$(stat -c %U:%G:%a /opt/post-create.py)" = root:root:755 ] \
+              || { echo "FAIL: /opt/post-create.py is not root:root 0755"; exit 1; }
+            [ "$(ls -A "$parent")" = aic_post_create ] \
+              || { echo "FAIL: $parent holds more than the package: $(ls -A "$parent")"; exit 1; }
+            for dir in "$parent" "$pkg"; do
+              [ -d "$dir" ] && [ ! -L "$dir" ] || { echo "FAIL: $dir is not a real directory"; exit 1; }
+              [ "$(stat -c %U:%G:%a "$dir")" = root:root:555 ] \
+                || { echo "FAIL: $dir is not root:root 0555"; exit 1; }
+              if touch "$dir/aic-smoke" 2>/dev/null; then echo "FAIL: vscode can write $dir"; exit 1; fi
+              if mkdir "$dir/__pycache__" 2>/dev/null; then echo "FAIL: vscode can create $dir/__pycache__"; exit 1; fi
+            done
+            modules=0
+            for file in "$pkg"/*; do
+              case "${file##*/}" in
+                __init__.py) ;;
+                post_create_*.py) modules=$((modules + 1)) ;;
+                *) echo "FAIL: unexpected entry $file in the package"; exit 1 ;;
+              esac
+              [ -f "$file" ] && [ ! -L "$file" ] || { echo "FAIL: $file is not a regular file"; exit 1; }
+              [ "$(stat -c %U:%G:%a "$file")" = root:root:444 ] \
+                || { echo "FAIL: $file is not root:root 0444"; exit 1; }
+              if { printf x >> "$file"; } 2>/dev/null; then echo "FAIL: vscode can write $file"; exit 1; fi
+            done
+            [ "$modules" -gt 0 ] || { echo "FAIL: the package has no modules"; exit 1; }
+            bytecode=$(find /opt -maxdepth 1 -name __pycache__; find "$parent" \( -name __pycache__ -o -name "*.pyc" \))
+            [ -z "$bytecode" ] || { echo "FAIL: post-create left bytecode: $bytecode"; exit 1; }
+            # The entry loads the package only from the fixed path, and a
+            # planted json.py in the working directory never shadows the
+            # standard library.
+            cd /workspace
+            trap "rm -f /workspace/json.py" EXIT
+            printf "raise SystemExit(\"FAIL: a planted json.py ran\")\n" > /workspace/json.py
+            /usr/bin/python3 -I - <<"PY"
+          import importlib, sys
+          entry = {"__name__": "aic_entry"}
+          exec(compile(open("/opt/post-create.py").read(), "/opt/post-create.py", "exec"), entry)
+          assert sys.dont_write_bytecode, "FAIL: the entry did not turn off bytecode"
+          expected = "/opt/aic-post-create/aic_post_create/"
+          package = entry["_load_package"]()
+          assert package.__file__ == expected + "__init__.py", "FAIL: package from " + package.__file__
+          for name in ("post_create_main", "post_create_seeds", "post_create_auth_sync"):
+              module = importlib.import_module("aic_post_create." + name)
+              assert module.__file__.startswith(expected), "FAIL: module from " + module.__file__
+          import json
+          assert json.__file__.startswith(sys.base_prefix + "/lib/python3"), "FAIL: json from " + json.__file__
+          PY
+            echo "OK: the post-create package is root-owned, read-only, bytecode-free, and loads only from $pkg"
+          '
+
       - name: Smoke test - prompt/code persistence is project-isolated
         working-directory: /tmp/proj
         run: |

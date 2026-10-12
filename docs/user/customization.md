@@ -195,8 +195,8 @@ Use this section to run a step on every container creation. Examples are
 database. Do not edit these files:
 
 - The `postCreateCommand` in `devcontainer.json`. Each sync overwrites it.
-- `post-create.py`. It is in the image. In pull mode, it is not in your
-  repository.
+- `post-create.py` and its `post_create_*.py` modules. They are in the
+  image. In pull mode, they are not in your repository.
 
 Use a **`.devcontainer/post-create.project.sh`** file:
 

@@ -64,6 +64,11 @@ The Dockerfile also bakes these items:
 - The root-managed Git and shell destinations. See [Shell startup and overlays](shell-and-overlays.md).
 - The neutral tool-home symlinks. See [Host seeds, tool homes, and reusable auth](seeds-and-auth.md).
 - The hash-pinned offline Python support.
+- The `aic_post_create` package in `/opt/aic-post-create`. The seed sanitizer
+  runs it as root. Keep the `COPY` an explicit list of files, keep the package
+  `root:root` and read-only, and keep the fixed import path and the bytecode
+  setting of `post-create.py`. See
+  [The post-create package](architecture.md#the-post-create-package).
 
 Codex and OpenCode install through their standalone installers, not through npm:
 

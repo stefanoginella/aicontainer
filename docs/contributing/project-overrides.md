@@ -174,7 +174,7 @@ does not change that. For example, a `myproject-venv:/workspace/.venv` mount
 is not writable by `vscode`.
 
 The project lists such mountpoints, one on each line. On create,
-`fix_volume_ownership()` in `post-create.py` changes their owner through
+`fix_volume_ownership()` in `post_create_container.py` changes their owner through
 `aic-chown-volumes`.
 
 **The prefix allowlist (`/workspace/`, `/home/vscode/.cache/`) is only the
@@ -210,8 +210,8 @@ Thus a project `lefthook install` or `npm ci` sees a fully configured
 environment.
 
 This file is the only way to extend post-create in pull mode. In pull mode,
-`post-create.py` is baked into the image. `apply_template()` copies
-`post-create.py` only in `--build` mode.
+`post-create.py` and its `post_create_*.py` modules are baked into the image.
+`apply_template()` copies them only in `--build` mode.
 
 The hook runs without privileges. The `.devcontainer/` mount makes sure that
 only the host can edit it. But the hook runs before any prompt, with open

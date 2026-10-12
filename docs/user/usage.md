@@ -37,16 +37,16 @@ mounts the `/var/run/docker.sock` of the VM daemon.
 
 `aic up` pulls the prebuilt image from GHCR. This takes approximately 30
 seconds on a warm runtime. A build from the start takes several minutes. All
-other parts are in the image: the Dockerfile, `post-create.py`, the firewall,
-and the hooks.
+other parts are in the image: the Dockerfile, `post-create.py` and its
+`post_create_*.py` modules, the firewall, and the hooks.
 
 ### Build mode
 
 Use build mode if you want to control the build. Examples are custom apt
 packages, air-gapped environments, and changes to the base image. Run
 `aic init --build` instead of `aic init`. This command copies the full template
-into `.devcontainer/`: the `Dockerfile`, `post-create.py`, the hooks, and the
-helper scripts. Then `aic up` builds the image locally.
+into `.devcontainer/`: the `Dockerfile`, `post-create.py` and its
+`post_create_*.py` modules, the hooks, and the helper scripts. Then `aic up` builds the image locally.
 
 ### Other commands
 

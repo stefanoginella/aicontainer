@@ -125,7 +125,8 @@ still runs first.
    - `apply_statusline()` writes the constant `/usr/local/bin/aic-statusline`
      into the per-project `settings.json`. This is a baked, root-owned `0555`
      launcher. It maps the *installed file name* to a hardcoded interpreter.
-   - Keep three fixed tables aligned: `STATUSLINE_VARIANTS` (post-create), the
+   - Keep three fixed tables aligned: `STATUSLINE_VARIANTS`
+     (`post_create_overlays.py`), the
      `statusline/` `TARGETS` (`aic-lock-user-config`), and the dispatch list
      of the launcher. A new extension is a deliberate edit to all three, never
      a discovery at runtime. Never glob the seed directory. Never let the

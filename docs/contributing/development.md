@@ -67,7 +67,9 @@ PR must pass it.
   - Every shell script must pass ShellCheck with no warnings. See
     [Lint the shell scripts](#lint-the-shell-scripts).
   - Quote every variable expansion in a condition.
-- **Python (`post-create.py`)**:
+- **Python (`post-create.py` and the `post_create_*.py` modules)**:
+  - Follow [The post-create package](architecture.md#the-post-create-package):
+    one list of modules, relative imports, and no bytecode.
   - Use only the standard library by default.
   - `postCreateCommand` runs the script with `/usr/bin/python3 -I`. The only
     third-party dependency is `tomli-w`, which writes the Codex

@@ -1,6 +1,6 @@
 # Host seeds, tool homes, and reusable auth
 
-Read this page before you change the seed sanitizer, the tool homes, the `setup_*` resets in `post-create.py`, the `aic-auth-sync` credential bridge, managed volume initialization, or `aic signing`.
+Read this page before you change the seed sanitizer, the tool homes, the `setup_*` resets of post-create (`post_create_tools.py`, `post_create_claude_reset.py`), the `aic-auth-sync` credential bridge, managed volume initialization, or `aic signing`.
 
 For the user view of these features, see [Multi-project model](../user/multi-project.md) and [Commit signing](../user/signing.md).
 

@@ -129,8 +129,12 @@ modules use only `node:` built-ins and have no dependencies.
 `aic init` and `aic sync` copy `template/` into the `.devcontainer/` of a
 project. It is the source of truth for what lands in user repositories.
 
-- `Dockerfile`, `post-create.py`, `hooks/`, `aic-firewall`,
-  `aic-chown-volumes`, `aic-lock-user-config`, `.zshrc`, `gitignore`.
+- `Dockerfile`, `post-create.py`, the `post_create_*.py` modules, `hooks/`,
+  `aic-firewall`, `aic-chown-volumes`, `aic-lock-user-config`, `.zshrc`,
+  `gitignore`.
+- `post-create.py` and the `post_create_*.py` modules hold the container
+  setup, the seed sanitizer, and the credential bridge. See
+  [The post-create package](#the-post-create-package).
 - `hooks/` holds three files. All three are copied root-owned to
   `/etc/aic/hooks/`:
   - `pre-tool-use.sh`, the shared guardrail.
@@ -162,6 +166,75 @@ project. It is the source of truth for what lands in user repositories.
 > **Warning:** Do not put a file that npm drops (`.gitignore`, `.npmignore`,
 > `.npmrc`, …) in `template/`. npm leaves it out of the package, and every
 > `aic init`/`aic sync` then fails.
+
+### The post-create package
+
+`post-create.py` is the fixed entry point. `devcontainer.json` and both
+Compose files run `/usr/bin/python3 -I /opt/post-create.py` with one of these
+arguments:
+
+- no argument: the post-create steps, as `vscode`,
+- `sanitize-seeds`: the seed sanitizer, as root,
+- `auth-sync`: the credential bridge, as the runtime user.
+
+The code is in the `aic_post_create` package, with one module for each
+concern:
+
+| Module | Contents |
+|---|---|
+| `post_create_common.py` | The shared paths, the tool selection (`ENABLED_TOOLS`), `log()`, and the safe file helpers (`_safe_write_text()`, `_replace_managed_file()`, `_remove_tree_at()`, …). |
+| `post_create_claude_reset.py` | `reset_claude_rules()` and `reset_claude_state()`. |
+| `post_create_tools.py` | `setup_claude()`, `setup_codex()`, `setup_opencode()`, `setup_cli_homes()`, and `refresh_ai_tools()`. |
+| `post_create_seeds.py` | The seed sanitizer (`sanitize_seeds()`) and its allowlists. |
+| `post_create_auth_logins.py` | The gh and npm login-entry grammars (`_canonical_login()`). |
+| `post_create_auth_sync.py` | The credential bridge (`auth_sync_main()`). |
+| `post_create_container.py` | `fix_volume_ownership()`, `block_metadata()`, `verify_socket_proxy()`, and `run_project_hook()`. |
+| `post_create_git.py` | `setup_gitconfig()`, `setup_commit_signing()`, `lock_config()`, and `verify_git_identity()`. |
+| `post_create_overlays.py` | The personal overlay: `setup_personal_shell()`, `setup_statusline()`, and `apply_statusline()`. |
+| `post_create_main.py` | `main()`: the post-create steps in their fixed order. |
+
+#### Rules (do not change)
+
+1. **One list.** `AIC_POST_CREATE_MODULES` in `lib/aic/identity.sh` is the
+   only list of the modules in `aic`. The control-path checks
+   (`AIC_CONTROL_FILES`), `apply_template()`, and the build-file provenance
+   check read it. The `COPY` in `template/Dockerfile` names the same files.
+2. **Flat in `.devcontainer/`.** The modules are managed build-mode files
+   next to `post-create.py`, not a subdirectory. Thus the per-name symlink and
+   real-file checks of the control boundary cover each module.
+3. **An explicit `COPY`, never a glob or a directory.** The image installs
+   only the listed files in `/opt/aic-post-create/aic_post_create/`, plus an
+   empty `__init__.py` that the build creates. Thus a file that somebody plants
+   in `.devcontainer/` cannot get into the import directory.
+4. **Root-owned and read-only.** The build makes `/opt/aic-post-create` and
+   everything in it `root:root`: directories `0555`, files `0444`. The parent
+   directory holds only the package.
+5. **One import path.** `-I` keeps the script directory and the working
+   directory off `sys.path`. The entry appends `/opt/aic-post-create` to
+   `sys.path`, so a module there cannot shadow the standard library. Before
+   the package runs, `find_spec()` must resolve `aic_post_create` to that
+   directory. Otherwise the entry exits 1.
+6. **No bytecode.** The entry sets `sys.dont_write_bytecode = True` before it
+   imports the package. `-I` ignores `PYTHONDONTWRITEBYTECODE`, and the
+   sanitizer runs as root.
+7. **Relative imports, standard library only.** A module imports another
+   module with `from .post_create_<name> import <name>`. The only other
+   dependency is `tomli_w` from `/opt/aic-python`, which `setup_codex()`
+   imports when it runs.
+8. **Patch a name where it is read.** Each module imports the shared
+   constants by name. Thus a test patches a name on the module whose function
+   reads it. Example: patch `CLAUDE_HOME` on `post_create_tools` for
+   `setup_claude()`, and on `post_create_overlays` for `apply_statusline()`.
+   No code changes a module global at run time.
+
+To add a module, add the file to `template/`, to `AIC_POST_CREATE_MODULES`,
+and to the Dockerfile `COPY` in the same commit. An existing build-mode
+project gets the new file with `aic sync`.
+
+Guarded by `tests/test-aic-post-create-package.py` (the three lists, the
+import graph, and the entry), the mode and symlink cases in
+`tests/test-aic-host-security.sh`, `tests/test-aic-package.sh`, and the
+"post-create package is root-owned and read-only" smoke in `smoke.yml`.
 
 ## `.github/workflows/`
 

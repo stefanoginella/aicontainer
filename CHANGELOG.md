@@ -166,6 +166,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `release.yml` now call `smoke.yml`, so a runtime assertion is written
   once instead of twice. (workflows)
 
+- **Build mode gets new managed `post_create_*.py` files after `aic sync`.**
+  The container setup code moved from `post-create.py` into modules next to
+  it. Do not edit them; the trust digest of an approved project changes once.
+  (post-create.py, aic)
+
 ### Fixed
 
 - **A project now keeps one identity whatever letter case you type in its path.**
