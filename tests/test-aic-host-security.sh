@@ -984,6 +984,12 @@ broken_home="$TMP/broken-aic-home"
 mkdir -p "$broken_home"
 cp "$ROOT/aic" "$ROOT/package.json" "$broken_home/"
 cp -R "$ROOT/template" "$broken_home/template"
+# The other helpers in lib/ fail closed too (lib/cli.mjs, see
+# tests/test-aic-host-helpers.mjs), so an install without lib/ also refuses.
+(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate >/dev/null 2>&1) \
+  && fail "aic validate passed without its lib/ modules"
+cp -R "$ROOT/lib" "$broken_home/lib"
+rm -f "$broken_home/lib/validate-cli.mjs"
 out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
   && fail "aic validate passed without its validator module"
 echo "$out" | grep -q 'aic validator (lib/validate-cli.mjs) failed to run' \

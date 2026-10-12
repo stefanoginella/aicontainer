@@ -1,6 +1,6 @@
 # Project identity and the host control boundary
 
-Read this page before you change the Compose project name, the checkout path logic, identity or volume migration, the `.devcontainer/` control files, or the Git control paths.
+Read this page before you change the Compose project name, the checkout path logic, identity or volume migration, the `.devcontainer/` control files, the Git control paths, `lib/project-identity.mjs`, or `lib/docker-inspect.mjs`.
 
 This page covers the first part of the host-side rules. The pre-Docker gate is in [Host-side validation](validation.md). The generated `.env` and the status relay consent are in [Generated host state](host-state.md).
 

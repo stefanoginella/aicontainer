@@ -376,41 +376,13 @@ pin_compose_project_name () {
 
 # Return 1, with an actionable message, when a direct Dev Containers start
 # (the generated VS Code initializer cannot pin the name for its parent) would
-# not use this project's managed name. The node block mirrors the CLI's lookup
-# and normalization (@devcontainers/cli, Compose >= 1.21). It prints only the
-# source that conflicts, never a value read from the environment or .env.
+# not use this project's managed name. composeNameConflict() in
+# lib/project-identity.mjs mirrors the CLI's lookup; it prints only the source
+# that conflicts. A helper that cannot run counts as an unreadable .env.
 check_devcontainer_project_name () {
   local expected conflict
   expected="$(project_name)" || return 1
-  conflict="$(node -e '
-    const fs = require("fs");
-    const expected = process.argv[1];
-    const normalize = (value) => String(value).toLowerCase().replace(/[^-_a-z0-9]/g, "");
-    const fromEnv = normalize(process.env.COMPOSE_PROJECT_NAME || "");
-    if (fromEnv) {
-      if (fromEnv !== expected) process.stdout.write("environment");
-      process.exit(0);
-    }
-    let text;
-    try {
-      const stat = fs.statSync(".env");
-      if (stat.isDirectory()) process.exit(0);
-      // The CLI reads any file here. Refuse what could hang it or is too
-      // large to be a plausible .env, rather than guess the name it picks.
-      if (!stat.isFile() || stat.size > 1048576) {
-        process.stdout.write("unreadable");
-        process.exit(0);
-      }
-      text = fs.readFileSync(".env").toString();
-    } catch (error) {
-      if (error && (error.code === "ENOENT" || error.code === "EISDIR")) process.exit(0);
-      process.stdout.write("unreadable");
-      process.exit(0);
-    }
-    const match = /^COMPOSE_PROJECT_NAME=(.+)$/m.exec(text);
-    const fromFile = normalize((match && match[1].trim()) || "");
-    if (fromFile && fromFile !== expected) process.stdout.write("dotenv");
-  ' "$expected")" || conflict=unreadable
+  conflict="$(node "$AIC_HOME/lib/cli.mjs" compose-name-conflict "$expected")" || conflict=unreadable
   case "$conflict" in
     "") return 0 ;;
     environment)
@@ -546,15 +518,10 @@ ensure_git_control_paths () {
     if [ ! -e .git/hooks ] && [ ! -L .git/hooks ]; then
       mkdir .git/hooks 2>/dev/null || true
     fi
-    # O_EXCL never follows or replaces a path that already exists, including
-    # a symlink planted there; the check below reports what it found instead.
-    node -e '
-      const fs = require("fs");
-      for (const [file, content] of [[".git/commondir", ".\n"], [".git/config.worktree", ""]]) {
-        try { fs.writeFileSync(file, content, { flag: "wx" }); }
-        catch (error) { if (!error || error.code !== "EEXIST") throw error; }
-      }
-    ' 2>/dev/null || die "could not create the managed Git control files in .git"
+    # The helper never follows or replaces a path that already exists; the
+    # check below reports what it found instead.
+    node "$AIC_HOME/lib/cli.mjs" git-control-files \
+      2>/dev/null || die "could not create the managed Git control files in .git"
   fi
   problems="$(git_control_path_problems --with-missing)"
   [ -n "$problems" ] || return 0
@@ -990,53 +957,15 @@ build_vscode_ext_block () {
 
 # Build the injection block for project-owned VS Code settings. The input is
 # strict JSON (not JSONC), must be a non-array object, and is parsed then
-# serialized by Node. Never splice user-controlled text between braces: a
+# serialized by lib/vscode-settings.mjs, which also drops the keys that the
+# template manages. Never splice user-controlled text between braces: a
 # malformed object could otherwise escape customizations.vscode.settings and
 # inject host-facing top-level devcontainer properties.
 build_vscode_settings_block () {
   local file="$1" output
   [ -f "$file" ] || return 0
-  if ! output="$(node -e '
-    const fs = require("fs");
-    const file = process.argv[1], templateFile = process.argv[2];
-    let value;
-    try {
-      value = JSON.parse(fs.readFileSync(file, "utf8"));
-    } catch (_) {
-      process.exit(2);
-    }
-    if (value === null || Array.isArray(value) || typeof value !== "object") {
-      process.exit(3);
-    }
-
-    // Project settings are appended at the managed marker. Duplicate JSON
-    // keys are accepted by VS Code with the last value winning, so filter all
-    // top-level keys owned by aic before serialization. Derive the set from
-    // the installed template to keep this rule aligned as managed settings
-    // evolve.
-    const template = fs.readFileSync(templateFile, "utf8");
-    const marker = template.indexOf("// aic:vscode-settings");
-    const start = template.lastIndexOf("\"settings\": {", marker);
-    if (marker < 0 || start < 0) process.exit(4);
-    const managedBlock = template.slice(start, marker);
-    const managedKeys = new Set();
-    const keyPattern = /^        ("(?:[^"\\]|\\.)+")\s*:/gm;
-    let match;
-    while ((match = keyPattern.exec(managedBlock)) !== null) {
-      managedKeys.add(JSON.parse(match[1]));
-    }
-    for (const key of Object.keys(value)) {
-      if (!managedKeys.has(key)) continue;
-      process.stderr.write(`aic: ignoring vscode-settings.json key managed by aic: ${key}\n`);
-      delete value[key];
-    }
-
-    const entries = Object.entries(value);
-    if (!entries.length) process.exit(0);
-    const lines = JSON.stringify(value, null, 2).split("\n").slice(1, -1);
-    lines[0] = "," + lines[0].trimStart();
-    process.stdout.write(lines.map(line => "        " + line).join("\n"));
-  ' "$file" "$TEMPLATE_DIR/devcontainer.json")"; then
+  if ! output="$(node "$AIC_HOME/lib/cli.mjs" vscode-settings \
+      "$file" "$TEMPLATE_DIR/devcontainer.json")"; then
     printf 'aic: ignoring vscode-settings.json (must be a strict JSON object)\n' >&2
     return 0
   fi
@@ -1703,52 +1632,12 @@ docker_consent_matches () {
   [ "$value" = "$mode" ]
 }
 
+# The exact-trust hash of the resolved Compose model and the .devcontainer
+# tree (lib/trust-hash.mjs). Stored approvals hold it, so its output must not
+# change.
 hash_validation_inputs () {
   local final_json="$1"
-  node -e '
-    const crypto = require("crypto"), fs = require("fs"), path = require("path");
-    const h = crypto.createHash("sha256");
-    const resolved = process.argv[1];
-    h.update("<resolved-compose>\0");
-    if (fs.existsSync(resolved)) {
-      // The managed build passes TZ: ${TZ:-UTC}. A terminal often exports TZ
-      // and a GUI-started editor does not, so hash the host value as a fixed
-      // token; a repository literal that differs from it stays in the hash.
-      const raw = fs.readFileSync(resolved, "utf8");
-      let model;
-      try { model = JSON.parse(raw); } catch (_) { model = null; }
-      if (model && model.services && typeof model.services === "object") {
-        const hostTz = process.env.TZ || "UTC";
-        let pinned = false;
-        // The x-aic-build template anchor is resolved into the model too.
-        const builds = [model["x-aic-build"]];
-        for (const service of Object.values(model.services)) builds.push(service && service.build);
-        for (const build of builds) {
-          const args = build && typeof build === "object" && build.args;
-          if (args && typeof args === "object" && args.TZ === hostTz) { args.TZ = "<host-tz>"; pinned = true; }
-        }
-        // Unchanged models keep their raw bytes, so existing approvals stay valid.
-        h.update(pinned ? JSON.stringify(model) : raw);
-      } else {
-        h.update(raw);
-      }
-    }
-    h.update("\0<devcontainer-tree>\0");
-    function walk(root, relative = "") {
-      const full = relative ? path.join(root, relative) : root;
-      const stat = fs.lstatSync(full);
-      const kind = stat.isDirectory() ? "d" : stat.isFile() ? "f" : stat.isSymbolicLink() ? "l" : "o";
-      h.update(`${kind}:${relative}:${stat.mode & 0o7777}\0`);
-      if (kind === "f") h.update(fs.readFileSync(full));
-      else if (kind === "l") h.update(fs.readlinkSync(full));
-      h.update("\0");
-      if (kind === "d") {
-        for (const name of fs.readdirSync(full).sort()) walk(root, path.join(relative, name));
-      }
-    }
-    if (fs.existsSync(".devcontainer")) walk(".devcontainer");
-    process.stdout.write(h.digest("hex"));
-  ' "$final_json"
+  node "$AIC_HOME/lib/cli.mjs" trust-hash "$final_json"
 }
 
 store_project_trust () {
@@ -2450,14 +2339,7 @@ cmd_signing () {
 docker_volume_metadata_is_safe () {
   local name="$1" metadata
   metadata="$(docker volume inspect --format '{{json .}}' "$name" 2>/dev/null)" || return 1
-  node -e '
-    let volume;
-    try { volume = JSON.parse(process.argv[1]); } catch (_) { process.exit(2); }
-    const options = volume && volume.Options;
-    const emptyOptions = options == null ||
-      (typeof options === "object" && !Array.isArray(options) && Object.keys(options).length === 0);
-    if (!volume || volume.Driver !== "local" || !emptyOptions) process.exit(1);
-  ' "$metadata" >/dev/null 2>&1
+  node "$AIC_HOME/lib/cli.mjs" volume-safe "$metadata" >/dev/null 2>&1
 }
 
 assert_safe_docker_volume () {
@@ -2497,23 +2379,8 @@ legacy_session_volume_owned_by_workspace () {
   while IFS= read -r cid; do
     [ -n "$cid" ] || continue
     inspected="$(docker inspect --format '{{json .}}' "$cid" 2>/dev/null)" || continue
-    if node -e '
-      let container;
-      try { container = JSON.parse(process.argv[1]); } catch (_) { process.exit(2); }
-      const labels = container && container.Config && container.Config.Labels;
-      const mounts = container && container.Mounts;
-      const destinations = new Set([
-        "/home/vscode/.claude-sessions",
-        "/home/vscode/.aic-sessions",
-      ]);
-      const owned = labels &&
-        labels["devcontainer.local_folder"] === process.argv[2] &&
-        labels["com.docker.compose.project"] === process.argv[3] &&
-        Array.isArray(mounts) && mounts.some((mount) =>
-          mount && mount.Type === "volume" &&
-          mount.Name === process.argv[4] && destinations.has(mount.Destination));
-      if (!owned) process.exit(1);
-    ' "$inspected" "$workspace" "$legacy" "$old_vol" >/dev/null 2>&1; then
+    if node "$AIC_HOME/lib/cli.mjs" owns-session-volume \
+        "$inspected" "$workspace" "$legacy" "$old_vol" >/dev/null 2>&1; then
       proved=1
       break
     fi
@@ -2529,19 +2396,8 @@ legacy_session_volume_owned_by_workspace () {
   while IFS= read -r cid; do
     [ -n "$cid" ] || continue
     inspected="$(docker inspect --format '{{json .}}' "$cid" 2>/dev/null)" || return 1
-    node -e '
-      let container;
-      try { container = JSON.parse(process.argv[1]); } catch (_) { process.exit(2); }
-      const labels = container && container.Config && container.Config.Labels;
-      const mounts = container && container.Mounts;
-      const usesVolume = Array.isArray(mounts) && mounts.some((mount) =>
-        mount && mount.Type === "volume" && mount.Name === process.argv[4]);
-      if (!usesVolume) process.exit(1);
-      const sameOwner = labels &&
-        labels["devcontainer.local_folder"] === process.argv[2] &&
-        labels["com.docker.compose.project"] === process.argv[3];
-      if (!sameOwner) process.exit(1);
-    ' "$inspected" "$workspace" "$legacy" "$old_vol" >/dev/null 2>&1 || return 1
+    node "$AIC_HOME/lib/cli.mjs" volume-user-is-owner \
+      "$inspected" "$workspace" "$legacy" "$old_vol" >/dev/null 2>&1 || return 1
   done <<< "$users"
   return 0
 }
@@ -2815,29 +2671,13 @@ stop_owned_stack_named () {
       err "legacy Compose stack '$legacy' has an unreadable container owner; preserving the whole stack."
       return 0
     fi
-    if node -e '
-      let container;
-      try { container = JSON.parse(process.argv[1]); } catch (_) { process.exit(2); }
-      const labels = container && container.Config && container.Config.Labels;
-      const owned = labels &&
-        labels["devcontainer.local_folder"] === process.argv[2] &&
-        labels["com.docker.compose.project"] === process.argv[3];
-      if (!owned) process.exit(1);
-    ' "$inspected" "$workspace" "$legacy" >/dev/null 2>&1; then
+    if node "$AIC_HOME/lib/cli.mjs" container-owned \
+        "$inspected" "$workspace" "$legacy" >/dev/null 2>&1; then
       proved=1
       continue
     fi
-    if node -e '
-      let container;
-      try { container = JSON.parse(process.argv[1]); } catch (_) { process.exit(2); }
-      const labels = container && container.Config && container.Config.Labels;
-      const allowed = new Set(["socket-proxy", "aic-auth-sync", "aic-seed-sanitizer"]);
-      const auxiliary = labels &&
-        labels["com.docker.compose.project"] === process.argv[2] &&
-        !labels["devcontainer.local_folder"] &&
-        allowed.has(labels["com.docker.compose.service"]);
-      if (!auxiliary) process.exit(1);
-    ' "$inspected" "$legacy" >/dev/null 2>&1; then
+    if node "$AIC_HOME/lib/cli.mjs" auxiliary-container \
+        "$inspected" "$legacy" >/dev/null 2>&1; then
       continue
     fi
     err "legacy Compose stack '$legacy' includes a container not provably owned by this exact workspace; preserving the whole stack."

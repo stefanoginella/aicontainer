@@ -25,6 +25,7 @@ Any managed mismatch is untrustable and requires `aic sync`.
 
 - The Compose calls and the trust decision stay in `aic`.
 - The structural checks are in `lib/validate.mjs`. `aic` runs them through `lib/validate-cli.mjs`.
+- The exact-trust hash is in `lib/trust-hash.mjs`. `aic` runs it through `lib/cli.mjs`. Do not change its output: stored approvals hold it.
 
 Keep that split. The module reads only files under the project root and never runs Docker. Thus its rules stay testable from fixtures.
 

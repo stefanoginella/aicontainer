@@ -36,6 +36,28 @@ ships them. They use only `node:` built-ins and have no dependencies.
   - It exits non-zero when it cannot run.
   - `aic` turns that exit status into a MANAGED finding.
   - An empty output must never read as "no findings".
+- `cli.mjs` is the entry point for the other helpers. `aic` runs
+  `node "$AIC_HOME/lib/cli.mjs" <subcommand> args...`.
+  - Each subcommand keeps the stdout, stderr, and exit status of the `aic`
+    function that calls it.
+  - An unknown subcommand or a wrong argument count exits 2. Thus a helper
+    that does not run never reads as a pass.
+- The helper modules:
+  - `project-identity.mjs`: the `COMPOSE_PROJECT_NAME` conflict check for a
+    direct Dev Containers start, and the creation of the `.git` control
+    files. See [Project identity](project-identity.md).
+  - `trust-hash.mjs`: the exact-trust hash of the resolved Compose model and
+    the `.devcontainer/` tree. See [Validation](validation.md).
+  - `docker-inspect.mjs`: the managed-volume check and the ownership proofs
+    of the legacy migration, on `docker inspect` JSON.
+  - `vscode-settings.mjs`: the injected block of project-owned VS Code
+    settings. See [Project-owned overrides](project-overrides.md).
+- `tests/test-aic-host-helpers.mjs` unit-tests the helper modules and
+  `cli.mjs` without Docker.
+
+> **Warning:** Do not change the output of `trust-hash.mjs`. Stored approvals
+> hold its digest, so a different digest makes every user trust the project
+> again. The fixed-digest case in `tests/test-aic-host-helpers.mjs` guards it.
 
 ## `template/`
 
