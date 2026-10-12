@@ -1,0 +1,85 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "fixture-aicontainer",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "init": true,
+  "overrideCommand": false,
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "eamodio.gitlens",
+        "openai.chatgpt",
+        "sst-dev.opencode",
+        "pflannery.vscode-versionlens",
+        "BracketPairColorDLW.bracket-pair-color-dlw",
+        "vincaslt.highlight-matching-tag",
+        "yzhang.markdown-all-in-one"
+        // aic:vscode-extensions — project-owned .devcontainer/vscode-extensions
+        // is merged here by `aic sync` (one extension id per line).
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.profiles.linux": {
+          "zsh": { "path": "zsh" },
+          "bash": { "path": "bash", "args": ["--noprofile", "--rcfile", "/etc/aic/shell/bashrc"] },
+          "fish": { "path": "fish", "args": ["--no-config", "-C", "source /etc/fish/conf.d/aic.fish"] }
+        },
+        "terminal.integrated.fontFamily": "'MesloLGS NF', monospace",
+        "terminal.integrated.sendKeybindingsToShell": true,
+        "terminal.integrated.rightClickBehavior": "paste",
+        // Prevent file:/// OSC 8 links from triggering "No application found"
+        // in devcontainers (microsoft/vscode#211443). VS Code's built-in file
+        // link detection still works for opening workspace files in the editor.
+        "terminal.integrated.allowedLinkSchemes": ["http", "https", "mailto", "vscode", "vscode-insiders"],
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "files.trimFinalNewlines": true,
+        "claude-code.allowDangerouslySkipPermissions": true,
+        "claude-code.terminalArgs": ["--dangerously-skip-permissions"]
+        // aic:vscode-settings — project-owned .devcontainer/vscode-settings.json
+        // (a JSON object) is merged here by `aic sync`.
+      }
+    }
+  },
+
+  "containerEnv": {
+    "AIC_TOOLS": "claude-code,codex,opencode",
+    "AIC_SHELL": "zsh",
+    "DEVCONTAINER": "true",
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
+    "OPENCODE_DB": "/home/vscode/.local/share/opencode/opencode.db",
+    "SEMGREP_SETTINGS_FILE": "/home/vscode/.config/aic-auth/semgrep/settings.yml",
+    "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+    "NPM_CONFIG_AUDIT": "true",
+    "NPM_CONFIG_FUND": "false",
+    "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+    "NPM_CONFIG_MIN_RELEASE_AGE": "1",
+    "NPM_CONFIG_USERCONFIG": "/home/vscode/.config/npm/npmrc",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    "GIT_CONFIG_GLOBAL": "/etc/aic/user-config/gitconfig"
+  },
+
+  // Fail-closed host initialization. The managed aic CLI validates the
+  // generated control files, prepares seed paths and volumes, migrates legacy
+  // sessions, and refreshes the one-shot sanitizer before Compose starts. GUI
+  // launches often have a trimmed PATH, so check common git/npm install paths
+  // and popular Node-manager shims, skipping stale CLIs and checking every
+  // compatible fallback before giving one actionable error. A candidate is
+  // capable when `aic __supports initialize` exits 0 (this also works through
+  // Volta/asdf/mise shims, which hide the script text); a plain-script CLI
+  // that has `initialize` but predates the probe is still accepted by grep.
+  "initializeCommand": "sh -c 'supports_initialize() { [ -n \"$1\" ] && [ -x \"$1\" ] || return 1; \"$1\" __supports initialize </dev/null >/dev/null 2>&1 && return 0; grep -Eq \"^[[:space:]]*initialize\\\\)\" \"$1\" 2>/dev/null; }; aic_bin=; incompatible=0; for candidate in \"$(command -v aic 2>/dev/null || true)\" \"$HOME/.aicontainer/aic\" \"$HOME/.local/bin/aic\" \"$HOME/.npm-global/bin/aic\" \"$HOME/.npm/bin/aic\" \"$HOME/.volta/bin/aic\" \"$HOME/.asdf/shims/aic\" \"$HOME/.local/share/mise/shims/aic\" /opt/homebrew/bin/aic /usr/local/bin/aic /usr/bin/aic; do if [ -n \"$candidate\" ] && [ -x \"$candidate\" ]; then if supports_initialize \"$candidate\"; then aic_bin=$candidate; break; else incompatible=1; fi; fi; done; if [ -z \"$aic_bin\" ]; then for candidate in \"$HOME\"/.nvm/versions/node/*/bin/aic \"$HOME\"/.local/share/fnm/node-versions/*/installation/bin/aic; do if [ -x \"$candidate\" ]; then if supports_initialize \"$candidate\"; then aic_bin=$candidate; else incompatible=1; fi; fi; done; fi; if [ -z \"$aic_bin\" ]; then if [ \"$incompatible\" -eq 1 ]; then echo \"aic: installed host CLI is too old for this project. Upgrade it with: npm update -g aicontainer (then reopen/rebuild).\" >&2; else echo \"aic: required host CLI not found. Install it with: npm install -g aicontainer (then reopen/rebuild).\" >&2; fi; exit 1; fi; exec \"$aic_bin\" initialize'",
+
+  "postCreateCommand": "/usr/bin/python3 -I /opt/post-create.py",
+
+  // VS Code opens terminals only after post-create, so no agent starts before
+  // the managed memory/config reset and the root-owned config lock are done.
+  "waitFor": "postCreateCommand"
+}

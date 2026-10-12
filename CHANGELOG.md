@@ -108,6 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A validator error is now a clear validation failure.** It used to stop
+  `aic` with a bare Node error, and the legacy `check-drift` warning skipped
+  it. The validator now ships in the package as `lib/validate.mjs`. (aic)
+
 - **The README says the `.env` hook is best-effort, not a boundary.**
   Obfuscated names, globs, interpreter one-liners, symlinks, and a `Grep`
   `glob` filter get around it; keep secrets out of `/workspace`. (README)

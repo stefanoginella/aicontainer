@@ -98,6 +98,18 @@ for path in aic package.json LICENSE README.md CHANGELOG.md; do
   has "$path" || fail "package is missing $path"
 done
 
+# Every lib/ module that aic runs, and every module they import. The validator
+# fails closed without them, so a package without lib/ refuses every project.
+(cd "$stage" && find lib -type f -print | LC_ALL=C sort) > "$TMP/lib.list"
+grep -Fxq lib/validate-cli.mjs "$TMP/lib.list" || fail "repository has no lib/validate-cli.mjs"
+while IFS= read -r path; do
+  has "$path" || fail "package is missing $path"
+done < "$TMP/lib.list"
+grep -o '\$AIC_HOME/lib/[A-Za-z0-9._-]*' "$ROOT/aic" | sed 's|^\$AIC_HOME/||' | LC_ALL=C sort -u \
+  | while IFS= read -r path; do
+      has "$path" || fail "package is missing $path, which aic runs"
+    done
+
 # Every template file in the repository is in the package.
 while IFS= read -r path; do
   has "$path" || fail "package is missing $path"
@@ -168,6 +180,11 @@ for mode in pull build; do
       [ -f "$project/.devcontainer/$name" ] || fail "aic init --build wrote no .devcontainer/$name"
     done
   fi
+  # The validator runs from the package (no Docker: it reads the files only).
+  node "$pkg/lib/validate-cli.mjs" >/dev/null 2>&1 \
+    && fail "packed validator accepted a call without arguments"
+  node -e 'import(process.argv[1]).then(m => { if (typeof m.analyzeResolvedConfig !== "function") process.exit(1); })' \
+    "$pkg/lib/validate.mjs" || fail "packed lib/validate.mjs does not export analyzeResolvedConfig"
   # A second sync from the package is idempotent and keeps the file.
   (cd "$project" && AIC_HOME="$pkg" "$pkg/aic" sync >"$TMP/sync-$mode.log" 2>&1) \
     || { cat "$TMP/sync-$mode.log" >&2; fail "aic sync ($mode) from the packed tarball failed"; }

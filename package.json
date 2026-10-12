@@ -12,6 +12,7 @@
   },
   "files": [
     "aic",
+    "lib/",
     "template/",
     "!template/**/__pycache__/**",
     "!template/**/*.py[cod]",

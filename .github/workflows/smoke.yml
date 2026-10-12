@@ -89,6 +89,9 @@ jobs:
           for test in tests/*.py; do
             PYTHONDONTWRITEBYTECODE=1 python3 -I "$test"
           done
+          for test in tests/*.mjs; do
+            node "$test"
+          done
       - name: Install devcontainer CLI
         run: npm install -g @devcontainers/cli@latest
       - name: Stage a throwaway project (exercises `aic init --build`)

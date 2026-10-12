@@ -974,6 +974,27 @@ out=$(cd "$TMP/clean-build" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
 echo "$out" | grep -Eq 'managed devcontainer validation failed|requests extra host access' \
   && fail "clean build-mode project did not pass resolved-config validation"
 
+# The structural validator is a file of the install (lib/validate-cli.mjs). A
+# validator that cannot run prints no findings, so aic must fail closed and not
+# read the empty output as "no findings".
+new_project "$TMP/validator-missing"
+(cd "$TMP/validator-missing" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null 2>&1) \
+  || fail "a clean project did not pass aic validate"
+broken_home="$TMP/broken-aic-home"
+mkdir -p "$broken_home"
+cp "$ROOT/aic" "$ROOT/package.json" "$broken_home/"
+cp -R "$ROOT/template" "$broken_home/template"
+out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
+  && fail "aic validate passed without its validator module"
+echo "$out" | grep -q 'aic validator (lib/validate-cli.mjs) failed to run' \
+  || fail "a missing validator module was not a MANAGED finding"
+mkdir -p "$broken_home/lib"
+printf 'process.exit(3);\n' > "$broken_home/lib/validate-cli.mjs"
+out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
+  && fail "aic validate passed when its validator exited non-zero"
+echo "$out" | grep -q 'aic validator (lib/validate-cli.mjs) failed to run' \
+  || fail "a failing validator was not a MANAGED finding"
+
 # Values normalized only to account for installation/project paths must first
 # be proven to point at this exact checkout. Otherwise a tracked managed file
 # could hide a host bind, shared volume/network alias, or root build context

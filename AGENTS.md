@@ -14,8 +14,20 @@ test — never weaken it.
 
 - `aic` — the host-side bash CLI, single file. Exposed as npm bin (`aic`,
   `aicontainer`) and `~/.aicontainer/aic` for git installs. Finds its template
-  via `$AIC_HOME` (defaults to the script's directory after
+  and `lib/` via `$AIC_HOME` (defaults to the script's directory after
   symlink-following).
+- `lib/` — host-side Node modules that `aic` runs, shipped in the npm package.
+  Only `node:` built-ins, no dependencies.
+  - `validate.mjs` — the structural validator (`analyzeResolvedConfig()`):
+    takes file contents, returns findings. Unit-tested without Docker by
+    `tests/test-aic-validate.mjs` with the JSON fixtures in
+    `tests/fixtures/validate/`. After a change to `template/devcontainer.json`
+    or a Compose template, run `tests/fixtures/validate/regenerate.sh` and
+    review the diff; the unit tests read the live template devcontainer.json,
+    so a stale fixture fails there first.
+  - `validate-cli.mjs` — the entry point `analyze_resolved_config()` runs. It
+    exits non-zero when it cannot run, and `aic` turns that into a MANAGED
+    finding: an empty output must never read as "no findings".
 - `template/` — copied into a project's `.devcontainer/` by `aic init`/`aic
   sync`; the source of truth for what lands in user repos.
   - `Dockerfile`, `post-create.py`, `hooks/`, `aic-firewall`,
@@ -52,7 +64,8 @@ test — never weaken it.
     the job back into a caller or add another trigger.
 - `tests/` — host CLI and privileged-helper regression tests run before the
   real-devcontainer smoke suite. Security fixes normally add a fast host
-  fixture here and a runtime assertion in `smoke.yml`.
+  fixture here and a runtime assertion in `smoke.yml`. A validator rule also
+  gets a case in `tests/test-aic-validate.mjs`.
 - `package.json` — its `version` is the source of truth for the GHCR tag `aic
   init` pins. Never bump it by hand; use `npm version` (see "Releasing").
 - `CHANGELOG.md` — hand-maintained ([Keep a Changelog](https://keepachangelog.com/)
@@ -364,7 +377,13 @@ file provenance, resolves the base and merged Compose models to JSON, and
 checks every service plus volumes, networks, mounts, builds, ports,
 capabilities, namespaces, devices, configs/secrets, include/extends/provider,
 lifecycle hooks, environment-file indirections, and protected managed mount
-targets. Any managed mismatch is untrustable and requires `aic sync`.
+targets. Any managed mismatch is untrustable and requires `aic sync`. The
+Compose calls and the trust decision stay in `aic`; the structural checks are
+`lib/validate.mjs`, run through `lib/validate-cli.mjs`. Keep that split: the
+module reads only files under the project root and never runs Docker, so its
+rules stay testable from fixtures. A validator that fails to run is a MANAGED
+finding (guarded by the missing/failing-validator case in
+`tests/test-aic-host-security.sh`); never let its exit status be ignored.
 
 The gate needs Compose 2.35+ (`config --no-env-resolution`;
 `AIC_MIN_COMPOSE_VERSION`, shared with `doctor`). An older Compose is one
@@ -1099,6 +1118,11 @@ sandbox-off mode. README's "Threat model" section is the source of truth.
 When choosing between two implementations, prefer the more restrictive one.
 Review any change to these files for security regressions:
 
+- `lib/validate.mjs` — the structural validator. Keys are allow-lists; a
+  removed check or a key added to `reviewedServiceKeys` without a dedicated
+  check opens a host-boundary bypass. Extend `tests/test-aic-validate.mjs`
+  with every rule, and keep the docker-backed cases in
+  `tests/test-aic-host-security.sh`.
 - `template/Dockerfile` — sudoers, USER, and capability bits; a new
   `NOPASSWD` entry is a load-bearing decision. Also bakes
   Claude/OpenCode system-managed policy, `/etc/codex/requirements.toml`, the
@@ -1218,6 +1242,7 @@ to avoid pushing broken changes:
 ```bash
 for test in tests/*.sh; do bash "$test"; done
 for test in tests/*.py; do PYTHONDONTWRITEBYTECODE=1 python3 -I "$test"; done
+for test in tests/*.mjs; do node "$test"; done
 ```
 
 Then exercise the real container path:

@@ -1,0 +1,388 @@
+{
+  "name": "aic-fixture-0123456789ab",
+  "networks": {
+    "default": {
+      "name": "aic-fixture-0123456789ab_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "aic-auth-sync": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/usr/bin/python3",
+        "-I",
+        "/opt/post-create.py",
+        "auth-sync"
+      ],
+      "entrypoint": null,
+      "environment": {
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/usr/bin/test",
+          "-f",
+          "/run/aic-auth-sync.ready"
+        ],
+        "timeout": "1s",
+        "interval": "1s",
+        "retries": 30,
+        "start_period": "1s"
+      },
+      "image": "ghcr.io/stefanoginella/aicontainer:v0.0.0",
+      "network_mode": "none",
+      "pids_limit": 32,
+      "pull_policy": "missing",
+      "read_only": true,
+      "restart": "unless-stopped",
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "stop_grace_period": "3s",
+      "tmpfs": [
+        "/run:rw,nosuid,nodev,noexec,size=1m,mode=1777"
+      ],
+      "user": "1000:1000",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "aic-sessions",
+          "target": "/project-sessions",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "aic-auth-global",
+          "target": "/auth-global/claude",
+          "volume": {
+            "subpath": "claude"
+          }
+        },
+        {
+          "type": "volume",
+          "source": "aic-auth-global",
+          "target": "/auth-global/codex",
+          "volume": {
+            "subpath": "codex"
+          }
+        },
+        {
+          "type": "volume",
+          "source": "aic-auth-global",
+          "target": "/auth-global/opencode",
+          "volume": {
+            "subpath": "opencode"
+          }
+        },
+        {
+          "type": "volume",
+          "source": "aic-auth-global",
+          "target": "/auth-global/gh",
+          "volume": {
+            "subpath": "gh"
+          }
+        },
+        {
+          "type": "volume",
+          "source": "aic-auth-global",
+          "target": "/auth-global/npm",
+          "volume": {
+            "subpath": "npm"
+          }
+        }
+      ]
+    },
+    "aic-seed-sanitizer": {
+      "cap_add": [
+        "DAC_OVERRIDE"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/usr/bin/python3",
+        "-I",
+        "/opt/post-create.py",
+        "sanitize-seeds"
+      ],
+      "entrypoint": null,
+      "environment": {
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "image": "ghcr.io/stefanoginella/aicontainer:v0.0.0",
+      "network_mode": "none",
+      "pids_limit": 64,
+      "pull_policy": "missing",
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/tmp:rw,nosuid,nodev,noexec,size=16m"
+      ],
+      "user": "0:0",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/home/fixture/.gitconfig",
+          "target": "/raw-host-seed/gitconfig",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/home/fixture/.claude/settings.json",
+          "target": "/raw-host-seed/claude-settings.json",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/home/fixture/.codex/config.toml",
+          "target": "/raw-host-seed/codex-config.toml",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/home/fixture/.config/opencode/opencode.json",
+          "target": "/raw-host-seed/opencode.json",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/home/fixture/.config/aicontainer",
+          "target": "/raw-host-seed/aic-config",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "volume",
+          "source": "aic-sanitized-seed",
+          "target": "/sanitized-host-seed",
+          "volume": {}
+        }
+      ]
+    },
+    "devcontainer": {
+      "cap_add": [
+        "CHOWN",
+        "DAC_READ_SEARCH",
+        "FOWNER",
+        "SETGID",
+        "SETUID",
+        "NET_ADMIN"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "sleep",
+        "infinity"
+      ],
+      "depends_on": {
+        "aic-auth-sync": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "aic-seed-sanitizer": {
+          "condition": "service_completed_successfully",
+          "required": true
+        },
+        "socket-proxy": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "AIC_STATUS_PROJECT": "fixture",
+        "AIC_STATUS_PROJECT_ID": "aic-fixture-0123456789ab",
+        "AIC_STATUS_RELAY": "0",
+        "DOCKER_HOST": "tcp://socket-proxy:2375"
+      },
+      "image": "ghcr.io/stefanoginella/aicontainer:v0.0.0",
+      "networks": {
+        "default": null
+      },
+      "pids_limit": 4096,
+      "pull_policy": "missing",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "@ROOT@",
+          "target": "/workspace",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "@ROOT@/.devcontainer",
+          "target": "/workspace/.devcontainer",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "@ROOT@/.git",
+          "target": "/workspace/.git",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "@ROOT@/.git/config",
+          "target": "/workspace/.git/config",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "@ROOT@/.git/config.worktree",
+          "target": "/workspace/.git/config.worktree",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "@ROOT@/.git/commondir",
+          "target": "/workspace/.git/commondir",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "@ROOT@/.git/hooks",
+          "target": "/workspace/.git/hooks",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/var/run/docker.sock",
+          "target": "/run/aic-host/docker.sock",
+          "read_only": true
+        },
+        {
+          "type": "volume",
+          "source": "aic-sanitized-seed",
+          "target": "/host-seed",
+          "read_only": true,
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "aic-shell-history",
+          "target": "/home/vscode/.shell-history",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "aic-sessions",
+          "target": "/home/vscode/.aic-sessions",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "aic-auth-global",
+          "target": "/home/vscode/.config/aic-auth/signing",
+          "volume": {
+            "subpath": "signing"
+          }
+        },
+        {
+          "type": "volume",
+          "source": "aic-auth-global",
+          "target": "/home/vscode/.config/aic-auth/semgrep",
+          "volume": {
+            "subpath": "semgrep"
+          }
+        }
+      ]
+    },
+    "socket-proxy": {
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "AUTH": "0",
+        "BUILD": "0",
+        "CONFIGS": "0",
+        "CONTAINERS": "0",
+        "DISTRIBUTION": "0",
+        "EVENTS": "0",
+        "EXEC": "0",
+        "IMAGES": "0",
+        "INFO": "0",
+        "NETWORKS": "0",
+        "NODES": "0",
+        "PING": "1",
+        "PLUGINS": "0",
+        "POST": "0",
+        "SECRETS": "0",
+        "SERVICES": "0",
+        "SESSION": "0",
+        "SWARM": "0",
+        "SYSTEM": "0",
+        "TASKS": "0",
+        "VERSION": "1",
+        "VOLUMES": "0"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "wget",
+          "--spider",
+          "-q",
+          "http://localhost:2375/_ping"
+        ],
+        "timeout": "3s",
+        "interval": "5s",
+        "retries": 5,
+        "start_period": "5s"
+      },
+      "image": "tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459",
+      "networks": {
+        "default": null
+      },
+      "read_only": true,
+      "restart": "unless-stopped",
+      "tmpfs": [
+        "/run",
+        "/tmp"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/var/run/docker.sock",
+          "target": "/var/run/docker.sock",
+          "read_only": true
+        },
+        {
+          "type": "volume",
+          "target": "/var/lib/haproxy",
+          "volume": {}
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "aic-auth-global": {
+      "name": "aic-auth-global",
+      "external": true
+    },
+    "aic-sanitized-seed": {
+      "name": "aic-fixture-0123456789ab_aic-sanitized-seed"
+    },
+    "aic-sessions": {
+      "name": "aic-fixture-0123456789ab_aic-sessions"
+    },
+    "aic-shell-history": {
+      "name": "aic-shell-history",
+      "external": true
+    }
+  },
+  "x-aic-runtime-user": "1000:1000"
+}
