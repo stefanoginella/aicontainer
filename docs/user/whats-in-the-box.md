@@ -135,6 +135,10 @@ in `Dockerfile.project`.
   - Python 3.13 through [`uv`](https://github.com/astral-sh/uv).
   - Node 24 LTS through [`fnm`](https://github.com/Schniz/fnm). Thus a project
     can override the version with `.nvmrc`.
+  - The default Node of fnm (`node`, `npm`, `npx`) is also the last entry on
+    the image `PATH`. Thus Claude Code hooks, MCP servers, and `docker exec`
+    commands find `node` without a shell startup. A shell in the container
+    still uses the `.nvmrc` version first.
 - **CLI utilities:** `ripgrep`, `fd-find`, `fzf`, `tmux`, `jq`, `gh`, the
   `docker` CLI (+ buildx, compose), `semgrep`, and
   [`git-delta`](https://github.com/dandavison/delta). `git-delta` is set as

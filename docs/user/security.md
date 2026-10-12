@@ -169,8 +169,10 @@ to the network row.
   because the AI CLIs update themselves there. A command that you type, or a
   prompt helper, can run a binary that the agent replaced. VS Code terminals
   also run through the VS Code server in the container, which the agent can
-  change. Think of a shell in the container as a shell with the authority of
-  the agent. Do not type secrets there that the agent must not see.
+  change. The image `PATH` also ends with the default Node of fnm, so a
+  process that does not start from a shell can run that Node too. Think of a
+  shell in the container as a shell with the authority of the agent. Do not
+  type secrets there that the agent must not see.
 - **Network.** All other outbound traffic is open by default. Anything inside
   the container can reach `api.openai.com`, `api.anthropic.com`, and your LAN
   (cloud metadata is blocked, see above).

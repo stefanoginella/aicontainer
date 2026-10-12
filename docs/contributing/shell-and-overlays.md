@@ -52,6 +52,32 @@ cannot plant code that runs in the next human shell.
    - The image build fails if a read from the home directory is left.
    - Bash runs with `--noprofile --rcfile`. Fish runs with `--no-config`.
 
+### Node outside a managed shell
+
+A process that no managed shell starts does not run `fnm env`. Examples are
+Claude Code hooks, MCP servers, the VS Code server, and `docker exec`. Thus
+the image `ENV PATH` ends with `/home/vscode/.fnm/aliases/default/bin`. This
+directory holds the default Node of fnm: `node`, `npm`, and `npx`.
+
+Rules (do not change):
+
+1. **The entry is the last one on the image PATH.** It comes after the system
+   directories, so it never shadows a system binary. In a managed shell,
+   `fnm env` puts the per-directory Node first, so `.nvmrc` still selects the
+   version.
+2. **No system directory holds a `node`.** Do not link the fnm Node into
+   `/usr/local/bin` or into another system directory. The startup PATH of the
+   managed shells (rule 2 above) and the PATH of root processes search these
+   directories. A link there lets them run a binary that the agent can
+   replace. Thus `env -i /bin/sh -c 'node -v'` finds no `node`. A caller that
+   clears the environment must use the full path.
+3. `aic-statusline` keeps its fixed list of `node` paths. Claude Code can
+   start it with a reduced PATH.
+
+Guarded by the "a process without shell startup finds the fnm default Node"
+smoke in `smoke.yml` and the image PATH assertions in
+`tests/test-aic-host-security.sh`.
+
 ### Residual risk
 
 The [Threat model](../user/security.md) documents this residual risk:
@@ -59,6 +85,9 @@ The [Threat model](../user/security.md) documents this residual risk:
 - After startup, PATH starts with vscode-owned tool directories
   (`~/.local/bin`, the Node of fnm). Thus a typed command or a prompt helper
   can run a binary that the agent replaced.
+- The image PATH ends with the vscode-owned default Node of fnm. Thus a
+  process without shell startup that runs `node` can also run a binary that
+  the agent replaced.
 - VS Code terminals run through the vscode-owned VS Code server.
 
 Startup hardening does not make a container shell more trusted than the

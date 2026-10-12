@@ -272,6 +272,35 @@ jobs:
             done
             echo "OK: managed zsh loads powerlevel10k, both plugins, node, fnm, fzf, and delta"
           '
+      - name: Smoke test - a process without shell startup finds the fnm default Node
+        working-directory: /tmp/proj
+        run: |
+          # Hooks, MCP servers, and `docker exec` do not run `fnm env`. The image
+          # PATH ends with the fnm default Node, so a plain /bin/sh that reads no
+          # rc file finds node, npm, and npx. `devcontainer exec` probes a login
+          # shell for its environment, so this uses `docker exec`. The entry must
+          # stay last, a managed shell must still put the fnm per-directory Node
+          # first, and the system-only PATH must find no node: startup and root
+          # PATHs never reach the vscode-owned Node.
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer | head -n1)
+          [ -n "$cid" ] || { echo "FAIL: no running devcontainer"; exit 1; }
+          fnm_bin=/home/vscode/.fnm/aliases/default/bin
+          node_path=$(docker exec -u vscode "$cid" /bin/sh -c 'command -v node' | tr -d '\r')
+          [ "$node_path" = "$fnm_bin/node" ] \
+            || { echo "FAIL: /bin/sh -c finds node at \"$node_path\", expected $fnm_bin/node"; exit 1; }
+          docker exec -u vscode "$cid" /bin/sh -c 'node -v && npm -v && npx -v' \
+            || { echo "FAIL: node, npm, or npx does not run from a plain /bin/sh"; exit 1; }
+          last=$(docker exec -u vscode "$cid" /bin/sh -c 'printf "%s\n" "${PATH##*:}"' | tr -d '\r')
+          [ "$last" = "$fnm_bin" ] \
+            || { echo "FAIL: the last image PATH entry is \"$last\", expected $fnm_bin"; exit 1; }
+          docker exec -u vscode "$cid" zsh -ic '
+            (( ${path[(i)*/fnm_multishells/*]} < ${path[(i)'"$fnm_bin"']} )) \
+              || { echo "FAIL: the fnm default Node is before the fnm per-directory Node in zsh"; exit 1; }
+          ' || exit 1
+          if docker exec -u vscode "$cid" env -i /bin/sh -c 'command -v node'; then
+            echo "FAIL: a system directory holds a node; the system-only PATH must not find one"; exit 1
+          fi
+          echo "OK: a plain /bin/sh finds the fnm default Node last on PATH; system directories hold no node"
       - name: Smoke test - personal statusline installs root-locked and is wired
         working-directory: /tmp/proj
         run: |
