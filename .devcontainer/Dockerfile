@@ -239,7 +239,10 @@ RUN chmod 0755 /usr/local/bin/aic-firewall \
 # ---------------------------------------------------------------------------
 # Hooks: root-owned, not writable by vscode (self-defense)
 # ---------------------------------------------------------------------------
-COPY hooks/ /etc/aic/hooks/
+# Name each hook file: AIC_HOOK_FILES in lib/aic/identity.sh is the list
+# (tests/test-aic-hook-files.py checks it). A stray file never gets in.
+COPY hooks/agent-status.py hooks/claude-settings.json \
+     hooks/opencode-guardrail.js hooks/pre-tool-use.sh /etc/aic/hooks/
 RUN chmod 755 /etc/aic/hooks /etc/aic /etc/aic/hooks/*.sh \
     && chmod 644 /etc/aic/hooks/*.json /etc/aic/hooks/*.js /etc/aic/hooks/*.py \
     && chown -R root:root /etc/aic
@@ -345,7 +348,17 @@ RUN chmod 0644 /etc/codex/requirements.toml \
 # ---------------------------------------------------------------------------
 # Lifecycle script
 # ---------------------------------------------------------------------------
+# post-create.py is the fixed entry point. It imports its code only from the
+# aic_post_create package in /opt/aic-post-create, a root-owned, read-only
+# directory that holds nothing else. Name every module here, never a glob or a
+# directory: an extra file in .devcontainer/ must not reach the import
+# directory. Keep this list equal to AIC_POST_CREATE_MODULES in
+# lib/aic/identity.sh (tests/test-aic-post-create-package.py checks it).
 COPY post-create.py /opt/post-create.py
+COPY post_create_common.py post_create_claude_reset.py post_create_tools.py \
+     post_create_seeds.py post_create_auth_logins.py post_create_auth_sync.py \
+     post_create_container.py post_create_git.py post_create_overlays.py \
+     post_create_main.py /opt/aic-post-create/aic_post_create/
 # tomli-w is a hash-pinned, image-baked dependency. post-create adds this fixed
 # root-owned target to sys.path, so container creation never resolves or fetches
 # Python packages at runtime (and still works offline from the baked floor).
@@ -359,8 +372,11 @@ RUN printf '%s\n' \
       --requirement /tmp/aic-python-requirements.txt \
     && rm -f /tmp/aic-python-requirements.txt \
     && chmod -R a-w /opt/aic-python \
-    && chown -R root:root /opt/aic-python /opt/post-create.py \
-    && chmod 0755 /opt/post-create.py
+    && : > /opt/aic-post-create/aic_post_create/__init__.py \
+    && chown -R root:root /opt/aic-python /opt/post-create.py /opt/aic-post-create \
+    && chmod 0755 /opt/post-create.py \
+    && find /opt/aic-post-create -type d -exec chmod 0555 {} + \
+    && find /opt/aic-post-create -type f -exec chmod 0444 {} +
 
 USER vscode
 
@@ -373,9 +389,10 @@ ENV NPM_CONFIG_IGNORE_SCRIPTS=true
 
 # Claude Code + Codex + OpenCode: official standalone installers. Claude/Codex
 # land in ~/.local/bin, OpenCode in ~/.opencode/bin (both already on PATH above).
-# These are the baseline "floor" baked into the image; post-create.py's
-# refresh_ai_tools() floats all three to the latest release on every container
-# (re)create, so `aic rebuild` always lands current AI CLIs. The Claude/Codex
+# These are the baseline "floor" baked into the image; post-create's
+# refresh_ai_tools() (post_create_tools.py) floats all three to the latest
+# release on every container (re)create, so `aic rebuild` always lands current
+# AI CLIs. The Claude/Codex
 # installers skip editing login-shell rc files because ~/.local/bin is already
 # on PATH; OpenCode's installer is told not to touch them with
 # --no-modify-path (the managed rc files below set PATH explicitly).

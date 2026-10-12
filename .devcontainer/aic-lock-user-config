@@ -44,9 +44,10 @@ from typing import Callable, NoReturn, Optional
 
 MAX_FILE_BYTES = 1024 * 1024
 
-# Keep this fixed-key contract aligned with post-create.py's GIT_SEED_KEYS and
-# setup_gitconfig(). None of these seed keys execute commands, load paths, alter
-# remotes/credentials, or register hooks. Command/path-bearing aic-owned keys
+# Keep this fixed-key contract aligned with post-create's GIT_SEED_KEYS
+# (post_create_seeds.py) and setup_gitconfig() (post_create_git.py). None of
+# these seed keys execute commands, load paths, alter remotes/credentials, or
+# register hooks. Command/path-bearing aic-owned keys
 # are accepted separately only at their exact compiled-in values below.
 SAFE_VALUE_KEYS = {
     "user.name",
@@ -230,8 +231,9 @@ def validate_gitconfig_contents(source_fd: int) -> None:
 # The fixed install table. gitconfig keeps its allowlist validator and stays
 # required; the personal shell and statusline files are optional and installed
 # verbatim (see the module docstring for why the missing content check is safe).
-# Staging paths MUST match post-create.py's GITCONFIG_STAGING / SHELL_RC_STAGING
-# / P10K_STAGING / STATUSLINE_VARIANTS; destination directories MUST already
+# Staging paths MUST match post-create's GITCONFIG_STAGING (post_create_git.py)
+# and SHELL_RC_STAGING / P10K_STAGING / STATUSLINE_VARIANTS
+# (post_create_overlays.py); destination directories MUST already
 # exist root-owned (created in template/Dockerfile).
 #
 # The statusline variants are one entry per SUPPORTED EXTENSION, not a
