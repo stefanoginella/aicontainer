@@ -117,6 +117,24 @@ npm login               # only if you publish packages — the token persists to
 After this, every `aic up` in each project uses the same credentials. You do
 not have to log in again.
 
+### Push to GitHub from the container
+
+The `gh` login also gives Git its credentials for HTTPS remotes on
+`github.com`. aic sets the credential helper in the managed Git config, so
+`git push` works after `gh auth login`.
+
+- When `gh auth login` asks for the Git protocol, select **HTTPS**. The
+  container has no SSH key.
+- When `gh auth login` asks to authenticate Git with your GitHub credentials,
+  select **No**. Do not run `gh auth setup-git`. The managed Git config is
+  read-only, so this step fails. aic already sets the same helper.
+- The helper works only for `https://github.com` and `https://gist.github.com`.
+  For GitHub Enterprise, GitLab, or other hosts, aic sets no helper. Push
+  from the host.
+
+The agent can push with this login too. See "Git push to GitHub" in
+[Security](security.md).
+
 For the full data model, see [Multi-project model](multi-project.md).
 
 ## Uninstall aicontainer
