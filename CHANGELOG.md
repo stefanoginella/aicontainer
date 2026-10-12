@@ -212,6 +212,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaves the template `.gitignore` out of the package, which made both commands
   fail. The template now ships it as `gitignore`. (aic, package.json)
 
+- **bash, zsh, and fish completions now offer the same commands and flags.**
+  bash now completes `-y` for `aic destroy`, and all three shells use the same
+  descriptions. `aic signing` and `aic completion` offer their choices only for
+  the first argument. (aic)
+
 ## [0.9.1] - 2026-10-05
 
 ### Changed

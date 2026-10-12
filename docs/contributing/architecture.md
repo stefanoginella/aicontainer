@@ -54,6 +54,20 @@ ships them. They use only `node:` built-ins and have no dependencies.
     settings. See [Project-owned overrides](project-overrides.md).
 - `tests/test-aic-host-helpers.mjs` unit-tests the helper modules and
   `cli.mjs` without Docker.
+- `cli-spec.mjs` holds the one table of `aic` commands (`COMMANDS`). Each
+  command has a description, its flags, its positional choices, and its
+  dispatcher aliases. Internal commands (`check-drift`, `initialize`,
+  `__supports`) are marked `internal`. They are not in help or completions.
+  - `aic completion <shell>` runs `node lib/cli-spec.mjs completion <shell>`.
+    The bash, zsh, and fish scripts come only from the table. To change a
+    completion, change the table.
+  - `aic help` is hand-written prose. `tests/test-aic-cli-spec.mjs` checks
+    that the help, the `case "${1:-help}"` dispatcher at the end of `aic`,
+    and the table name the same commands and flags. When you add a command
+    or a flag, change all three.
+  - Users run `eval "$(aic completion zsh)"` at each shell start. Keep the
+    module free of I/O other than stdout, and keep update checks out of
+    `cmd_completion`.
 
 > **Warning:** Do not change the output of `trust-hash.mjs`. Stored approvals
 > hold its digest, so a different digest makes every user trust the project

@@ -3509,7 +3509,7 @@ Usage:
                          echo 'eval "$(aic completion bash)"' >> ~/.bashrc
                          aic completion fish > ~/.config/fish/completions/aic.fish
   aic version          Print this aic's version (also: --version, -v)
-  aic help             Show this help
+  aic help             Show this help (also: --help, -h)
 
 Env:
   AIC_HOME             Where the aicontainer files live (default: this script's dir)
@@ -3525,220 +3525,22 @@ Env:
 EOF
 }
 
+# The completion scripts are generated from the command table in
+# lib/cli-spec.mjs. Keep this cheap: users eval it from their shell rc file, so
+# it runs no update check and touches no project state.
 cmd_completion () {
   local shell="${1:-}"
   case "$shell" in
-    bash) _completion_bash ;;
-    zsh)  _completion_zsh  ;;
-    fish) _completion_fish ;;
+    bash|zsh|fish) ;;
     "")   die "usage: aic completion <bash|zsh|fish>" ;;
     *)    die "unsupported shell: $shell (supported: bash, zsh, fish)" ;;
   esac
+  command -v node >/dev/null 2>&1 || die "Node.js 18+ is required for shell completion"
+  node "$AIC_HOME/lib/cli-spec.mjs" completion "$shell"
 }
 
-_completion_bash () {
-  cat <<'BASH_EOF'
-# aic bash completion. Install with:
-#   echo 'eval "$(aic completion bash)"' >> ~/.bashrc
-_aic_complete () {
-  local cur prev cmd
-  COMPREPLY=()
-  cur="${COMP_WORDS[COMP_CWORD]}"
-  prev="${COMP_WORDS[COMP_CWORD-1]}"
-
-  local commands="init sync doctor status validate up trust preflight signing shell run rebuild down destroy upgrade completion version help"
-  local tools="claude-code codex opencode claude-code,codex,opencode"
-  local shells="zsh bash fish"
-
-  if [ "$COMP_CWORD" -eq 1 ]; then
-    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
-    return
-  fi
-
-  cmd="${COMP_WORDS[1]}"
-  case "$cmd" in
-    init)
-      case "$prev" in
-        --with)  COMPREPLY=( $(compgen -W "$tools"  -- "$cur") ); return ;;
-        --shell) COMPREPLY=( $(compgen -W "$shells" -- "$cur") ); return ;;
-      esac
-      COMPREPLY=( $(compgen -W "--build --force --docker-read --docker --no-docker --with --shell" -- "$cur") )
-      ;;
-    sync)
-      case "$prev" in
-        --with)  COMPREPLY=( $(compgen -W "$tools"  -- "$cur") ); return ;;
-        --shell) COMPREPLY=( $(compgen -W "$shells" -- "$cur") ); return ;;
-      esac
-      COMPREPLY=( $(compgen -W "--pull --build --bump-base --docker-read --docker --no-docker --with --shell" -- "$cur") )
-      ;;
-    signing)
-      COMPREPLY=( $(compgen -W "auto byok disable status --register" -- "$cur") )
-      ;;
-    up|rebuild)
-      COMPREPLY=( $(compgen -W "--allow-unsafe" -- "$cur") )
-      ;;
-    trust)
-      COMPREPLY=( $(compgen -W "--revoke" -- "$cur") )
-      ;;
-    destroy)
-      COMPREPLY=( $(compgen -W "--yes" -- "$cur") )
-      ;;
-    completion)
-      [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
-      ;;
-  esac
-}
-complete -F _aic_complete aic
-complete -F _aic_complete aicontainer
-BASH_EOF
-}
-
-_completion_zsh () {
-  cat <<'ZSH_EOF'
-#compdef aic aicontainer
-# aic zsh completion. Install with:
-#   echo 'eval "$(aic completion zsh)"' >> ~/.zshrc
-# Or save this output to a file named _aic in any directory on $fpath.
-_aic () {
-  local -a commands tools shells
-  commands=(
-    'init:Copy template into ./.devcontainer/'
-    'sync:Re-copy template into existing ./.devcontainer/'
-    'doctor:Check host prerequisites and project wiring (read-only)'
-    'status:Show project configuration and runtime state'
-    'validate:Validate the resolved configuration non-interactively'
-    'up:Pull/build and start the devcontainer'
-    'trust:Approve this exact host-access configuration and project code outside the repository'
-    'preflight:Print this project'\''s trust boundary (mounts, secrets, network, sessions)'
-    'signing:Set up sandbox commit signing (auto/byok/disable/status)'
-    'shell:Open an interactive shell inside the devcontainer'
-    'run:Run a command inside the devcontainer'
-    'rebuild:Recreate the container from a fresh image'
-    'down:Stop the container (volumes preserved)'
-    'destroy:Stop + remove container + per-project volumes'
-    'upgrade:Update aic itself'
-    'completion:Emit shell completion script'
-    'version:Print this aic'\''s version'
-    'help:Show help'
-  )
-  tools=('claude-code' 'codex' 'opencode' 'claude-code,codex,opencode')
-  shells=('zsh' 'bash' 'fish')
-
-  _arguments -C \
-    '1: :->command' \
-    '*::arg:->args'
-
-  case $state in
-    command)
-      _describe -t commands 'aic command' commands
-      ;;
-    args)
-      case $words[1] in
-        init)
-          _arguments \
-            '--build[full local build from template/Dockerfile]' \
-            '--force[overwrite existing .devcontainer/]' \
-            '--docker-read[enable sensitive Docker metadata/log/file reads]' \
-            '--docker[enable Docker socket write access (POST/BUILD)]' \
-            '--no-docker[disable Docker object APIs (default)]' \
-            '--with[comma-separated tools]:tools:('"${tools[*]}"')' \
-            '--shell[interactive shell]:shell:('"${shells[*]}"')'
-          ;;
-        sync)
-          _arguments \
-            '--pull[force pull-mode template]' \
-            '--build[force build-mode template]' \
-            '--bump-base[bump Dockerfile.project FROM tag to this aic version]' \
-            '--docker-read[enable sensitive Docker metadata/log/file reads]' \
-            '--docker[enable Docker socket write access (POST/BUILD)]' \
-            '--no-docker[disable Docker object APIs]' \
-            '--with[comma-separated tools]:tools:('"${tools[*]}"')' \
-            '--shell[interactive shell]:shell:('"${shells[*]}"')'
-          ;;
-        signing)
-          _arguments \
-            '--register[register the signing key on GitHub via gh]' \
-            '1:action:(auto byok disable status)'
-          ;;
-        up|rebuild)
-          _arguments '--allow-unsafe[allow reviewed unsafe host access for this run only]'
-          ;;
-        trust)
-          _arguments '--revoke[remove this project'\''s stored host-access approval]'
-          ;;
-        destroy)
-          _arguments '(--yes -y)'{--yes,-y}'[skip the confirmation prompt]'
-          ;;
-        completion)
-          _values 'shell' bash zsh fish
-          ;;
-      esac
-      ;;
-  esac
-}
-
-# Bind the function whether this script is eval'd or autoloaded from $fpath.
-compdef _aic aic aicontainer 2>/dev/null
-ZSH_EOF
-}
-
-_completion_fish () {
-  cat <<'FISH_EOF'
-# aic fish completion. Install with:
-#   aic completion fish > ~/.config/fish/completions/aic.fish
-set -l aic_cmds init sync doctor status validate up trust preflight signing shell run rebuild down destroy upgrade completion version help
-
-for cmd in aic aicontainer
-  complete -c $cmd -f
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a init     -d 'Copy template into ./.devcontainer/'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a sync     -d 'Re-copy template into existing ./.devcontainer/'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a doctor   -d 'Check host prerequisites and project wiring'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a status   -d 'Show project configuration and runtime state'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a validate -d 'Validate the resolved configuration'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a up       -d 'Start the devcontainer'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a trust    -d 'Approve exact host-access configuration and project code'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a preflight -d 'Print this project\'s trust boundary (mounts, secrets, network)'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a signing  -d 'Set up sandbox commit signing'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a shell    -d 'Open the configured shell inside the devcontainer'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a run      -d 'Run a command inside the devcontainer'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a rebuild  -d 'Recreate the container from a fresh image'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a down     -d 'Stop the container'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a destroy  -d 'Stop + remove container + per-project volumes'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a upgrade  -d 'Update aic itself'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a completion -d 'Emit shell completion script'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a version  -d 'Print this aic\'s version'
-  complete -c $cmd -n "not __fish_seen_subcommand_from $aic_cmds" -a help     -d 'Show help'
-
-  complete -c $cmd -n "__fish_seen_subcommand_from init" -l build -d 'full local build from template/Dockerfile'
-  complete -c $cmd -n "__fish_seen_subcommand_from init" -l force -d 'overwrite existing .devcontainer/'
-  complete -c $cmd -n "__fish_seen_subcommand_from init" -l docker-read -d 'enable sensitive Docker metadata/log/file reads'
-  complete -c $cmd -n "__fish_seen_subcommand_from init" -l docker -d 'enable Docker socket write access (POST/BUILD)'
-  complete -c $cmd -n "__fish_seen_subcommand_from init" -l no-docker -d 'disable Docker object APIs (default)'
-  complete -c $cmd -n "__fish_seen_subcommand_from init" -l with  -d 'comma-separated tools' -xa 'claude-code codex opencode claude-code,codex,opencode'
-  complete -c $cmd -n "__fish_seen_subcommand_from init" -l shell -d 'interactive shell' -xa 'zsh bash fish'
-
-  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l pull  -d 'force pull-mode template'
-  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l build -d 'force build-mode template'
-  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l bump-base -d 'bump Dockerfile.project FROM tag to this aic version'
-  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l docker-read -d 'enable sensitive Docker metadata/log/file reads'
-  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l docker -d 'enable Docker socket write access (POST/BUILD)'
-  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l no-docker -d 'disable Docker object APIs'
-  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l with  -d 'comma-separated tools' -xa 'claude-code codex opencode claude-code,codex,opencode'
-  complete -c $cmd -n "__fish_seen_subcommand_from sync" -l shell -d 'interactive shell' -xa 'zsh bash fish'
-
-  complete -c $cmd -n "__fish_seen_subcommand_from signing" -a 'auto byok disable status'
-  complete -c $cmd -n "__fish_seen_subcommand_from signing" -l register -d 'register the signing key on GitHub via gh'
-
-  complete -c $cmd -n "__fish_seen_subcommand_from up rebuild" -l allow-unsafe -d 'allow reviewed unsafe host access for this run only'
-  complete -c $cmd -n "__fish_seen_subcommand_from trust" -l revoke -d 'remove stored host-access approval'
-
-  complete -c $cmd -n "__fish_seen_subcommand_from destroy" -l yes -s y -d 'skip the confirmation prompt'
-
-  complete -c $cmd -n "__fish_seen_subcommand_from completion" -a 'bash zsh fish'
-end
-FISH_EOF
-}
-
+# Every command here, internal ones included, is in COMMANDS in lib/cli-spec.mjs.
+# tests/test-aic-cli-spec.mjs checks the two lists and the help against each other.
 case "${1:-help}" in
   init)    shift; cmd_init "$@" ;;
   sync)    shift; cmd_sync "$@" ;;
