@@ -36,6 +36,20 @@ ships them. They use only `node:` built-ins and have no dependencies.
   - It exits non-zero when it cannot run.
   - `aic` turns that exit status into a MANAGED finding.
   - An empty output must never read as "no findings".
+- `cli-spec.mjs` holds the one table of `aic` commands (`COMMANDS`). Each
+  command has a description, its flags, its positional choices, and its
+  dispatcher aliases. Internal commands (`check-drift`, `initialize`,
+  `__supports`) are marked `internal`. They are not in help or completions.
+  - `aic completion <shell>` runs `node lib/cli-spec.mjs completion <shell>`.
+    The bash, zsh, and fish scripts come only from the table. To change a
+    completion, change the table.
+  - `aic help` is hand-written prose. `tests/test-aic-cli-spec.mjs` checks
+    that the help, the `case "${1:-help}"` dispatcher at the end of `aic`,
+    and the table name the same commands and flags. When you add a command
+    or a flag, change all three.
+  - Users run `eval "$(aic completion zsh)"` at each shell start. Keep the
+    module free of I/O other than stdout, and keep update checks out of
+    `cmd_completion`.
 
 ## `template/`
 
