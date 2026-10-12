@@ -135,7 +135,9 @@ check_for_update () {
   case "$ts" in ''|*[!0-9]*) ts=0 ;; esac
 
   if [ $((now - ts)) -ge 86400 ]; then
-    local fetched; fetched="$(fetch_latest_version)"
+    # fetch_latest_version returns 1 when offline or with no curl/npm; under
+    # set -e that must not stop the command that asked.
+    local fetched; fetched="$(fetch_latest_version)" || fetched=""
     if is_semver "$fetched"; then
       latest="$fetched"
       mkdir -p "$dir" 2>/dev/null && printf '%s %s\n' "$now" "$latest" > "$cache" 2>/dev/null || true

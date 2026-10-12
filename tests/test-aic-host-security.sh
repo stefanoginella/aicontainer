@@ -39,6 +39,18 @@ for shell in bash zsh fish; do
   fi
 done
 
+# The update check must never fail the command that runs it. Offline, the
+# registry fetch gets no version; `aic version` still exits 0 and caches nothing.
+offline_bin="$TMP/offline-bin"
+mkdir -p "$offline_bin"
+printf '#!/bin/sh\nexit 7\n' > "$offline_bin/curl"
+chmod +x "$offline_bin/curl"
+out=$(env -u CI -u AIC_NO_UPDATE_CHECK XDG_CACHE_HOME="$TMP/offline-cache" \
+  PATH="$offline_bin:$PATH" "$ROOT/aic" version 2>&1) \
+  || fail "aic version failed when the update check could not reach the registry: $out"
+[ ! -e "$TMP/offline-cache/aicontainer/update-check" ] \
+  || fail "a failed update check wrote the version cache"
+
 # `aic __supports initialize` is the internal capability probe that the
 # generated initializer runs. It must be silent and exact: exit 0 only for the
 # one capability name, nonzero for anything else, with no output.

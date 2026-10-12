@@ -217,6 +217,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   descriptions. `aic signing` and `aic completion` offer their choices only for
   the first argument. (aic)
 
+- **`aic version` and `aic upgrade` no longer fail offline.** When the update
+  check could not reach the npm registry, or the host had neither `curl` nor
+  `npm`, `aic version` exited 1, and `aic upgrade` stopped before it upgraded.
+  (aic)
+
 ## [0.9.1] - 2026-10-05
 
 ### Changed
