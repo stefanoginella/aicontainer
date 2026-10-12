@@ -1,1293 +1,132 @@
 # AGENTS.md
 
-Guidance for AI coding agents (and humans) working **on** aicontainer itself.
-Users running aicontainer in their projects start at `README.md`.
+Guidance for AI coding agents (and humans) who work **on** aicontainer.
+Users who run aicontainer in their projects start at [README.md](README.md).
+
+aicontainer is a sandbox for autonomous AI tools (Claude Code, Codex,
+OpenCode) that run in bypass / auto-approve mode. Most code in this
+repository is a security boundary. The threat model is
+[docs/user/security.md](docs/user/security.md).
+
+## Repository map
+
+- `aic` — the host-side bash CLI (one file). npm bin `aic` / `aicontainer`.
+- `lib/` — host-side Node modules that `aic` runs. Only `node:` built-ins.
+  `validate.mjs` is the structural validator; `validate-cli.mjs` runs it.
+- `template/` — copied into every user project's `.devcontainer/` by
+  `aic init` / `aic sync`. The source of truth for what lands in user repos.
+- `tests/` — host CLI and privileged-helper regression tests.
+- `.github/workflows/` — `rebuild.yml` (security-refresh track, `:latest`),
+  `release.yml` (release track, `v*` tags), `smoke.yml` (shared smoke suite,
+  `workflow_call` only).
+- `tools/claude-plugin/` — the `/aicontainer:setup` Claude Code plugin.
+- `docs/user/` — the user guide. `docs/contributing/` — the contributor guide.
+
+Full layout: [docs/contributing/architecture.md](docs/contributing/architecture.md).
+
+## Read before you change
+
+Load the page for the area before you edit it. Each page holds the rules for
+its area and the tests that guard them.
+
+| When you touch | Read |
+|---|---|
+| Dev setup, conventions, local test runs | [development.md](docs/contributing/development.md) |
+| Repository layout, `template/` file list, package contents | [architecture.md](docs/contributing/architecture.md) |
+| `template/Dockerfile` downloads, pins, checksums, GHCR tag pinning | [image-integrity.md](docs/contributing/image-integrity.md) |
+| Drift warnings, update checks, `aic initialize` CLI lookup | [version-drift.md](docs/contributing/version-drift.md) |
+| Project name, `COMPOSE_PROJECT_NAME`, path spelling, migration, `.devcontainer/` and `.git` control paths | [project-identity.md](docs/contributing/project-identity.md) |
+| `validate_project_security()`, `lib/validate.mjs`, `aic trust`, diagnostics | [validation.md](docs/contributing/validation.md) |
+| Docker socket in `.env`, runtime detection, agent-status relay | [host-state.md](docs/contributing/host-state.md) |
+| Seed sanitizer, tool homes, post-create resets, `aic-auth-sync`, volumes, `aic signing` | [seeds-and-auth.md](docs/contributing/seeds-and-auth.md) |
+| Project-owned override files, `docker-compose.override.yml`, `chown-paths`, `post-create.project.sh`, VS Code files | [project-overrides.md](docs/contributing/project-overrides.md) |
+| Shell startup, personal overlay (`rc.zsh`, `p10k.zsh`, `statusline.*`), AI-tool refresh | [shell-and-overlays.md](docs/contributing/shell-and-overlays.md) |
+| Docker access modes, metadata block, `pids_limit` | [runtime-policy.md](docs/contributing/runtime-policy.md) |
+| `template/aic-firewall`, hooks, privileged helpers, workflows (the security list below) | [security-review.md](docs/contributing/security-review.md) |
+| A release, the CHANGELOG, the two workflow tracks | [releasing.md](docs/contributing/releasing.md) |
+
+## Security review triggers
+
+Review a change to these files for security regressions. Read
+[security-review.md](docs/contributing/security-review.md) first:
+
+- `lib/validate.mjs`
+- `template/Dockerfile`
+- `template/aic-firewall`
+- `template/hooks/pre-tool-use.sh`, `template/hooks/opencode-guardrail.js`,
+  `template/hooks/agent-status.py`
+- `template/aic-chown-volumes`, `template/aic-lock-user-config`
+- `.github/workflows/*.yml`
+
+When two implementations are possible, choose the more restrictive one.
+
+## Rules for every change
+
+Tests:
+
+- Keep every test in `tests/` and `smoke.yml` at its current strength. They
+  guard real security guarantees. If a test fails legitimately, fix the
+  regression, not the assertion.
+- "Guarded by the '…' test" in the docs names a CLI test or a smoke test in
+  `.github/workflows/smoke.yml`. When you change the behavior, extend that
+  test.
+- A security fix normally adds a fast host fixture in `tests/` and a runtime
+  assertion in `smoke.yml`. A validator rule also adds a case in
+  `tests/test-aic-validate.mjs`.
+- After a change to `template/devcontainer.json` or a Compose template, run
+  `tests/fixtures/validate/regenerate.sh` and review the diff.
+
+Template and container:
+
+- Edit `template/`, never `.devcontainer/`. Inside the container the
+  PreToolUse hook blocks `.devcontainer/` writes. This is part of the sandbox
+  boundary: an AI that can change its own devcontainer config can disable
+  every other protection. Users get `template/` changes with `aic sync`. The
+  dogfood `.devcontainer/` regenerates the same way, on the host.
+- Add a file to `template/` only when every user project must get a copy.
+- Keep npm-dropped names (`.gitignore`, `.npmignore`, `.npmrc`, …) out of
+  `template/`. `tests/test-aic-package.sh` checks the packed tarball.
+- Keep the `:latest` placeholder in `template/docker-compose.pull.yml`.
+  `apply_template()` rewrites it to `:vX.Y.Z`.
+
+Versions and changelog:
+
+- Leave `package.json` `version` alone. Only `npm version` changes it, in its
+  own release commit.
+- Add a `CHANGELOG.md` bullet under `## [Unreleased]`, below the right Keep a
+  Changelog heading, in the same commit or PR as each user-facing change. Then
+  a release only renames the heading, and CI blocks a release with no
+  section. Style: [releasing.md](docs/contributing/releasing.md).
+- Bump `tools/claude-plugin/.claude-plugin/plugin.json` `version` when the
+  plugin skill changes. Validate with `claude plugin validate .` and
+  `claude plugin validate tools/claude-plugin`.
+
+Workflows and git:
 
-`CLAUDE.md` is a thin pointer to this file — keep that arrangement; new
-agent-facing notes go here.
-
-Convention: "guarded by the '…' test" below names a CLI test or a smoke test
-in `.github/workflows/smoke.yml`. When you change the behavior, extend the
-test — never weaken it.
-
-## Repository layout
-
-- `aic` — the host-side bash CLI, single file. Exposed as npm bin (`aic`,
-  `aicontainer`) and `~/.aicontainer/aic` for git installs. Finds its template
-  and `lib/` via `$AIC_HOME` (defaults to the script's directory after
-  symlink-following).
-- `lib/` — host-side Node modules that `aic` runs, shipped in the npm package.
-  Only `node:` built-ins, no dependencies.
-  - `validate.mjs` — the structural validator (`analyzeResolvedConfig()`):
-    takes file contents, returns findings. Unit-tested without Docker by
-    `tests/test-aic-validate.mjs` with the JSON fixtures in
-    `tests/fixtures/validate/`. After a change to `template/devcontainer.json`
-    or a Compose template, run `tests/fixtures/validate/regenerate.sh` and
-    review the diff; the unit tests read the live template devcontainer.json,
-    so a stale fixture fails there first.
-  - `validate-cli.mjs` — the entry point `analyze_resolved_config()` runs. It
-    exits non-zero when it cannot run, and `aic` turns that into a MANAGED
-    finding: an empty output must never read as "no findings".
-- `template/` — copied into a project's `.devcontainer/` by `aic init`/`aic
-  sync`; the source of truth for what lands in user repos.
-  - `Dockerfile`, `post-create.py`, `hooks/`, `aic-firewall`,
-    `aic-chown-volumes`, `aic-lock-user-config`, `.zshrc`, `gitignore`
-  - `hooks/`: the shared guardrail `pre-tool-use.sh`, the thin OpenCode adapter
-    `opencode-guardrail.js`, and the opt-in metadata-only Claude/Codex lifecycle
-    relay `agent-status.py` — all copied root-owned to `/etc/aic/hooks/`.
-  - `docker-compose.pull.yml` (default mode), `docker-compose.build.yml`
-    (`--build` mode)
-  - `README.md` — copied into every project's `.devcontainer/` in **both**
-    modes; a managed guide to the do-not-edit vs project-owned split. Keep its
-    two lists in sync with `apply_template()` and the project-owned files.
-  - `gitignore` — copied in both modes as `.devcontainer/.gitignore` and
-    contains only `.env`. It has no dot on purpose: npm 12 leaves a
-    `.gitignore` out of the package even when `files` names it, and a missing
-    managed template file makes every `aic init`/`aic sync` fail. Never put
-    a file that npm drops (`.gitignore`, `.npmignore`, `.npmrc`, …) in
-    `template/`. `tests/test-aic-package.sh` packs the repository, runs `aic
-    init`/`aic sync` from the tarball, and fails on a missing template file.
-  - `.env` itself is atomically generated per host/context; it holds the
-    socket, runtime user, path-free project identity, and host-owned status
-    relay mode. It is a managed control file, not a template asset or
-    project-owned override.
-- `.github/workflows/`
-  - `rebuild.yml` — **security-refresh track**: relevant template/CLI/test/
-    package pushes to `main`, weekly cron, `workflow_dispatch`. Publishes GHCR
-    `:latest` + `:weekly-YYYY-VV`; never npm.
-  - `release.yml` — **release track**: `v*` tag push (or `workflow_dispatch`
-    on a tag ref) only. Ensures immutable `:vX.Y.Z` + npm artifacts exist,
-    then conservatively promotes mutable latest channels.
-  - `smoke.yml` — the real-devcontainer smoke suite, `on: workflow_call` only.
-    Both `rebuild.yml` and `release.yml` call it after their `build` job
-    (`needs: build`), so a runtime assertion is written once, here. Never copy
-    the job back into a caller or add another trigger.
-- `tests/` — host CLI and privileged-helper regression tests run before the
-  real-devcontainer smoke suite. Security fixes normally add a fast host
-  fixture here and a runtime assertion in `smoke.yml`. A validator rule also
-  gets a case in `tests/test-aic-validate.mjs`.
-- `package.json` — its `version` is the source of truth for the GHCR tag `aic
-  init` pins. Never bump it by hand; use `npm version` (see "Releasing").
-- `CHANGELOG.md` — hand-maintained ([Keep a Changelog](https://keepachangelog.com/)
-  format); source of the GitHub Release notes and a release precondition.
-- `scripts/promote-changelog.mjs` — zero-dep helper run by `npm version`:
-  promotes `## [Unreleased]` to the new version (date + compare links). Never
-  generates content.
-- `.githooks/pre-push` — local mirror of the CI changelog gate; opt-in via
-  `git config core.hooksPath .githooks`.
-- `.claude-plugin/marketplace.json` — Claude Code marketplace (`aicontainer`).
-  It must stay at the repo root (`/plugin marketplace add
-  stefanoginella/aicontainer` reads it from there) and lists the one plugin by
-  relative source `./tools/claude-plugin`. Not shipped in the npm package.
-- `tools/claude-plugin/` — the `aicontainer` Claude Code plugin (the host-side
-  `/aicontainer:setup` skill). Bump its `plugin.json` `version` when the skill
-  changes. Validate both with `claude plugin validate .` and `claude plugin
-  validate tools/claude-plugin`.
-
-## Image tag pinning (read before editing the CLI)
-
-In pull mode, `aic init`/`aic sync` write
-`ghcr.io/stefanoginella/aicontainer:vX.Y.Z` into the generated compose file
-(`X.Y.Z` = installed `package.json` version via `read_aic_version()`).
-`template/docker-compose.pull.yml` ships the literal placeholder `:latest`
-(five occurrences: two comments + three managed `image:` lines); `apply_template()`
-sed-rewrites each to `:vX.Y.Z`. **Never pin the template itself** — `:latest`
-is the placeholder that keeps the rewrite idempotent so `aic sync` can re-pin
-cleanly.
-
-If you change the GHCR repo path, update **all of**: the template, the sed
-pattern in `apply_template()`, the README's GHCR references, the
-`aic-firewall` allowlist's `ghcr.io` entry, and both workflows' image tags.
-
-## Image download integrity
-
-A download that fails without failing the build ships in `:latest` and
-`:vX.Y.Z`. The old `sh -c "$(curl …)"` zsh setup did exactly that: when curl
-failed, `sh -c ""` exited 0. Every curl or git fetch in `template/Dockerfile`
-is therefore a step that starts with `set -eu;` and has no `||` and no
-`set +e` (apt and uv steps are not covered by this rule). Each download writes
-to a file first: `curl -fsSL --proto '=https' --tlsv1.2 -o FILE URL`. Nothing is
-piped into a shell, `tar`, `dpkg`, or `gpg`, and the first use of each file is
-its check. Load-bearing, don't undo:
-
-1. **Release assets are pinned by sha256.** git-delta, fzf, and fnm each have a
-   `*_VERSION` ARG and `*_SHA256_AMD64`/`*_SHA256_ARM64` ARGs, selected by
-   `TARGETARCH` (any other architecture fails). The check is exactly the plain
-   statement `echo "$SHA256  FILE" | sha256sum -c -;`, so no `||`, `&&`, `if`,
-   or `!` can swallow a mismatch.
-2. **Renovate bumps only `*_VERSION`, never `*_SHA256`.** A bump PR therefore
-   fails the image build until a maintainer adds the new checksums. That is
-   the fail-closed design: never add a manager that rewrites the checksums,
-   and never read a checksum from the same release at build time.
-3. **Node floats inside its major line, but only to a signed release.** This
-   keeps the weekly refresh of `:latest` for Node security releases. The
-   keyring is `gpg-only-active-keys/pubring.kbx` of nodejs/release-keys at
-   `NODE_RELEASE_KEYS_COMMIT`, pinned by `NODE_RELEASE_KEYS_SHA256`, so a
-   release signed by any other key fails the build. `gpgv --output` writes the
-   signed text of `latest-vN.x/SHASUMS256.txt.asc`; only that text is parsed,
-   never the `.asc`. gpgv writes the output file even when the signature is
-   bad, so its exit status must stop the build (one more reason for no `||`).
-   Keep the output name different from the `.asc` name without its
-   extension: gpgv otherwise treats that file as detached data. The release
-   must not be older than `NODE_MIN_VERSION` (rollback guard, `sort -C -V`);
-   the major of `NODE_MIN_VERSION` is the line that floats, and Renovate raises
-   it. The tarball is checked against the signed sha256 and unpacked into fnm's
-   own layout (`$FNM_DIR/node-versions/vX.Y.Z/installation`), because `fnm
-   install` does not verify what it downloads. `fnm default` fails the build
-   if fnm does not see it; check this layout when Renovate bumps fnm.
-4. **apt repository keys are pinned by fingerprint.** `gpg --show-keys` lists
-   the primary keys of the downloaded gh and Docker keyrings, and every one
-   must be in `GH_KEYRING_FINGERPRINTS` / `DOCKER_KEYRING_FINGERPRINTS`. A key
-   that the vendor drops or re-signs with a new expiry date still passes; a
-   new key fails the build until it is reviewed and added. apt then checks the
-   floating `gh`/`docker-*` packages with those keys.
-5. **The zsh theme and plugins are pinned by commit.** powerlevel10k,
-   zsh-autosuggestions, and zsh-syntax-highlighting are fetched with `git fetch
-   --depth 1 origin <commit>`, and the checkout must equal the `*_COMMIT` ARG.
-   A commit id proves the content, not where it comes from: GitHub serves a
-   commit that exists only in a fork through the upstream URL. So the commit
-   must also be an ancestor of the upstream branch in the ARG's renovate
-   comment (`merge-base --is-ancestor`, checked in a throwaway commits-only
-   clone). Renovate's `git-refs` manager proposes new commits on that branch.
-   oh-my-zsh is not fetched: it comes from the digest-pinned base image, and
-   the build fails if it is missing, so nothing falls back to an unpinned
-   clone. The pinned theme commit also pins gitstatusd: p10k's installer
-   checks it against the sha256 in that commit's `install.info`.
-6. **Deliberately floating:** the official Claude, Codex, and OpenCode
-   installers (self-updating baked floor; still downloaded completely before
-   they run), apt packages (signed repositories), `uv tool install semgrep`
-   (PyPI, no hash lock), and `uv python install` (uv checks the sha256 built
-   into the digest-pinned uv image).
-
-To update a pin:
-
-- **A release checksum** (Renovate bumped a `*_VERSION`): download the asset for
-  **both** amd64 and arm64 from the exact URL that the Dockerfile builds, into
-  an empty scratch directory. Run `shasum -a 256` (macOS) or `sha256sum`, and
-  compare each value with upstream (the release asset digest on GitHub, or
-  fzf's `fzf_<version>_checksums.txt`). Put the values in the `*_SHA256_*`
-  ARGs in the same PR, and let CI build both architectures.
-- **The Node keyring** (Renovate bumped `NODE_RELEASE_KEYS_COMMIT`): if the
-  commit changed `gpg-only-active-keys/pubring.kbx`, review the added or
-  removed releaser keys against the releaser list in the nodejs/node README,
-  then put the file's sha256 in `NODE_RELEASE_KEYS_SHA256`.
-- **An apt key** (the build fails with "unreviewed … repository key"): check
-  the new fingerprint against the vendor's published one (GitHub CLI's Linux
-  install docs; Docker's install docs), then add it to the `*_FINGERPRINTS`
-  ARG and to the comment above it. Remove a fingerprint only when the vendor
-  has retired the key.
-
-Guarded by the download-integrity check in `tests/test-aic-host-security.sh`
-and the "managed zsh loads the pinned theme, plugins, and tools" smoke in
-`smoke.yml`. Every `curl` URL must match the check's table of pinned downloads or
-its short list of floating installers; a new download extends one of the two,
-together with a pin. The check's `--self-test` run changes the real Dockerfile
-in known ways (`|| true` after a check, `set +e`, a heredoc `RUN <<'SH'` script
-with an unpinned download, a fork-only commit without the ancestry check, …)
-and fails if one is not reported; extend it with every new rule.
-
-## Version drift / update notifications
-
-Two best-effort checks live next to `read_aic_version()` in `aic`. Both fail
-soft (every error path `return 0` — they must never abort the user's command)
-and both silence with `AIC_NO_UPDATE_CHECK=1`.
-
-**Tier 1 — `warn_compose_drift()` (offline, hot path).** On `aic
-up`/`shell`/`rebuild`, compares the project's pinned `:vX.Y.Z`
-(`read_pinned_compose_version()`, anchored on the repo path so
-comments/socket-proxy don't match) against the CLI version; warns either
-direction with a `sync && rebuild` hint. On `rebuild` it fires **before** the
-`docker pull` — `rebuild` re-pulls the currently pinned tag and never re-pins,
-so warning first lets the user abort and `aic sync`.
-
-It also fires on VS Code "Reopen/Rebuild in Container" (which drives
-`devcontainer up` directly, never `aic`) through the only host-side lifecycle
-hook. New templates run the trusted `aic initialize` entry point, which first
-locates the CLI on PATH, git-install, common npm/Homebrew locations, and
-nvm/fnm/mise/asdf/Volta shims. A missing CLI is now an actionable hard failure:
-silently skipping it would also skip managed validation, seed preparation,
-project migration, and safe volume bootstrap. `initialize` performs all of
-those fail-closed tasks, then calls the still-best-effort drift warning.
-
-A candidate is capable when `aic __supports initialize` exits 0. Never go back
-to reading the file alone: a Volta shim is a binary and an asdf/mise shim is a
-wrapper, so neither contains the CLI's text. The probe is internal (not in help
-or completions), prints nothing, makes no Docker or network call, writes no
-file, and accepts only that exact capability name; an older CLI treats it as an
-unknown command and fails it. A `grep` for `initialize)` stays as the second
-check, so a plain-script CLI that has `initialize` but predates the probe is
-not reported as "too old". Guarded by the initializer cases (nvm, fnm, Volta,
-asdf, mise, pre-probe CLI; `/bin/sh`, and dash when installed) in
-`tests/test-aic-host-security.sh`.
-
-Load-bearing bootstrap limit: Dev Containers must parse the repository's
-`devcontainer.json` and execute its host-side `initializeCommand` before the
-managed `aic initialize` code can validate that file. The initializer is
-"trusted" only after `aic init`/`sync` generated it and the host reviewed the
-control files; it cannot sanitize an arbitrary repo-supplied initializer before
-execution. Never claim direct VS Code Reopen prevalidates unknown repository
-control code. For untrusted clones, document `aic init --force`, review, then
-`aic up` as the first-launch path.
-
-`cmd_check_drift` remains only for older generated templates. It is lenient,
-warn-only, always exits zero, and must not be confused with the new trusted
-initializer. Visibility for both is the Dev Containers output channel.
-
-Deliberate blind spots (offline + zero-cost beats full coverage): it compares
-CLI-vs-pin, not pin-vs-*running container*, so a synced-but-not-rebuilt
-project is silent (the hint resolves it anyway); and build-mode projects have
-no pin, so they're unchecked. `aic status` reports running state separately;
-don't turn the hot-path warning into a Docker inspection.
-
-**Tier 2 — `check_for_update()` (network, off hot path).** Only on `aic
-version`/`upgrade`. Asks **npm** for the latest published version — not GHCR,
-whose `:latest` floats on the weekly cron and would mis-report "behind."
-`fetch_latest_version()` is bounded (`curl --max-time`, npm-view fallback)
-and gated through `is_semver()` before any `printf` — that validation is the
-terminal-escape defense against a hostile registry; keep it. Cached 24h under
-`$XDG_CACHE_HOME/aicontainer/update-check`, and skipped when `CI` is set —
-that guard is what keeps the workflow CLI tests offline; don't remove it.
-
-## Project identity and host-side validation
-
-Generated Compose projects are path-unique:
-`aic-<sanitized-basename>-<12-char-sha256(canonical-path)>`. The name is
-written as the top-level Compose `name:` and must exactly match
-`expected_project_name()`. Never accept a repository-provided name or fall
-back to the old basename when a top-level name is present but malformed —
-`down`/`destroy` could otherwise target another checkout's resources.
-
-The Dev Containers CLI reads that `name:` last. It first takes
-`COMPOSE_PROJECT_NAME` from its own environment, then from the first
-`COMPOSE_PROJECT_NAME=` line of `<workspace>/.env` (the repository-root `.env`
-that app stacks commit). Either one silently moves the checkout into another
-stack and its `_aic-sessions` volume. Two rules close this:
-
-- Every aic command that runs the CLI (`up`, `rebuild`, `shell`, `run`, mutating
-  `signing`, the firewall-status exec) calls `pin_compose_project_name()`
-  **before** validation, so validation and the CLI see the same name and the
-  `initialize` child inherits it.
-- The generated initializer cannot set its parent's environment.
-  `check_devcontainer_project_name()` mirrors the CLI's lookup and
-  normalization and refuses before any Docker state changes. `validate` and
-  `doctor` fail on it; `preflight` and the legacy `check-drift` warn. Never
-  print a value read from the environment or `.env`, and re-check the mirror
-  against the CLI source when `@devcontainers/cli` changes its project-name
-  lookup.
-
-The hash input is the **stored spelling** of the path. `canonical_root()` is the
-only way `aic` reads the checkout path: it runs `/bin/pwd -P`, because bash's
-builtin `pwd -P` keeps the case the user typed and macOS volumes ignore case,
-while Node, the Dev Containers CLI, and VS Code take the stored spelling from
-`getcwd()`. The builtin gave a second hash for the same folder, so validation,
-the `devcontainer.local_folder` ownership proof, and the sessions volume all
-disagreed. The validator's Node code uses `fs.realpathSync.native` for the same
-reason (the JS `realpathSync` keeps the typed case, and Compose spells bind
-sources from `$PWD`). Never reintroduce the builtin; a static check fails on it.
-A project hashed from a wrong-case path still has the old name in its Compose
-file. `previous_project_names()` finds earlier names of this workspace only from
-containers that carry the exact canonical workspace label, with this project's
-label and a 12-hex hash; `aic sync` (a name that differs from the expected one)
-and every start then copy the sessions volume and stop the old stack through the
-same ownership proof as the legacy basename migration. Without such a container
-the old volume is preserved and not imported.
-
-Do not pin the name in `validate`, `initialize`, or `trust`: without the pin
-they still see a repository override's top-level `name:`, which a direct start
-would use. Guarded by the root-`.env` cases and the identity cases (static builtin-`pwd -P`
-check, earlier-identity migration, wrong-case start on a case-insensitive volume)
-in `tests/test-aic-host-security.sh` and the proj-b smoke in `smoke.yml`.
-
-Projects created before this scheme have no top-level name. `aic sync`, the
-next `up`, or VS Code's generated `initializeCommand` copies their transcript
-volume automatically only when a container has exact canonical-workspace and
-legacy-project labels and actually mounts that volume at the managed session
-root, with no differently labeled container also mounting it. A label candidate
-with the wrong mount or a conflicting owner is not proof. Project-wide legacy
-cleanup must inspect every container with that Compose project label. It needs
-at least one exact workspace owner; a missing workspace label is accepted only
-on the fixed managed sidecars (`socket-proxy`, `aic-auth-sync`, and
-`aic-seed-sanitizer`). Different owners, unknown unlabeled services, or
-unreadable containers preserve the whole stack. Cleanup must not use
-`--remove-orphans`, because the trusted template cannot attribute them. If no
-container can disambiguate a historically
-shared basename volume, sync preserves it without copying; interactive `aic
-up` asks once (declining creates a fresh path-unique volume and preserves the
-source), while non-interactive/direct VS Code startup fails with an `aic up`
-hint. Migration uses the digest-pinned BusyBox helper and validates both
-source/destination volumes as ordinary local-driver volumes with no driver
-options before mounting them. The same metadata check applies to every
-pre-existing managed volume: a same-named `local` volume with
-`type=none,o=bind` is a host bind, not a safe volume. Keep the prompt-free
-ownership-proven migration, data preservation, and exact ownership proof.
-
-The host CLI treats `.devcontainer/` as a control boundary:
-
-- `.devcontainer`, every known control file, and the managed hooks tree must
-  be real files/directories, never symlinks or special files.
-- Managed copies are staged next to their destination and renamed atomically.
-  Switching build → pull removes every old managed build artifact.
-- `vscode-settings.json` is parsed and re-serialized as a strict JSON object.
-  Invalid input is warned/skipped; a key owned by the template is ignored so
-  managed settings win.
-- `project_name()` never evaluates untrusted Compose. `down`/`destroy` parse an
-  installed trusted template with the exact `-p` name and `--remove-orphans`,
-  so providers/includes in a repository override cannot execute during
-  cleanup. Non-interactive `destroy` requires `--yes`.
-
-The checkout's Git control paths are a control boundary too. Host Git runs
-code named in `.git/config`, `.git/config.worktree` (read as config when
-`extensions.worktreeConfig` is set, which sparse-checkout does), and
-`.git/hooks`, and it loads all of them from the directory that
-`.git/commondir` names. So both Compose templates mount those four paths
-read-only over the writable workspace and bind `.git` onto itself. Load-bearing,
-don't undo:
-
-- The `.git` self-bind is what stops the agent from renaming `.git` and
-  creating a new one; nested read-only mounts alone do not (a directory that
-  only *contains* mount points can be renamed).
-- `ensure_git_control_paths()` creates `commondir` (`.`), an empty
-  `config.worktree`, and a missing `hooks/` with O_EXCL on `init`/`sync` and
-  before every Compose start (`up`, `rebuild`, `initialize`). Docker turns a
-  missing bind source into a root-owned directory, which breaks Git.
-- `git_control_path_problems()` refuses a symlink or wrong file type at `.git`
-  or any of the four paths (Docker resolves bind sources on the host, so a
-  symlink would mount a host file outside the checkout), a missing or
-  non-directory `.git`, and a `commondir` with any other content. A foreign
-  `commondir` is planted, so aic refuses it and never repairs it. `validate`
-  and `doctor` report the same problems; only a missing file that aic creates
-  is not a finding.
-- The validator compares each managed project source with the symlink-free
-  path below the canonical root, never with its own resolved value.
-- Like every bind-source check, these run on the host just before Docker
-  resolves the sources. Only a container started before this protection could
-  race that window; once a protected container runs, all five paths are
-  mount points the agent cannot replace.
-
-Submodule Git directories (`.git/modules`), nested repositories, and hook
-scripts kept in the worktree (husky, lefthook, pre-commit) stay
-agent-writable by design: a read-only `.git/modules` would break submodule
-work and still not stop the agent from adding a new nested repository to the
-index. The README documents these residual risks for host Git. Guarded by the
-Git-control cases in `tests/test-aic-host-security.sh` and the "Git control
-paths" smoke in `smoke.yml`.
-
-`validate_project_security()` is the real pre-Docker gate. It verifies managed
-file provenance, resolves the base and merged Compose models to JSON, and
-checks every service plus volumes, networks, mounts, builds, ports,
-capabilities, namespaces, devices, configs/secrets, include/extends/provider,
-lifecycle hooks, environment-file indirections, and protected managed mount
-targets. Any managed mismatch is untrustable and requires `aic sync`. The
-Compose calls and the trust decision stay in `aic`; the structural checks are
-`lib/validate.mjs`, run through `lib/validate-cli.mjs`. Keep that split: the
-module reads only files under the project root and never runs Docker, so its
-rules stay testable from fixtures. A validator that fails to run is a MANAGED
-finding (guarded by the missing/failing-validator case in
-`tests/test-aic-host-security.sh`); never let its exit status be ignored.
-
-The gate needs Compose 2.35+ (`config --no-env-resolution`;
-`AIC_MIN_COMPOSE_VERSION`, shared with `doctor`). An older Compose is one
-COMPOSE finding with an upgrade hint, never the `aic sync` hint, and it still
-fails closed. `validation_compose_config()` captures Compose stderr only to
-detect an "unknown flag" error; never print that stderr, because it can hold
-resolved host values. Guarded by the Compose-minimum cases in
-`tests/test-aic-docker-runtime.sh`.
-
-Project-owned files that run code in the container need exact trust too
-(`validate_project_code_files()`): `post-create.project.sh`, `shell-rc.zsh`,
-`p10k.zsh`, and `statusline.{sh,mjs,js,py}`. A clone supplies them, and they
-run before any prompt with open egress and the tool logins, so "it runs as
-`vscode`" is not a reason to let a repository opt itself in. VS Code extensions
-and settings are judged from the merged `devcontainer.json`, not from
-`vscode-extensions` / `vscode-settings.json`, because that is what VS Code reads
-and a repository can commit it directly: an addition beyond the template is a
-trust finding (a committed `.vscode/` is out of scope; the README names it as a
-residual risk guarded only by Workspace Trust), and a changed template setting (beyond the per-shell rewrite in
-`patch_devcontainer_json()`) is managed drift. The trust hash covers the whole
-`.devcontainer/` tree, so any edit asks again. Keep the file list aligned with
-`AIC_CONTROL_FILES` and the post-create/lock-helper tables. Guarded by the
-project-code cases in `tests/test-aic-host-security.sh` and the "Bring up the
-devcontainer" step in `smoke.yml` (direct start refused, then trusted).
-
-Two rules keep the validated model equal to what Dev Containers can start:
-
-- Every validation `docker compose config` runs with `--profile '*'`. A plain
-  `config` omits profiled services, but `up` still starts one that is named by
-  `runServices` or enabled by `COMPOSE_PROFILES`.
-- Keys are allow-lists, never deny-lists. `devcontainer.json` may hold only
-  the template's top-level keys (anchors equal to the template; `name`,
-  `dockerComposeFile`, `containerEnv`, `customizations` are the only merge
-  targets), so `runServices` and future spec keys fail. Compose top-level and
-  service keys outside `reviewedTopLevelKeys`/`reviewedServiceKeys` must equal
-  the managed base or are trust findings. Add a key to those sets only together
-  with a dedicated check, or when it cannot reach past its own container.
-- `parseJsonc()` must read `devcontainer.json` exactly as the Dev Containers
-  CLI does. Its scanner also ends a `//` comment at a bare `\r`, so the
-  validator refuses a bare `\r` and U+2028/U+2029 instead of parsing them;
-  otherwise keys after one are live for the CLI but hidden from validation.
-
-An intentional host-boundary expansion requires one of:
-
-- `aic trust`: interactive approval stored under
-  `$XDG_STATE_HOME/aicontainer/trust` for the exact relevant hash; any change
-  invalidates it.
-- `aic up|rebuild --allow-unsafe`: one-run hash passed through to the trusted
-  initialize child, never a reusable boolean.
-
-Docker read/write consent is separate state outside the repository; a Compose
-edit cannot grant itself daemon visibility. `AIC_NO_OVERRIDE_SCAN=1` silences
-only the old readable grep warning — it must never bypass structural
-validation. `aic shell`, `run`, `up`, `rebuild`, and mutating `signing` actions
-validate before handing project configuration to Dev Containers; `preflight`
-validates before reporting. The generated VS Code initializer validates before
-Compose creation, subject to the bootstrap limit above. Guarded by
-`tests/test-aic-host-security.sh` and the matching workflow smoke tests; extend
-them when the model changes.
-
-**Diagnostics stay read-only.** `aic doctor` checks host versions, the selected
-local Unix-socket Docker context and its runtime/bind source (warning on an
-unrecognized macOS VM), Compose 2.35+ with subpath schema and `config
---no-env-resolution --no-interpolate` support (stdin-only parses; no probe
-volume), Dev Container CLI, conventional Git-root shape,
-install completeness, control-path types, project identity, and the
-Dev Containers project-name source. Warnings exit 0; blockers exit nonzero. `aic status` reports identity/mode/
-tools/shell/Docker consent/status-relay mode/socket bind source/image/runtime, credential-bridge
-health, and volume metadata without mutating it.
-`aic validate` runs the full gate noninteractively, honors existing exact
-trust, never prompts, and never writes trust. Keep help/completions/tests in
-sync and do not turn diagnostics into implicit repair.
-
-**The selected local Docker socket is generated host state.** `aic init`,
-`aic sync`, and each generated `aic initialize` invocation resolve the active
-context's `unix://` endpoint, derive the Dev Containers runtime UID:GID, and
-atomically rewrite `.devcontainer/.env`. The managed `template/gitignore`
-(copied as `.devcontainer/.gitignore`) excludes that file, so rootless Docker,
-Docker Desktop, Colima, and OrbStack work without flags or machine-specific
-diffs. Never trust `AIC_DOCKER_SOCKET` from the environment or repository,
-accept a remote TCP/SSH endpoint, broaden the dotenv grammar, or remove
-`.env`/`.gitignore` from the control-path checks and template copies.
-
-`AIC_DOCKER_SOCKET` is the bind source as the **daemon** resolves it, not the
-host socket the Docker CLI talks to. A VM daemon cannot mount the context's
-macOS path (Docker Desktop refuses it; in Colima/Lima it is a forwarded socket),
-so `docker_runtime_kind()` asks the selected socket itself (`docker -H
-unix://<socket> info`) and `docker_socket_bind_source()` returns the fixed
-`/var/run/docker.sock` only for a rootful Docker Desktop, Colima, Lima, or
-Rancher Desktop daemon. Everything else keeps the host path. Load-bearing,
-don't undo:
-
-- **The choice is binary.** The bind source is the resolved host path or the
-  one fixed VM path. Never take a path from `docker info`, the environment, or
-  a template.
-- **Rootless is never remapped.** In a rootless daemon's namespace,
-  `/var/run/docker.sock` can be another, rootful daemon; remapping would give
-  the socket proxy and `aic-chown-volumes` more authority than the user
-  selected.
-- **Docker Desktop is the exact `OperatingSystem` string.** Colima/Lima/Rancher
-  are identified by the VM hostname (`Name`), which a Linux host can share, so
-  on Linux the socket must also be that runtime's default path (so Colima with
-  `--hostname` on Linux is not detected). macOS has no native daemon, so there
-  the name or the Colima/Lima/Rancher default socket path is enough.
-- **Only a complete answer counts.** The answer must have the OS, the name,
-  and the security-options list; otherwise it is "no answer". A cut-off
-  answer cannot prove the daemon is rootful.
-- **One probe per process.** `export_runtime_environment()` caches the bind
-  source (initialized at script start, never from the environment), so a
-  daemon that starts between the `.env` write and the validation cannot make
-  the gate fail.
-- **Same daemon as Compose.** `resolve_docker_socket()` and `doctor` follow
-  the Docker CLI order: `DOCKER_HOST` beats `DOCKER_CONTEXT`.
-- **Default paths decide only while the daemon cannot answer** (`aic
-  init`/`sync` with Docker stopped). Every start path rewrites `.env` with the
-  daemon's answer before validation. Lima is excluded from that fallback
-  because its default template is rootless.
-
-Guarded by `tests/test-aic-docker-runtime.sh`, which fakes each runtime's
-`docker info` and host OS.
-
-**The agent-status relay is generated host consent too.** It defaults off and
-only the exact, non-symlinked `$HOME/.config/aicontainer/status-relay` marker
-can enable it; repository Compose/devcontainer input cannot set or redirect it.
-That path is fixed, not XDG-derived: the Compose seed mount and
-`prepare_host_seed_paths()` hardcode the same directory, and a second root
-would make a correctly written marker silently do nothing. The managed
-environment values (`AIC_STATUS_RELAY`, `AIC_STATUS_PROJECT`, and
-`AIC_STATUS_PROJECT_ID`) stay protected by resolved-config validation. The
-root-owned hook sends only the fixed schema covered by
-`tests/test-aic-agent-status-relay.py` to
-`http://host.docker.internal:8787/events`, with proxies/redirects disabled and
-fail-open timeout/error handling. Its label validation must keep accepting the
-full `expected_project_label()` alphabet (leading `_`/`-` included), otherwise
-affected projects lose every event with no diagnostic anywhere. Never add
-prompt, response, path, transcript, tool input/result, or error content.
-
-The strict firewall exception must remain an exact TCP-8787 status ipset rule,
-never general host-gateway reachability — and it must stay strengthen-only in
-the other direction too: when `host.docker.internal` does not resolve (plain
-Docker Engine, rootless Docker) or resolves into a prohibited range, `enable`
-warns and omits that one rule. It must never abort and leave the project with
-no allowlist; observability cannot be allowed to remove policy. `aic status`
-reports the marker together with the applied `.env` value for the same reason:
-a diagnostic that claims an unapplied relay is active is a wrong diagnostic.
-
-## Host seeds, tool homes, and reusable auth
-
-The unrestricted container must never see raw host Git/tool config. The
-`aic-seed-sanitizer` one-shot is the only service with fixed raw mounts: the
-four config inputs (`~/.gitconfig`, Claude settings, Codex config, OpenCode
-config) plus the opt-in personal-overlay dir `~/.config/aicontainer` (see
-"Personal config overlay"). It runs as root solely for foreign-UID `0600`
-reads, with no network/workspace/auth/sessions, read-only rootfs,
-`no-new-privileges`, `cap_drop: ALL` plus only `DAC_OVERRIDE`, a small PID
-limit, and fixed system-Python command. It writes four root-owned allowlisted
-JSON objects into the per-project sanitized volume, which the main container
-mounts RO. Sanitization recursively removes literal
-env/header/auth/key/token/secret/password fields. Git uses a fixed safe-key
-list and `/usr/bin/git --no-includes`. The personal overlay is the one
-exception to JSON sanitization: `rc.zsh`/`p10k.zsh`/`statusline.{sh,mjs,js,py}`
-are **code**, copied verbatim (bounded, root-owned `0444`) into that same volume
-— never field-stripped, never merged into main's config, and never executed by
-the sanitizer itself. Every one of those names is a literal in `sanitize_seeds()`;
-the seed dir is never globbed. The sanitized volume outlives the container, so
-each run removes an overlay output whose source is absent, empty, or rejected;
-an output it cannot remove fails the run. Otherwise a file the human deleted
-(for example, because it held a token) stays installed and sourced. Do not
-mount a raw input into main, add a non-JSON output beyond that overlay, or make
-sanitizer failure soft.
-
-All Claude/Codex/OpenCode/gh/npm config, memory, skills/plugins, prompt
-history, and sessions live in one path-unique `aic-sessions` volume below
-`~/.aic-sessions/tool-homes/{claude,codex,opencode-config,opencode-data,gh,npm}`.
-Canonical tool paths (including `~/.config/gh` and `~/.config/npm`, which
-`NPM_CONFIG_USERCONFIG` points into) are image-baked symlinks into those whole
-per-project homes. There are no symlinks stored in the global auth volume and no
-global tool parent mounted in main.
-
-`setup_claude()` and `setup_codex()` precreate every known writable prompt/code
-root (skills, agents/commands, rules/prompts, plugins) inside those project
-homes. Keep the lists aligned with the "prompt/code persistence is
-project-isolated" smoke test: an empty new project must expose the same
-inspectable isolated surface as one where a CLI has already used the feature.
-
-The managed memory/config files (`CLAUDE.md`, `AGENTS.md`, Claude
-`settings.json`, Codex `config.toml`, `opencode.json`) are rewritten on every
-create by `_replace_managed_file()`: a new `O_EXCL` file renamed over the entry,
-with the parent opened one component at a time without following links. A
-directory at the name is moved aside first. A previous session owns these
-homes, so never "fix" this into an in-place write: a symlink or hard link would
-then keep its planted text. Names that load in place of or over a managed file
-(Codex `AGENTS.override.md`, Claude `.config.json`, OpenCode
-`config.json`/`opencode.jsonc`) are removed. `_ensure_tool_home()` replaces a
-tool home (or `tool-homes/`) that is a link, never its target, and restores the
-owner's write bit.
-
-Two more Claude surfaces load before any prompt, so `setup_claude()` resets
-them too:
-
-- **User rules** (`~/.claude/rules/**/*.md`, loaded like `CLAUDE.md`).
-  `reset_claude_rules()` removes a link at `rules` (never its target) or renames
-  a real directory aside, creates a new empty `rules`, and then deletes the old
-  tree with fd-relative calls that unlink every link inside it and never follow
-  one. A tree it cannot delete stays under the dot-named aside name, which
-  Claude does not load, and the next create tries again.
-- **The state file** (`$CLAUDE_CONFIG_DIR/.claude.json` and its suffixed
-  variants in `CLAUDE_STATE_FILES`). `reset_claude_state()` removes MCP
-  servers, the grants that start a server (`enabledMcpjsonServers`,
-  `enableAllProjectMcpServers`, `enabledMcpServers`) and `mcpContextUris` at the
-  top level and in every `projects.<path>`, plus the top-level `env` (Claude
-  applies it to its own process) and `apiKeyHelper`. All other state stays
-  (onboarding, workspace trust, caches). The denials
-  (`disabledMcpjsonServers`, `disabledMcpServers`) stay too: they can only
-  stop a server. The file is read with no-follow, inode-checked, bounded reads;
-  a link, a hard link, a special file, an oversized file, or content that does
-  not parse as a JSON object is replaced with the new-project seed, never kept
-  or merged. Only a failed write is a step error. The host's MCP choices come
-  back through `settings.json` from the sanitized seed.
-
-Kept on purpose, and documented in the README threat model as able to carry
-planted text: Claude auto memory (`projects/<path>/memory/MEMORY.md`), skills,
-agents/commands, plugins (with their hooks), and Codex skills/prompts. They
-are the project's working state; resetting them would delete user work. Codex
-`rules/` is also kept: it holds command-approval policy (`prefix_rule`), not
-instructions, and `approval_policy = "never"` is forced anyway. Workspace
-`.mcp.json` servers are repository content: in the managed bypass mode Claude
-can approve them without a prompt unless they are denied, and newer Claude
-versions keep approvals in the workspace `.claude/settings.local.json`. Neither
-is in a tool home.
-
-Load-bearing:
-
-- In each `setup_*`, `_reset_managed_files()` attempts every reset even when
-  one fails, so a blocked config file cannot skip the memory reset.
-- The `setup_*` resets run before `refresh_ai_tools()`: the updaters start the
-  tools, which must not load a previous session's settings, memory, rules, or
-  MCP servers.
-  `lock_config()` also runs before it, so a slow network cannot hold back the
-  Git identity and the root-locked config.
-- `main()` runs every step through `_run_step()`, so one failure cannot skip
-  the lock or project-hook steps; any failure still exits nonzero.
-- The template sets `"waitFor": "postCreateCommand"` so VS Code opens no
-  terminal before the reset.
-
-Guarded by `tests/test-aic-post-create-reset.py`, the `waitFor` case in
-`tests/test-aic-host-security.sh`, and the "prompt/code persistence is
-project-isolated" smoke.
-
-Login-once behavior comes from `aic-auth-sync`, not shared tool homes. It is the
-only service that sees both the per-project sessions root and the five global
-tool-auth subpaths (`claude`, `codex`, `opencode`, `gh`, `npm`). It runs
-continuously as the exact runtime UID:GID interpolated through the generated
-gitignored `.env`; tracked Compose remains byte-identical across hosts. The sidecar is networkless, has a read-only rootfs
-and `no-new-privileges`, drops all capabilities, and has PID 32. Its credential
-volume mounts remain writable by design. It synchronizes only:
-
-- Claude `.credentials.json`
-- Codex `auth.json`
-- OpenCode `auth.json` and `account.json`
-- the login entries of gh `hosts.yml` and npm `npmrc` (see below)
-
-Files must be same-owner, single-link regular files, at most 1 MiB, inside
-canonical `0700` dirs; reads use no-follow/inode checks and writes are atomic
-`0600`. JSON files must be non-empty objects. Initial reconciliation is
-newer-wins and its healthcheck gates main; subsequent login/logout/token-refresh
-changes flow both ways. Never add a glob, unknown filename, config, prompt,
-plugin, or directory sync. Signing and Semgrep retain separate fixed global
-subpath mounts in main; the broad auth root, `gh`, and `npm` are absent there.
-
-gh `hosts.yml` and npm `npmrc` mix login state with settings that run code
-(per-host gh `pager`/`editor`/`browser`/`http_unix_socket`/`api_host`; npm
-`registry`, `script-shell`, `node-options`, `git`, `prefix`, …), so they are
-never copied whole. Load-bearing, don't undo:
-
-1. **Only strict-grammar login entries cross.** gh: per host, `oauth_token`,
-   `user`, `git_protocol` (`https`/`ssh`), and `users.<name>.oauth_token`. npm:
-   top-level (before any `[section]`) `//host[:port][/path]/:` +
-   `_authToken`/`_auth`/`username`/`_password` with a literal value — no `$`,
-   quotes (except npm's own `"…"` around a value with `=`), `;`, `#`, or `\`,
-   because npm expands `${VAR}` in keys and values. Widen a grammar only for a
-   value the tool itself writes, never for a setting.
-2. **The global copy is canonical login entries only** (`_canonical_login()`),
-   and the gh writer quotes every value. Project B therefore never receives a
-   byte that project A wrote outside those grammars.
-3. **The project copy keeps its own settings.** A project npmrc write replaces
-   only its login lines and puts them first, so no `[section]` captures them; a
-   gh write replaces `hosts.yml` with login entries (gh `config.yml` is never
-   touched).
-4. **A project gh/npm file is never "repaired".** gh and npm rewrite these files
-   in place and the npmrc holds project settings, so an unparsable, oversized,
-   or symlinked project file is left alone and not shared
-   (`_CredentialPair.repairs_project`). JSON keeps its repair-from-peer rule.
-5. **Settle before reading.** Both tools truncate, then write. A gh/npm pair is
-   skipped while either file is younger than `AUTH_SYNC_SETTLE_NS`, so a
-   half-written file is never read as a logout or a cut-off token.
-6. The gh YAML reader accepts only plain block mappings; lists, anchors, flow or
-   multi-line values, tabs, and duplicate keys make the file unreadable. Do not
-   swap in a general YAML parser (the image has none, and wider input means
-   wider ambiguity).
-
-Guarded by `tests/test-aic-auth-sync.py`, the template/Dockerfile assertions in
-`tests/test-aic-host-security.sh`, and the "prompt/code persistence is
-project-isolated" smoke in `smoke.yml`.
-
-`initialize_managed_volumes()` must precreate every volume/subpath/file safely
-and validate all existing volume metadata before Compose subpath resolution.
-`prepare_host_seed_paths()` creates missing fixed host seed files so Docker
-never turns a missing file bind into a root-owned directory. The legacy
-container path `.claude-sessions` migrates to neutral `.aic-sessions` without
-data loss. `postCreateCommand` uses `/usr/bin/python3 -I` and hash-pinned offline
-`tomli-w` under `/opt/aic-python`; don't reintroduce runtime dependency
-resolution before policy/config setup.
-
-The two BusyBox helpers in `initialize_managed_volumes()` stay separate runs.
-Do not merge them to save a container start: the sessions volume is
-agent-writable, so a planted `tool-homes` symlink would send the migration's
-`mv`/`cp` into the global auth or shell-history volume if the same helper
-mounted it. Both re-own only entries with the wrong owner or group (`find …
--exec chown -h {} +`), never the whole tree with `chown -R`. Guarded by the
-initialize case in `tests/test-aic-host-security.sh`.
-
-## Project-owned override files (don't break the auto-wire)
-
-`apply_template()` overwrites `devcontainer.json` and `docker-compose.yml`
-wholesale on every `init`/`sync`; only `AIC_TOOLS`/`AIC_SHELL` survive
-(re-derived from the old file and re-injected by `patch_devcontainer_json`).
-Users must not hand-edit those two files — per-project tweaks go in the
-project-owned files `apply_template()` never touches: `Dockerfile.project`,
-`firewall-allowlist`, `chown-paths`, `post-create.project.sh`,
-`docker-compose.override.yml`, `vscode-extensions`, `vscode-settings.json`,
-`shell-rc.zsh`, `p10k.zsh`, `statusline.{sh,mjs,js,py}`. All share one contract:
-**opt-in by file presence, survive sync, read-only inside the container.**
-
-**`docker-compose.override.yml`** — sync-safe home for anything that would
-otherwise live in `containerEnv` or the compose service (env, `extra_hosts`,
-mounts, a `build:` block for `Dockerfile.project`). The template's
-`devcontainer.json` ships `"dockerComposeFile": ["docker-compose.yml"]`
-(single entry); `patch_devcontainer_json()` appends the override **only when
-the file exists**, guarded against double-wiring so it stays idempotent. Keep
-the template array single-entry — pre-listing the override makes
-`devcontainer up` fail on projects without the file (a missing
-`dockerComposeFile` entry is a hard error).
-
-Because the override and `Dockerfile.project` ride along in an untrusted repo,
-`scan_project_overrides()` still prints an early human-readable warning for
-obvious grants. It is deliberately not the security boundary: YAML merging,
-interpolation, short/long syntax, aliases, and service replacement make raw
-text incomplete. `validate_project_security()` always follows it and fails
-closed in TTY and automation alike. Keep the raw scan useful and its test, but
-never treat adding a regex or `AIC_NO_OVERRIDE_SCAN` as equivalent to changing
-the structural validator.
-
-Host-shell interpolation is also a boundary. When an override exists, validate
-the merged model with `--no-interpolate` and require exact trust for every
-active `$VAR` / `${VAR}` expression not already present in the managed base.
-Also detect bare environment/build-arg pass-through (`environment: [TOKEN]` or
-a null map value); otherwise a repository can silently forward an exported
-host token. Compose's escaped `$${VAR}` and ordinary literal values must remain
-frictionless. Diagnostics may name the variable but must never print its
-resolved value.
-
-Keep both managed `AIC_DOCKER_SOCKET` mounts in long Compose syntax. Compose
-2.38.x supports `--no-interpolate` but misparses the `:-` default and mount
-separators when that expression appears in short `source:target:ro` syntax;
-the long form preserves raw interpolation inspection on supported Linux CI
-runners without changing the resolved bind.
-
-Compose environment outranks both devcontainer `containerEnv` and image `ENV`.
-Changes to the managed keys plus `HOME`, `PATH`, shell startup variables,
-tool-home/XDG paths, `GIT_CONFIG_*`, `LD_*`, and Docker endpoint/config variables
-are trust findings: they can run project code before metadata hardening, bypass
-root-managed Git/shell startup, cross project-home boundaries, or dodge the
-socket proxy. Keep the protected-key list and host-security test aligned.
-
-Every project-owned Dockerfile build is unsafe by definition, even when its
-final `FROM` is aicontainer: build steps execute as root and can replace
-helpers, policy, hooks, or the runtime user. It therefore requires exact-config
-trust on any service, not only the devcontainer; checking only the base image
-is insufficient. A build tag (the service `image:`, the `<project>-<service>`
-default, or `build.tags`) that names an image another managed service runs, or
-any `ghcr.io/stefanoginella/aicontainer` tag, is refused outright: with
-`pull_policy: missing` it would replace the sanitizer, credential-bridge, or
-other projects' image. Additional mounts on the
-devcontainer are frictionless only at `/workspace/**` (excluding `.git` and
-`.devcontainer`) or `/home/vscode/.cache/**`; other targets and any masking of
-`/run`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, or `/opt` are findings.
-
-Normalization is never approval. Before replacing installation-specific
-Compose values for comparison, prove managed build contexts resolve to
-`.devcontainer/`, managed project bind sources resolve to this canonical
-checkout, and per-project network/volume names retain the path-hashed Compose
-name. Unmanaged Dev Container features/lifecycle hooks/environment and changes
-to the main service command/entrypoint/healthcheck are pre-post-create code
-execution surfaces and must fail or require explicit trust. So are Compose
-`post_start`/`pre_stop` and `develop.watch` `exec` hooks on any service: each
-hook entry may set its own `user` and `privileged`. Reserved `devcontainer.*`/`com.docker.compose.*`
-labels are trust findings because Dev Containers and the legacy ownership
-checks read them. Keep the matching
-host tests; these checks close real validator bypasses.
-
-**`chown-paths`** — companion to override-declared named volumes. Docker
-inits a fresh named volume `root:root` and `updateRemoteUserUID` doesn't
-change that, so e.g. a `myproject-venv:/workspace/.venv` mount lands
-unwritable by `vscode`. The project lists such mountpoints one per line;
-`post-create.py`'s `fix_volume_ownership()` re-owns them via
-`aic-chown-volumes` on create. **The prefix allowlist (`/workspace/`,
-`/home/vscode/.cache/`) is only the first boundary.** The privileged helper
-uses a root-hidden raw socket to GET the current container/volume metadata and
-requires an exact canonical mountpoint backed by an option-free `local`
-named volume. It rejects host binds, nested non-volume mounts, symlinks,
-custom/external drivers, and `local type=none,o=bind` aliases before `chown
--h -R`. Keep `DAC_READ_SEARCH`: without it root cannot recurse through an old
-UID's `0700` tree; `vscode` itself still receives no capabilities. Guarded by
-`tests/test-aic-chown-volume-validation.sh` and the workflow runtime smoke.
-
-**`post-create.project.sh`** — project extension point for `post-create.py`.
-`run_project_hook()` runs it **last** in `main()` (via `bash <file>`, cwd
-`/workspace`, as `vscode`), so a project's `lefthook install`/`npm ci` sees a
-fully wired environment. It's the only way to extend post-create in pull
-mode, where `post-create.py` is baked into the image (`apply_template()`
-copies it only in `--build` mode). It runs unprivileged, and the `.devcontainer/`
-mount keeps it host-only-editable, but it runs before any prompt with open
-egress and the tool logins. So it needs exact `aic trust` (see "Project identity
-and host-side validation"); in a trusted repo that is one prompt per edit.
-Non-zero exit is logged, not fatal — keep that; a flaky project step shouldn't
-block the devcontainer from coming up.
-
-**`vscode-extensions` / `vscode-settings.json`** — sync-safe per-project
-editor customization (`apply_template()` rewrites `customizations.vscode`
-wholesale every sync). `patch_devcontainer_json()` merges them at two JSONC
-marker comments in `template/devcontainer.json` (`// aic:vscode-extensions`
-in the extensions array, `// aic:vscode-settings` in the settings object) —
-`build_vscode_ext_block`/`build_vscode_settings_block` emit leading-comma
-blocks so the result is valid JSON however the template array/object ends (a
-JSONC trailing comma is tolerated). Load-bearing, don't undo:
-
-1. **Keep the markers** — they're the injection anchors; removing them
-   silently drops the merge.
-2. The merge re-reads from the pristine template every run, so it's
-   idempotent across syncs — don't "optimize" it into editing in place.
-3. Extension lines are validated against the `publisher.name` grammar and
-   warn+skipped otherwise. Settings must be strict JSON and a non-array object;
-   Node parses + serializes them so user text is never spliced into JSONC. Keep
-   both validations: these files are host-side control input.
-4. On a key collision, aic's own settings win inside `devcontainer.json`:
-   `build_vscode_settings_block()` derives managed keys from the pristine
-   template and warns+drops collisions before serialization. The documented
-   escape hatch is the user's
-   `.vscode/settings.json`, which beats devcontainer machine-scope settings.
-   Don't reverse this precedence without updating the README and threat model.
-5. **Merged entries need exact trust.** An extension runs code in the container
-   and settings start programs, so the validator reports every extension or
-   setting beyond the template as a trust finding. The grammar checks above
-   keep the JSON well-formed; they do not make the content safe.
-
-Guarded by the "aic sync merges project-owned vscode-extensions /
-vscode-settings.json" test and the project-code cases in
-`tests/test-aic-host-security.sh`.
-
-**Root-managed shell startup.** The managed launch paths (`aic shell`, the
-VS Code terminal profiles) start zsh, bash, and fish from root-owned files
-only, so an agent cannot plant code that runs in the next human shell.
-`template/.zshrc` is the real managed zsh rc (copied to
-`/etc/aic/shell/zsh/.zshrc`); oh-my-zsh comes from the base image, and the
-theme and plugins are fetched at pinned commits.
-Load-bearing, don't undo:
-
-1. **Everything sourced or run at startup is root-owned.** oh-my-zsh with the
-   theme and plugins lives in `/usr/local/share/oh-my-zsh`; fnm is
-   `/usr/local/bin/fnm` (Node versions stay in the vscode-owned `$FNM_DIR` so
-   `fnm install` works). Each rc defines an `fnm` function that calls the
-   absolute binary, because fnm's cd hook calls `fnm` through PATH.
-2. **Startup PATH lookups use system directories only.** oh-my-zsh and its
-   plugins run `git`, `rm`, `tee`, and `eval "$(fzf --zsh)"`; the skel bashrc
-   evals `lesspipe` and `dircolors`. The zsh and bash rc set a system-only
-   PATH while they load and restore the full one at the end.
-3. **Caches that get sourced again are root-owned.** p10k sources
-   `$XDG_CACHE_HOME/p10k-dump-*.zsh` at theme load and oh-my-zsh adds its cache
-   to `fpath`. The `.zshrc` points the non-exported `XDG_CACHE_HOME` at the
-   root-owned `/usr/local/share/aic/zsh-cache` while the framework loads.
-   gitstatusd is baked into the theme's `usrbin/`, which p10k checks before
-   `~/.cache/gitstatus`. A writable cache dir is not a fix: the agent can
-   rename a root-owned child of its own `~/.cache`.
-4. **No global rc runs first.** The distro and base-image `/etc/zsh/zshrc`
-   and `/etc/bash.bashrc` run PATH-resolved commands. The managed
-   `ZDOTDIR/.zshenv` sets `unsetopt GLOBAL_RCS`; Bash has no flag that skips
-   only `/etc/bash.bashrc`, so the image replaces it.
-5. **No startup file comes from `$HOME`.** The bashrc drops the skel
-   `~/.bash_aliases` and `~/.dircolors` reads, points bash-completion's user
-   file/dir away from `$HOME`, and sets `INPUTRC=/etc/inputrc`; the image build
-   fails if a home read is left. Bash and fish run with `--noprofile --rcfile`
-   and `--no-config`.
-
-Residual, documented in the README threat model: after startup, PATH starts
-with vscode-owned tool directories (`~/.local/bin`, fnm's Node), so a typed
-command or a prompt helper can run a binary the agent replaced, and VS Code
-terminals run through the vscode-owned VS Code server. Startup hardening does
-not make a container shell more trusted than the agent. Guarded by the
-"self-protection files are root-owned 0444" smoke in `smoke.yml` and the
-shell-startup assertions in `tests/test-aic-host-security.sh`.
-
-**Personal config overlay** (`shell-rc.zsh`, `p10k.zsh`, `statusline.*`) — lets
-the trusted human bring a familiar zsh prompt/aliases and Claude statusline into
-the sandbox. Two sources feed one overlay, project file winning: a project-owned
-`.devcontainer/shell-rc.zsh` / `.devcontainer/p10k.zsh` /
-`.devcontainer/statusline.{sh,mjs,js,py}`, and the opt-in host seed
-`~/.config/aicontainer/{rc,p10k}.zsh` / `~/.config/aicontainer/statusline.*`
-routed **verbatim** through `aic-seed-sanitizer` (the only place a raw host file
-is allowed; never mounted into main). `setup_personal_shell()` /
-`setup_statusline()` stage the winner; `aic-lock-user-config` installs it
-`root:root 0444` under `/etc/aic/user-config/{shell,statusline}/`; the baked
-`.zshrc` sources `p10k.zsh` then `rc.zsh` **after** the managed baseline, so a
-personal prompt wins while the managed history/fnm/PATH setup still runs first.
-Load-bearing, don't undo:
-
-1. **It is code, not data — it cannot be sanitized.** The bytes cross verbatim
-   into a sandbox the agent can read, so it is opt-in (by file presence) and
-   documented as "no secrets in these files." Never try to allowlist-"sanitize"
-   zsh; never widen this to auto-vacuum arbitrary host dotfiles (`~/.zshrc`,
-   `~/.p10k.zsh`) — only the aic-namespaced seed dir and the project files.
-2. **Root-locked, not a privilege grant.** It lands `root:root 0444` + create-
-   once so an agent can't tamper with it (preserving the "shell startup is
-   root-managed" guarantee), but its contents still execute only as `vscode`
-   when sourced — the same authority the agent already has, and the same risk
-   class as `post-create.project.sh`. Like that hook, the project-owned copies
-   need exact `aic trust`; the host seed is the trusted human's own file and
-   needs none. Keep the install on
-   the shared `aic-lock-user-config` path; don't add a writable-in-`$HOME` rc.
-3. **The shell overlay is zsh only.** p10k and the `source` lines live in the
-   managed `.zshrc`; bash/fish keep the managed baseline unchanged. Don't source
-   zsh syntax from the bash/fish startup files.
-4. The files are control-boundary paths (in `AIC_CONTROL_FILES`): real files,
-   never symlinks. Keep them out of `apply_template()`'s copy/rewrite/remove
-   lists so sync never clobbers them.
-5. **The statusline overlay carries the script, never a command string.**
-   `statusLine` stays off `CLAUDE_ALLOWED_FIELDS` — the pre-0.6.0 rewriting of
-   the host `statusLine.command` was a heuristic on a trust boundary and must
-   not come back. What `apply_statusline()` writes into the per-project
-   `settings.json` is the constant `/usr/local/bin/aic-statusline`, a baked
-   root-owned `0555` launcher that maps the *installed filename* to a hardcoded
-   interpreter. Three fixed tables must stay aligned:
-   `STATUSLINE_VARIANTS` (post-create), the `statusline/` `TARGETS`
-   (`aic-lock-user-config`), and the launcher's dispatch list. A new extension
-   is a deliberate edit to all three, never runtime discovery — never glob the
-   seed dir, and never let the launcher take the script path from argv or env.
-   `apply_statusline()` runs *after* `lock_config()` on purpose, so it keys off
-   the root-owned file that actually landed; a refused install must leave
-   `settings.json` with no `statusLine` rather than a dangling command. The
-   interpreter itself (fnm's `node`) lives in a `vscode`-owned tree and is not
-   part of the tamper-proof guarantee — that is acceptable precisely because the
-   statusline already runs with `vscode` authority, and it is *not* a reason to
-   relax the root-lock on the script.
-
-Guarded by `tests/test-aic-statusline-overlay.py`, the personal-overlay
-assertions in the host-security test, and the runtime shell-lock + statusline
-smokes.
-
-**AI-tool refresh on every create.** `refresh_ai_tools()` runs after
-`lock_config()` and before the project hook, and floats Claude Code + Codex +
-OpenCode to latest on every container (re)create, so a plain `aic rebuild` lands current CLIs without a
-new image. The Dockerfile bakes each as an offline *floor*; updates run via
-`claude update`, Codex's official `install.sh` with
-`CODEX_NON_INTERACTIVE=1`, and `opencode upgrade`. `AIC_TOOLS`-gated,
-fail-soft (an offline/failed update keeps the baked version — don't make it
-fatal), opt-out via `AIC_FREEZE_TOOLS=1` for a reproducible sandbox. Codex's
-installer is downloaded completely before execution, HTTPS-only and bounded;
-keep `CODEX_HOME` on its separate rootfs package cache and
-`CODEX_INSTALL_DIR=~/.local/bin` so project state remains isolated and no shell
-startup file is edited. OpenCode installs with `--no-modify-path` and upgrades
-in place, never touching rc files. The three updaters run in parallel; each
-writes only its own binary and package directory. Guarded by the "tool
-self-update works with rc files root-locked" test and the parallel-updater case
-in `tests/test-aic-auth-sync.py`.
-
-**Dockerfile.project base-tag drift.** `aic sync` re-pins
-`docker-compose.yml` but never touches a `FROM
-ghcr.io/stefanoginella/aicontainer:vX.Y.Z` inside project-owned
-`Dockerfile.project` — and when an override's `build:` points at it, that
-stale `FROM` is what actually runs (the compose `image:` pin is bypassed).
-`check_dockerfile_project_base()` (end of `cmd_sync`) warns on the drift;
-`aic sync --bump-base` rewrites the tag. It acts only on a literal version
-pin — `:latest`, `ARG`-templated bases, and other repos are deliberately left
-alone. Keep the warn/opt-in split: silently editing a project-owned file
-would break the ownership contract above. Guarded by the "aic sync warns on /
-bumps a stale Dockerfile.project base" test.
-
-**Docker daemon exposure has three modes.** Both templates default to `none`:
-`PING/VERSION=1`, all object reads and `POST/BUILD=0`. `--docker-read` selects
-`ro` (six object list/inspect groups on, writes off); `--docker` selects `rw`
-(reads plus writes); `--no-docker` returns to `none`. Read APIs are not benign:
-container inspect/log/archive endpoints can expose unrelated host workloads.
-
-The mode is encoded in Compose and preserved across sync, but `ro`/`rw` also
-need matching host consent under `$XDG_STATE_HOME/aicontainer/docker-write`.
-Repository edits therefore cannot opt themselves in. Keep all toggles coherent
-in `read_compose_docker_mode()`/`apply_docker_mode()` and the structural
-normalizer; malformed sets reset/fail safe. `--no-docker` revokes stale
-consent. Unless the user passes an explicit Docker flag (or matching consent
-already exists), sync must reset any inherited `ro`/`rw` mode to `none`; this
-keeps ordinary legacy upgrades and checkouts on a new host prompt-free without
-trusting the repository value. The boundary summary, help,
-completions, tests, README, and both
-templates must change together. The socket-proxy image itself is pinned to a
-verified multi-architecture digest because it holds the raw host socket.
-
-**Always-on metadata block.** `block_metadata()` runs on every create and adds
-unconditional, never-flushed drops for `169.254.0.0/16`,
-`100.100.100.200/32`, `fe80::/10`, and `fd00:ec2::254`. It is independent of
-the opt-in full allowlist and strengthen-only. The full `enable` path builds
-inactive A/B IPv4/IPv6 chains/ipsets, rejects prohibited or zero-IP DNS
-results, then swaps one jump; never set policy ACCEPT or flush a live/
-metadata chain. If IPv6 exists but cannot be filtered, fail rather than expose
-an IPv6 bypass. A write-enabled sibling has another netns and is not covered.
-
-**Runaway limit.** Both compose templates set `pids_limit: 4096` on the
-devcontainer (fork-bomb / stuck-loop backstop). Deliberately *not* a
-`mem_limit` — a fixed memory ceiling would OOM-kill legitimate heavy builds;
-memory/CPU caps are documented as an override instead. The Docker-mode test
-also asserts `pids_limit` is present.
-
-## Releasing
-
-README's "Releasing" section has the user-visible flow. **When asked to cut a
-release, do exactly this:**
-
-1. Clean, current `main`: `git checkout main && git pull`; working tree
-   clean.
-2. Ensure this release's notes are under `## [Unreleased]` in CHANGELOG.md
-   (they should already be there, added as changes landed). If empty/stale,
-   write them **by hand** from `git log <last-tag>..HEAD` under
-   Keep-a-Changelog headings, and commit. Don't rename the heading or add a
-   date — `npm version` does that. Never auto-generate the prose from commits
-   (tried, reverted, disliked).
-3. Pick the bump (patch/minor/major) per README's "Picking the bump".
-4. If `template/` changed since the last release, sync the dogfood
-   devcontainer: run `aic sync` **from the host** (never in-container — the
-   PreToolUse hook blocks `.devcontainer/` writes) and commit the result. The
-   dogfood is build-mode, so `.devcontainer/` holds copies of `template/`;
-   skipping this leaves it drifted.
-5. `npm version <bump> && git push --follow-tags`.
-
-> **Gotcha — `ignore-scripts=true` silently skips changelog promotion.** The
-> sandbox image sets `npm config set ignore-scripts true` (hardening), which
-> also suppresses `npm version`'s `preversion`/`version` hooks — the bump
-> commit then ships without a `## [X.Y.Z]` section and fails the pre-push and
-> CI gates. Check `npm config get ignore-scripts`; if `true`, use `npm
-> version <bump> --ignore-scripts=false` for that one command (don't flip the
-> global config — it weakens the image default). If a plain `npm version`
-> already ran and the bump commit is still **local**: run `node
-> scripts/promote-changelog.mjs` by hand, `git commit --amend` to fold in the
-> promoted CHANGELOG, `git tag -f -a vX.Y.Z -m X.Y.Z`, then push.
-
-The two lifecycle scripts (unless suppressed — see gotcha):
-
-- `preversion` → `promote-changelog.mjs --check`: aborts the bump before
-  package.json is touched if `[Unreleased]` is empty — you can't release
-  nothing, and a failed attempt leaves the tree clean.
-- `version` → `promote-changelog.mjs`: renames `[Unreleased]` to `## [X.Y.Z]
-  - <date>`, opens a fresh `[Unreleased]`, fixes the compare links, and `git
-  add`s CHANGELOG.md into the bump commit.
-
-`release.yml` then fires on the tag: it ensures immutable GHCR `:vX.Y.Z` and
-npm artifacts exist, conservatively promotes mutable channels, and creates the
-GitHub Release from the tag's `## [X.Y.Z]` section.
-
-Internal notes:
-
-- `rebuild.yml` validates changes to template, CLI, tests, package metadata,
-  lifecycle scripts, and `smoke.yml`. Its publish-capable main/schedule/manual runs share a
-  cancel-in-progress group; PR validation is ref-scoped. Before mutable-tag
-  publication it proves the template matches current default-branch HEAD.
-  Scheduled/manual builds use `pull: true` + `no-cache: true`; a security
-  refresh must not quietly reuse a stale apt/tool layer.
-- Every release shares one global `aicontainer-release` concurrency group,
-  `cancel-in-progress: false`, `queue: max`. Never serialize per tag or cancel
-  a partial publisher; up to 100 pending runs may queue and each run is
-  restartable.
-- Keep the workflow-level release and security-refresh concurrency groups
-  distinct: their cancellation semantics differ. Their GHCR-mutating `publish`
-  jobs additionally share the job-level `aicontainer-registry-publish` lock
-  with `cancel-in-progress: false` and `queue: max`; this serializes the
-  inspect/build/promote critical section across both workflows and closes the
-  mutable-tag TOCTOU race.
-- A release tag commit must be an ancestor of the default branch and its name
-  must match `package.json`. Existing GHCR version indexes are accepted only
-  when their revision/version/channel annotations identify this release;
-  mismatches fail. A legacy unannotated version is preserved only when the
-  matching immutable npm tarball exists and is never promoted to `:latest`.
-  Existing npm versions are accepted only when their integrity matches the
-  local pack. If either artifact is absent, publish only the missing side so a
-  partial run can recover.
-- npm pre-releases use `next`; an older recovered version uses a
-  version-specific `recovery-*` dist-tag instead of rolling `latest` back.
-  GHCR `:latest` is copied from the immutable manifest only when that version
-  is npm latest and the current GHCR latest is not a newer security-refresh
-  image. If recency cannot be proven, leave it alone.
-- Don't run `npm publish` locally — CI uses `--provenance`; a manual publish
-  skips the supply-chain attestation users can verify.
-- CHANGELOG content is hand-written, never generated;
-  `promote-changelog.mjs` only relabels it. The CI gate (`release.yml`
-  "Verify CHANGELOG.md has an entry") greps for `^## [X.Y.Z]` before any
-  publish; `.githooks/pre-push` mirrors it locally (opt-in, bypassable — CI
-  is the real gate; don't weaken that step). The hook materializes `git show`
-  before `grep -q`: a producer pipeline under `pipefail` falsely rejects a
-  large valid changelog when the early match gives `git show` SIGPIPE. Keep the
-  `## [X.Y.Z]` heading format: the gate, the promotion script, and the
-  release-notes extraction all key on it.
-- The GitHub Release is automatic after publish, idempotent, and marked latest
-  only when npm says the version is latest. It falls back to generated notes.
-  Only that job has `contents: write`; only publish has `packages: write` and
-  OIDC `id-token: write`. Every checkout uses `persist-credentials: false`.
-
-## CHANGELOG entry style
-
-`[Unreleased]` bullets are written to be skimmed:
-
-- One change = one bullet under one heading. Never bundle.
-- Bold headline first, ≤ ~12 words, stating the user-visible effect, not the
-  internal mechanism.
-- At most ~2 sentences of detail after the headline. No debugging narrative —
-  the *how* lives in this file, the README, and the commit body.
-- No inline file-touch lists; at most one terse trailing parenthetical
-  (`(aic, post-create.py)`).
-- Released `## [X.Y.Z]` sections are immutable — never rewrite a shipped
-  section (the GitHub Release renders from it).
-
-## Workflow split rationale (so future edits don't undo it)
-
-The npm CLI is tightly coupled to the container's filesystem (hooks, sudoers,
-helper-script paths); floating `:latest` would let CLI and image drift. The
-two tracks serve different audiences:
-
-- `:vX.Y.Z` (immutable, `release.yml`) — what `aic init` pins. Users on a
-  given aic version always pull the exact image built at release time.
-- `:latest` (floating, `rebuild.yml` weekly cron + relevant runtime/CLI pushes)
-  — base-layer security freshness over reproducibility. Not referenced by
-  managed `aic init` output; release promotion must not overwrite a newer
-  security-refresh image.
-
-Before "simplifying" the two workflows into one or re-pointing `aic init` at
-`:latest`, re-read this tradeoff. Supabase CLI and Dagger use the same pinned
-model; Earthly's floating-with-coupling is the documented anti-pattern.
-
-## Don't do
-
-- **Don't weaken smoke/CLI tests** (`tests/`, `smoke.yml`). They cover real
-  security guarantees: object-read toggles plus `POST/BUILD=0` (Docker default
-  `none`), external read/write consent, resolved-config validation, path-unique
-  identity/migration, metadata drops on IPv4+IPv6, the `.env` guardrail,
-  sanitized seeds/auth sync, scoped volume ownership, the root-managed Git and
-  shell files, the read-only `.git` control paths, dropped capabilities, and
-  the npm-quarantine sanity check (`NPM_CONFIG_MIN_RELEASE_AGE` ≤ 30 days so
-  npx-based MCPs stay installable).
-  If a test fails legitimately, fix the regression, not the assertion.
-- **Don't put untrusted GitHub event fields in `run:` blocks** (issue/PR
-  titles, commit messages, branch refs) — route through `env:` with proper
-  quoting, as both workflows already do. See the GitHub Security Lab guide on
+- Route untrusted GitHub event fields (issue/PR titles, commit messages,
+  branch refs) through `env:` with quotes, as both workflows already do.
+  Never put them in a `run:` block. See the GitHub Security Lab guide on
   workflow injection.
-- **Don't add files to `template/`** the user shouldn't get a copy of —
-  everything there is copied into every project's `.devcontainer/`.
-- **Don't edit `.devcontainer/` from inside the container.** The PreToolUse
-  hook blocks it — part of the sandbox boundary (an AI that can rewrite its
-  own devcontainer config can disable every other protection). Edit
-  `template/` instead; users pick it up via `aic sync`, and the dogfood
-  `.devcontainer/` regenerates the same way.
-- **Don't bump `package.json` in a feature PR.** Version bumps are their own
-  `npm version` commit so the tag points at a clean release commit.
-- **Don't land a user-facing change without a CHANGELOG note** — a bullet
-  under `## [Unreleased]`, right Keep-a-Changelog heading, in the *same*
-  commit/PR. Keeping `[Unreleased]` current makes release time just "rename
-  the heading," and CI blocks a release with no section.
-- **Don't force-push `main` or rewrite tags.** GHCR already has whatever the
-  tag was bound to; ghost tags confuse users on pinned versions.
-- **Don't use `git rebase -i`** or other interactive git commands from a
-  non-interactive environment — they hang silently.
+- Pin every `uses:` to a full commit SHA with a `# vX.Y.Z` comment.
+- Keep `smoke.yml` on `workflow_call` only. Write each runtime assertion
+  there once.
+- Never force-push `main` or rewrite tags. GHCR already holds what a tag
+  pointed at.
+- Do not use `git rebase -i` or other interactive git commands from a
+  non-interactive environment. They hang silently.
+- Write Conventional Commit messages.
 
-## Security stance
+Docs:
 
-This container sandboxes autonomous AI tools running in bypass-permissions /
-sandbox-off mode. README's "Threat model" section is the source of truth.
-When choosing between two implementations, prefer the more restrictive one.
-Review any change to these files for security regressions:
+- When a change alters user-visible behavior (commands, defaults, mounts,
+  capabilities, allowlist), update the matching page in `docs/user/`.
+- When the managed vs project-owned file split changes, update
+  `template/README.md` too.
+- Write docs in ASD-STE100 Simplified Technical English: short sentences,
+  active voice, imperative instructions, one term for one thing.
+- Keep a rule in one place. Link to it from other pages.
 
-- `lib/validate.mjs` — the structural validator. Keys are allow-lists; a
-  removed check or a key added to `reviewedServiceKeys` without a dedicated
-  check opens a host-boundary bypass. Extend `tests/test-aic-validate.mjs`
-  with every rule, and keep the docker-backed cases in
-  `tests/test-aic-host-security.sh`.
-- `template/Dockerfile` — sudoers, USER, and capability bits; a new
-  `NOPASSWD` entry is a load-bearing decision. Also bakes
-  Claude/OpenCode system-managed policy, `/etc/codex/requirements.toml`, the
-  managed hook directory, root-managed Git/shell destinations, neutral tool
-  home symlinks, and hash-pinned offline Python support. Codex and OpenCode install via
-  their standalone installers (`chatgpt.com/codex/install.sh`;
-  `opencode.ai/install` with `--no-modify-path` into `~/.opencode/bin`), not
-  npm — deliberate, so self-update works — at the cost of leaving them
-  outside the `NPM_CONFIG_MIN_RELEASE_AGE` quarantine (which still covers npx
-  MCPs). All three CLIs are a baked floor that `refresh_ai_tools()` floats to
-  latest on each create. Every other curl or git download is pinned (by
-  sha256, signature, key fingerprint, or upstream commit) and checked before
-  use (see "Image download integrity").
-- `template/aic-firewall` — outbound allowlist plus unconditional metadata
-  chains. New hosts expand reachability. A/B IPv4 and IPv6 generations are
-  built while the active DROP generation remains live, then switched with one
-  jump replacement. Prohibited metadata/link-local resolutions and a zero-IP
-  result abort without changing active policy. Never flush a live/metadata
-  chain, set policy ACCEPT, or silently ignore unfilterable configured IPv6.
-  The host status relay uses its own ipset and exact TCP-8787 rule; never put
-  `host.docker.internal` in the general all-port allowlist.
-  The OUTPUT chains accept `ESTABLISHED,RELATED` only with `--ctdir REPLY`
-  (replies to sessions that started from outside). A blanket accept keeps an
-  outbound session alive that the container opened before `enable`, to a host
-  that is off the list. Guarded by the static check in
-  `tests/test-aic-host-security.sh` and the "allowlist enable cuts a connection
-  opened before it" smoke (throwaway containers, because `enable` cannot be
-  undone in a running one).
-- `template/hooks/pre-tool-use.sh` — blocks reads of `.env` and other
-  sensitive paths. Loosening the matchers (`is_blocked_env`,
-  `bash_touches_env`, `is_curl_pipe_sh`, `is_protected_path`, or the
-  `Bash|Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob` matcher in
-  `claude-settings.json`) weakens the model. Shared by all three tools:
-  Claude receives it through root-managed
-  `/etc/claude-code/managed-settings.json`; Codex through
-  `/etc/codex/requirements.toml` + its `managed_dir`. Hooks in a user Codex
-  config are non-managed → untrusted → skipped in autonomous mode; don't move
-  it there.
-- `template/hooks/agent-status.py` — optional informational callbacks from
-  Claude/Codex managed lifecycle hooks. Its fixed endpoint and exhaustive
-  metadata schema are the privacy boundary; it ignores proxy settings and
-  redirects, caps input, and returns success on every malformed-input/network
-  path so observability cannot become policy. Treat receiver events as
-  forgeable and never attach command/macro authority to the ingestion route.
-- `template/hooks/opencode-guardrail.js` — OpenCode's slice of that same
-  guardrail: a dependency-free plugin whose `tool.execute.before` maps
-  OpenCode's `{tool, args}` to the JSON `pre-tool-use.sh` reads on stdin,
-  `spawnSync`s it, and `throw`s on exit 2. Root-managed
-  `/etc/opencode/opencode.json` wires it by absolute path — no trust prompt,
-  and it fires even with `permission."*"=allow`. Keep the logic in `pre-tool-use.sh`
-  (single source of truth); the shim only maps + dispatches. Don't add a
-  second native `permission` deny that could diverge. Guarded by the
-  "opencode guardrail blocks a .env read" test.
-- `template/aic-chown-volumes`, `template/aic-lock-user-config` — the only
-  non-firewall scripts allowed via `NOPASSWD`; both use privileged/interpreter
-  modes, fixed PATH/env, umask, and hardcoded inputs/destinations.
-  `aic-chown-volumes` never accepts target argv. Besides the path prefix, it
-  verifies canonical exact mountpoints against the current container through
-  `/run/aic-host/docker.sock`, uses GET only with curl config/proxies disabled,
-  and accepts only option-free local named volumes before `chown -h -R`.
-  `aic-lock-user-config` runs `/usr/bin/python3 -I` and installs a fixed
-  `TARGETS` table, never argv: it opens each `vscode`-owned staging inode
-  without following links and atomically creates (never replaces) a
-  `root:root 0444` destination under `/etc/aic/user-config/`. The **required**
-  `gitconfig` target is parsed with Git `--no-includes` under a minimal env and
-  allows only fixed safe keys/exact aic values. The **optional** personal
-  overlay targets (`shell/rc.zsh`, `shell/p10k.zsh`,
-  `statusline/statusline.{sh,mjs,js,py}`) are installed **without** content
-  validation — zsh and a statusline script can't be allowlisted — which is safe
-  only because the bytes come from the trusted human staged before any agent
-  runs, the file lands root-locked so an agent can't tamper with it, and its
-  contents still execute only as `vscode`. Do not add a content-bearing target
-  without a validator unless all three hold, and do not turn either helper into
-  a general copy/chown/config installer. Guarded by the dedicated tests plus
-  runtime smoke. See "Personal config overlay".
-- `template/Dockerfile`'s baked `/usr/local/bin/aic-statusline` — root-owned
-  `0555`, not a sudoers helper. It is the only thing Claude's `statusLine`
-  command ever names, and it dispatches a hardcoded interpreter at a hardcoded
-  path. Never make it read a path from argv/env, and never `eval` file content.
-- `.github/workflows/*.yml` — GHCR uses job-scoped `GITHUB_TOKEN` package
-  permission; npm uses OIDC trusted publishing + provenance, not a long-lived
-  npm token. Publishing jobs run only on push/schedule/dispatch, never PR;
-  checkout credentials are never persisted. Every `uses:` is pinned to a full
-  commit SHA with a `# vX.Y.Z` comment, never a tag: a moved upstream tag
-  would run in a job that holds the OIDC token and package write. Renovate
-  (`helpers:pinGitHubActionDigests`) bumps SHA and comment together. Guarded
-  by the action-pin check in `tests/test-aic-host-security.sh`.
-
-## Commit signing (`aic signing`)
-
-The host signing key is never forwarded (the no-`~/.ssh`/no-agent guarantee),
-so `aic signing` provisions a *sandbox-only* ed25519 key in the
-`aic-auth-global` volume under `~/.config/aic-auth/signing/` (key + a `mode`
-marker: `auto`/`byok`/`disabled`). Load-bearing choices, don't undo them:
-
-- Signing config is appended to the fixed staging config *after* sanitized host
-  signing intent, then validated/installed at
-  `/etc/aic/user-config/gitconfig`. It may use only the hardcoded sandbox key
-  and allowed-signers paths; host key paths/includes never enter the config.
-- Applied on (re)create only, never live: the root-managed destination is
-  created once and cannot be replaced in that container. A mode change lands
-  on the next `aic rebuild`; do not add an unlock/update primitive.
-- The mutating actions are unprivileged: `devcontainer exec` as `vscode`
-  (container must be up; no sudoers entry). Generating the key in-container
-  is what keeps owner + 0600 correct across the Linux UID-remap. `status`
-  reads the volume host-side and works anytime.
-- `--register` writes to the user's GitHub account (`gh api POST
-  /user/ssh_signing_keys`) — opt-in only, never auto-register.
-- Guarded by the signing smoke, which stages a key, recreates, and asserts
-  signing is wired and `/etc/aic/user-config/gitconfig` is still `root 444`.
-
-## Verifying changes locally
-
-The CI smoke tests run inside a real devcontainer. Approximate that locally
-to avoid pushing broken changes:
+## Verify locally
 
 ```bash
 for test in tests/*.sh; do bash "$test"; done
@@ -1295,34 +134,12 @@ for test in tests/*.py; do PYTHONDONTWRITEBYTECODE=1 python3 -I "$test"; done
 for test in tests/*.mjs; do node "$test"; done
 ```
 
-Then exercise the real container path:
+For a real container run, follow
+[development.md](docs/contributing/development.md).
 
-```bash
-mkdir -p /tmp/aic-test && cd /tmp/aic-test
-git init -q
-AIC_HOME=/path/to/aicontainer-checkout /path/to/aicontainer-checkout/aic init --build
-AIC_HOME=/path/to/aicontainer-checkout /path/to/aicontainer-checkout/aic up
-devcontainer exec --workspace-folder . claude --version
-devcontainer exec --workspace-folder . curl -fsS http://socket-proxy:2375/_ping
-# npm quarantine sanity (must be ≤ 30 days or npx-based MCPs fail to install)
-devcontainer exec --workspace-folder . bash -lc 'echo "$NPM_CONFIG_MIN_RELEASE_AGE"'
-```
+## Cut a release
 
-For CLI-only changes, `aic init` against a temp directory is usually enough:
-
-```bash
-TMP=$(mktemp -d) && cd "$TMP" && git init -q
-AIC_HOME=/path/to/aicontainer-checkout /path/to/aicontainer-checkout/aic init
-grep "image:" .devcontainer/docker-compose.yml   # should show :vX.Y.Z, not :latest
-```
-
-## Quick reference
-
-| Want to                                       | Do                                                           |
-| ---                                           | ---                                                          |
-| Land a fix/feature                            | merge PR to `main`                                           |
-| Cut a release                                 | `npm version patch && git push --follow-tags`                |
-| Hotfix a bad release                          | another patch (revert or fix-forward); old `:vX.Y.Z` stays   |
-| Manually refresh `:latest`                    | `gh workflow run rebuild.yml`                                |
-| Manually re-run a release                     | `gh workflow run release.yml --ref refs/tags/vX.Y.Z`         |
-| Pin downstream users to an older version      | (they do) `npm i -g aicontainer@<old> && aic sync && aic rebuild` |
+When you are asked to cut a release, follow
+[releasing.md](docs/contributing/releasing.md) step by step. Check
+`npm config get ignore-scripts` first: the sandbox image sets it to `true`,
+and that skips the changelog promotion.

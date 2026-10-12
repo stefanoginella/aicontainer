@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Maintainers: add notes under **[Unreleased]** as you go. At release time,
 > rename that heading to the new version with today's date and add a compare
 > link at the bottom. A release is **blocked** unless this file has a matching
-> `## [X.Y.Z]` section — see AGENTS.md → "Releasing". Entry style lives in
-> AGENTS.md → "CHANGELOG entry style".
+> `## [X.Y.Z]` section — see docs/contributing/releasing.md. Entry style lives
+> in the same page, under "CHANGELOG entry style".
 
 ## [Unreleased]
 
@@ -116,6 +116,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Run `aic sync` once per project. (devcontainer.json)
 
 ### Changed
+
+- **The documentation moved to a `docs/` user guide.** The README is now a
+  short overview with a quick start; the full user guide and the contributor
+  guide are in `docs/`. (README.md, docs/)
 
 - **Container setup no longer waits for the AI-tool updates one by one.**
   Claude Code, Codex, and OpenCode now update at the same time, after the Git
