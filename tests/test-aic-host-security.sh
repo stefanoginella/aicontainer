@@ -986,8 +986,18 @@ cp "$ROOT/aic" "$ROOT/package.json" "$broken_home/"
 cp -R "$ROOT/template" "$broken_home/template"
 # The other helpers in lib/ fail closed too (lib/cli.mjs, see
 # tests/test-aic-host-helpers.mjs), so an install without lib/ also refuses.
-(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate >/dev/null 2>&1) \
+out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
   && fail "aic validate passed without its lib/ modules"
+echo "$out" | grep -q 'incomplete aicontainer install: lib/cli.mjs is missing' \
+  || fail "an install without lib/ did not name the missing lib/cli.mjs"
+# A module that lib/cli.mjs imports is named too, not hidden behind Node's error.
+cp -R "$ROOT/lib" "$broken_home/lib"
+rm -f "$broken_home/lib/project-identity.mjs"
+out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
+  && fail "aic validate passed without lib/project-identity.mjs"
+echo "$out" | grep -q 'incomplete aicontainer install: lib/project-identity.mjs is missing' \
+  || fail "an install without lib/project-identity.mjs did not name it"
+rm -rf "$broken_home/lib"
 cp -R "$ROOT/lib" "$broken_home/lib"
 rm -f "$broken_home/lib/validate-cli.mjs"
 out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \

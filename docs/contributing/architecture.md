@@ -42,6 +42,9 @@ ships them. They use only `node:` built-ins and have no dependencies.
     function that calls it.
   - An unknown subcommand or a wrong argument count exits 2. Thus a helper
     that does not run never reads as a pass.
+  - `aic` calls it only through `aic_helper()`. When `cli.mjs` or a module
+    that it imports is missing, `aic_helper()` names the missing file and
+    returns non-zero.
 - The helper modules:
   - `project-identity.mjs`: the `COMPOSE_PROJECT_NAME` conflict check for a
     direct Dev Containers start, and the creation of the `.git` control

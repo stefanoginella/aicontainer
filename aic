@@ -374,15 +374,38 @@ pin_compose_project_name () {
   export COMPOSE_PROJECT_NAME
 }
 
+# Run a lib/cli.mjs subcommand. lib/ is part of the install: when cli.mjs or a
+# module it imports is missing, say so plainly instead of Node's stack trace.
+# Either way the status is non-zero, so every caller still fails closed.
+aic_helper () {
+  local module
+  if [ -f "$AIC_HOME/lib/cli.mjs" ]; then
+    for module in $(sed -n "s|^import .* from '\./\([A-Za-z0-9._-]*\.mjs\)';\$|\1|p" "$AIC_HOME/lib/cli.mjs"); do
+      [ -f "$AIC_HOME"/lib/"$module" ] || { module="lib/$module"; break; }
+      module=""
+    done
+  else
+    module="lib/cli.mjs"
+  fi
+  if [ -n "$module" ]; then
+    err "incomplete aicontainer install: $module is missing in $AIC_HOME — reinstall aicontainer"
+    return 2
+  fi
+  node "$AIC_HOME/lib/cli.mjs" "$@"
+}
+
 # Return 1, with an actionable message, when a direct Dev Containers start
 # (the generated VS Code initializer cannot pin the name for its parent) would
 # not use this project's managed name. composeNameConflict() in
 # lib/project-identity.mjs mirrors the CLI's lookup; it prints only the source
-# that conflicts. A helper that cannot run counts as an unreadable .env.
+# that conflicts. A helper that cannot run fails the check with its own message.
 check_devcontainer_project_name () {
   local expected conflict
   expected="$(project_name)" || return 1
-  conflict="$(node "$AIC_HOME/lib/cli.mjs" compose-name-conflict "$expected")" || conflict=unreadable
+  if ! conflict="$(aic_helper compose-name-conflict "$expected")"; then
+    err "could not check COMPOSE_PROJECT_NAME for a direct Dev Containers start"
+    return 1
+  fi
   case "$conflict" in
     "") return 0 ;;
     environment)
@@ -520,7 +543,7 @@ ensure_git_control_paths () {
     fi
     # The helper never follows or replaces a path that already exists; the
     # check below reports what it found instead.
-    node "$AIC_HOME/lib/cli.mjs" git-control-files \
+    aic_helper git-control-files \
       2>/dev/null || die "could not create the managed Git control files in .git"
   fi
   problems="$(git_control_path_problems --with-missing)"
@@ -964,7 +987,7 @@ build_vscode_ext_block () {
 build_vscode_settings_block () {
   local file="$1" output
   [ -f "$file" ] || return 0
-  if ! output="$(node "$AIC_HOME/lib/cli.mjs" vscode-settings \
+  if ! output="$(aic_helper vscode-settings \
       "$file" "$TEMPLATE_DIR/devcontainer.json")"; then
     printf 'aic: ignoring vscode-settings.json (must be a strict JSON object)\n' >&2
     return 0
@@ -1638,7 +1661,7 @@ docker_consent_matches () {
 # run never stores or matches an empty approval.
 hash_validation_inputs () {
   local final_json="$1" hash
-  hash="$(node "$AIC_HOME/lib/cli.mjs" trust-hash "$final_json")" || return 1
+  hash="$(aic_helper trust-hash "$final_json")" || return 1
   case "$hash" in
     *[!0-9a-f]*|"") return 1 ;;
   esac
@@ -2349,7 +2372,7 @@ cmd_signing () {
 docker_volume_metadata_is_safe () {
   local name="$1" metadata
   metadata="$(docker volume inspect --format '{{json .}}' "$name" 2>/dev/null)" || return 1
-  node "$AIC_HOME/lib/cli.mjs" volume-safe "$metadata" >/dev/null 2>&1
+  aic_helper volume-safe "$metadata" >/dev/null 2>&1
 }
 
 assert_safe_docker_volume () {
@@ -2389,7 +2412,7 @@ legacy_session_volume_owned_by_workspace () {
   while IFS= read -r cid; do
     [ -n "$cid" ] || continue
     inspected="$(docker inspect --format '{{json .}}' "$cid" 2>/dev/null)" || continue
-    if node "$AIC_HOME/lib/cli.mjs" owns-session-volume \
+    if aic_helper owns-session-volume \
         "$inspected" "$workspace" "$legacy" "$old_vol" >/dev/null 2>&1; then
       proved=1
       break
@@ -2406,7 +2429,7 @@ legacy_session_volume_owned_by_workspace () {
   while IFS= read -r cid; do
     [ -n "$cid" ] || continue
     inspected="$(docker inspect --format '{{json .}}' "$cid" 2>/dev/null)" || return 1
-    node "$AIC_HOME/lib/cli.mjs" volume-user-is-owner \
+    aic_helper volume-user-is-owner \
       "$inspected" "$workspace" "$legacy" "$old_vol" >/dev/null 2>&1 || return 1
   done <<< "$users"
   return 0
@@ -2681,12 +2704,12 @@ stop_owned_stack_named () {
       err "legacy Compose stack '$legacy' has an unreadable container owner; preserving the whole stack."
       return 0
     fi
-    if node "$AIC_HOME/lib/cli.mjs" container-owned \
+    if aic_helper container-owned \
         "$inspected" "$workspace" "$legacy" >/dev/null 2>&1; then
       proved=1
       continue
     fi
-    if node "$AIC_HOME/lib/cli.mjs" auxiliary-container \
+    if aic_helper auxiliary-container \
         "$inspected" "$legacy" >/dev/null 2>&1; then
       continue
     fi
