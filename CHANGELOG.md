@@ -227,6 +227,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `npm`, `aic version` exited 1, and `aic upgrade` stopped before it upgraded.
   (aic)
 
+- **`aic sync` no longer copies stray files from `template/hooks/`.** In a
+  git-checkout install, a test run's `__pycache__` there was copied into the
+  project's `.devcontainer/hooks/`. aic now copies only the managed hook files,
+  and an extra entry in `.devcontainer/hooks/` fails validation until
+  `aic sync`. (aic, Dockerfile)
+
 ## [0.9.1] - 2026-10-05
 
 ### Changed

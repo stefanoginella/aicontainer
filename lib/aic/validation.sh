@@ -191,9 +191,26 @@ validate_managed_build_files () {
       printf 'MANAGED\t.devcontainer/%s differs from the managed build template; run aic sync\n' "$name" >> "$out"
     fi
   done
-  if [ ! -d .devcontainer/hooks ] || ! diff -qr "$TEMPLATE_DIR/hooks" .devcontainer/hooks >/dev/null 2>&1; then
+  if ! managed_hooks_match; then
     printf 'MANAGED\t.devcontainer/hooks differs from the managed build template; run aic sync\n' >> "$out"
   fi
+}
+
+# .devcontainer/hooks holds exactly the files in AIC_HOOK_FILES, each a regular
+# file equal to the template. Any other entry (a file, a directory, a link)
+# fails, even though the Dockerfile copies only the listed names. The entry
+# count is one character per entry, so no file name can fake a match.
+managed_hooks_match () {
+  local name listed=0 found
+  [ -d .devcontainer/hooks ] && [ ! -L .devcontainer/hooks ] || return 1
+  for name in $AIC_HOOK_FILES; do
+    [ -f "$TEMPLATE_DIR/hooks/$name" ] && [ -f ".devcontainer/hooks/$name" ] \
+      && [ ! -L ".devcontainer/hooks/$name" ] \
+      && cmp -s "$TEMPLATE_DIR/hooks/$name" ".devcontainer/hooks/$name" || return 1
+    listed=$((listed + 1))
+  done
+  found="$(find .devcontainer/hooks -mindepth 1 -maxdepth 1 -exec printf x \; 2>/dev/null)" || return 1
+  [ "${#found}" -eq "$listed" ]
 }
 
 # Append UNSAFE findings for project-owned files that run code in the

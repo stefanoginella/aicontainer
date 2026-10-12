@@ -1558,6 +1558,60 @@ if (cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1); then
 fi
 [ ! -s "$target" ] || fail "post-create module symlink target was overwritten"
 rm "$TMP/mode/.devcontainer/$first_module"
+(cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" sync --build >/dev/null)
+
+# Only the hook files in AIC_HOOK_FILES are managed. aic copies only those from
+# template/hooks/ (a git checkout can hold a test run's __pycache__ there), and
+# .devcontainer/hooks/ must hold exactly those files.
+hook_files=$(bash -c 'source "$1"; printf "%s" "$AIC_HOOK_FILES"' _ \
+  "$ROOT/lib/aic/identity.sh")
+[ -n "$hook_files" ] || fail "AIC_HOOK_FILES is empty"
+expected_hooks=$(printf '%s\n' $hook_files | LC_ALL=C sort)
+stray_home="$TMP/stray-hooks-home"
+mkdir -p "$stray_home"
+cp -R "$ROOT/aic" "$ROOT/package.json" "$ROOT/lib" "$ROOT/template" "$stray_home/"
+mkdir -p "$stray_home/template/hooks/__pycache__"
+: > "$stray_home/template/hooks/__pycache__/agent-status.cpython-314.pyc"
+: > "$stray_home/template/hooks/stray.txt"
+new_project "$TMP/stray-hooks"
+(cd "$TMP/stray-hooks" && AIC_HOME="$stray_home" "$stray_home/aic" sync --build >/dev/null) \
+  || fail "build sync failed with stray files in template/hooks"
+[ "$(ls -A "$TMP/stray-hooks/.devcontainer/hooks" | LC_ALL=C sort)" = "$expected_hooks" ] \
+  || fail "build sync copied a hook file that is not in AIC_HOOK_FILES"
+[ "$(cd "$TMP/stray-hooks/.devcontainer" && find hooks -maxdepth 0 -perm 0755 -print)" = "hooks" ] \
+  || fail "build sync did not give .devcontainer/hooks mode 0755"
+out=$(cd "$TMP/stray-hooks" && AIC_HOME="$stray_home" "$stray_home/aic" check-drift 2>&1)
+echo "$out" | grep -Fq '.devcontainer/hooks differs' \
+  && fail "stray files in template/hooks made the managed hooks drift"
+for name in $hook_files; do
+  cmp -s "$ROOT/template/hooks/$name" "$TMP/mode/.devcontainer/hooks/$name" \
+    || fail "build sync did not install .devcontainer/hooks/$name from the template"
+done
+hooks_refused() {
+  local what="$1"
+  out=$(cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+  echo "$out" | grep -Fq '.devcontainer/hooks differs from the managed build template' \
+    || fail "managed hooks accepted $what"
+}
+: > "$TMP/mode/.devcontainer/hooks/extra.sh"
+hooks_refused "an extra file"
+rm "$TMP/mode/.devcontainer/hooks/extra.sh"
+mkdir "$TMP/mode/.devcontainer/hooks/__pycache__"
+hooks_refused "an extra directory"
+rmdir "$TMP/mode/.devcontainer/hooks/__pycache__"
+# A newline in a name must not let an extra entry pass as two listed names.
+: > "$TMP/mode/.devcontainer/hooks/$(printf 'pre-tool-use.sh\nagent-status.py')"
+hooks_refused "a file name with a newline"
+rm "$TMP/mode/.devcontainer/hooks/$(printf 'pre-tool-use.sh\nagent-status.py')"
+first_hook=${hook_files%% *}
+printf '\n# drift\n' >> "$TMP/mode/.devcontainer/hooks/$first_hook"
+hooks_refused "a changed hook file"
+rm "$TMP/mode/.devcontainer/hooks/$first_hook"
+hooks_refused "a missing hook file"
+(cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" sync --build >/dev/null)
+out=$(cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -Fq '.devcontainer/hooks differs' \
+  && fail "sync did not restore the managed hooks"
 (cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" sync --pull >/dev/null)
 [ ! -e "$TMP/mode/.devcontainer/Dockerfile" ] || fail "pull sync left build Dockerfile behind"
 for name in $post_create_modules; do

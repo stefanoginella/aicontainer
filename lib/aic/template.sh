@@ -228,17 +228,29 @@ atomic_copy_file () {
   die "could not install managed file: $dst"
 }
 
-# Stage the managed hooks tree before replacing it, so a partial recursive copy
-# can never become the live tree. Symlinks are forbidden in both source and
-# destination because hooks execute security-sensitive host/container logic.
+# Stage the managed hook files before replacing the hooks directory, so a
+# partial copy can never become the live tree. Only the files in
+# AIC_HOOK_FILES are copied; anything else in the template directory stays
+# out. Symlinks are forbidden in both source and destination because hooks
+# execute security-sensitive host/container logic. The directory is 0755, the
+# mode a normal checkout or npm install gives template/hooks, so the trust
+# hash of an existing project does not change.
 atomic_copy_hooks () {
-  local src="$1" dst="$2" parent tmp linked
+  local src="$1" dst="$2" parent tmp name
   [ -d "$src" ] && [ ! -L "$src" ] || die "managed hooks template is missing or unsafe: $src"
-  linked="$(find "$src" -type l -print -quit 2>/dev/null)"
-  [ -z "$linked" ] || die "managed hooks template contains a symlink: $linked"
+  for name in $AIC_HOOK_FILES; do
+    [ -f "$src/$name" ] && [ ! -L "$src/$name" ] \
+      || die "managed hook template is missing or unsafe: $src/$name"
+  done
   parent="$(dirname "$dst")"
   tmp="$(mktemp -d "$parent/.aic-hooks.XXXXXX")"
-  if ! cp -Rp "$src/." "$tmp/"; then
+  for name in $AIC_HOOK_FILES; do
+    if ! cp -p "$src/$name" "$tmp/$name"; then
+      rm -rf "$tmp"
+      die "could not stage managed hooks"
+    fi
+  done
+  if ! chmod 0755 "$tmp"; then
     rm -rf "$tmp"
     die "could not stage managed hooks"
   fi

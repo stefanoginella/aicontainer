@@ -239,7 +239,10 @@ RUN chmod 0755 /usr/local/bin/aic-firewall \
 # ---------------------------------------------------------------------------
 # Hooks: root-owned, not writable by vscode (self-defense)
 # ---------------------------------------------------------------------------
-COPY hooks/ /etc/aic/hooks/
+# Name each hook file: AIC_HOOK_FILES in lib/aic/identity.sh is the list
+# (tests/test-aic-hook-files.py checks it). A stray file never gets in.
+COPY hooks/agent-status.py hooks/claude-settings.json \
+     hooks/opencode-guardrail.js hooks/pre-tool-use.sh /etc/aic/hooks/
 RUN chmod 755 /etc/aic/hooks /etc/aic /etc/aic/hooks/*.sh \
     && chmod 644 /etc/aic/hooks/*.json /etc/aic/hooks/*.js /etc/aic/hooks/*.py \
     && chown -R root:root /etc/aic

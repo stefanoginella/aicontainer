@@ -135,11 +135,20 @@ project. It is the source of truth for what lands in user repositories.
 - `post-create.py` and the `post_create_*.py` modules hold the container
   setup, the seed sanitizer, and the credential bridge. See
   [The post-create package](#the-post-create-package).
-- `hooks/` holds three files. All three are copied root-owned to
+- `hooks/` holds four files. The image copies all four root-owned to
   `/etc/aic/hooks/`:
   - `pre-tool-use.sh`, the shared guardrail.
   - `opencode-guardrail.js`, the thin OpenCode adapter.
   - `agent-status.py`, the opt-in, metadata-only Claude/Codex lifecycle relay.
+  - `claude-settings.json`, the base of the Claude managed settings.
+- `AIC_HOOK_FILES` in `lib/aic/identity.sh` is the only list of these files.
+  - `aic` copies only the listed files from `template/hooks/`. A stray file
+    there, such as a `__pycache__` from a test run, never reaches a project.
+  - In build mode, `.devcontainer/hooks/` must hold exactly the listed files.
+    Any other entry is a MANAGED finding.
+  - The Dockerfile `COPY` names each file. `tests/test-aic-hook-files.py`
+    fails when the list, the `COPY`, and the files in `template/hooks/`
+    disagree.
 - `docker-compose.pull.yml` is for the default mode.
   `docker-compose.build.yml` is for the `--build` mode.
 - `README.md` is copied into the `.devcontainer/` of every project in **both**

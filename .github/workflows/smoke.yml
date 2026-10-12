@@ -826,6 +826,27 @@ jobs:
             echo "OK: the post-create package is root-owned, read-only, bytecode-free, and loads only from $pkg"
           '
 
+      - name: Smoke test - image holds exactly the managed hook files
+        working-directory: /tmp/proj
+        run: |
+          # The Dockerfile names each hook file (AIC_HOOK_FILES in
+          # lib/aic/identity.sh), so nothing else from the build context gets
+          # into /etc/aic/hooks.
+          set -euo pipefail
+          hooks=$(bash -c 'source "$1"; printf "%s" "$AIC_HOOK_FILES"' _ \
+            "$GITHUB_WORKSPACE/lib/aic/identity.sh")
+          [ -n "$hooks" ] || { echo "FAIL: AIC_HOOK_FILES is empty"; exit 1; }
+          devcontainer exec --workspace-folder . bash -c '
+            set -euo pipefail
+            expected=$(printf "%s\n" $1 | LC_ALL=C sort)
+            actual=$(ls -A /etc/aic/hooks | LC_ALL=C sort)
+            [ "$actual" = "$expected" ] \
+              || { echo "FAIL: /etc/aic/hooks holds: $actual"; exit 1; }
+            [ "$(stat -c %U:%G:%a /etc/aic/hooks)" = root:root:755 ] \
+              || { echo "FAIL: /etc/aic/hooks is not root:root 0755"; exit 1; }
+            echo "OK: /etc/aic/hooks holds exactly the managed hook files"
+          ' _ "$hooks"
+
       - name: Smoke test - prompt/code persistence is project-isolated
         working-directory: /tmp/proj
         run: |

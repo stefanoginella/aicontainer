@@ -145,6 +145,14 @@ check_devcontainer_project_name () {
 # the post_create_*.py files in template/: tests/test-aic-post-create-package.py
 # checks this.
 AIC_POST_CREATE_MODULES="post_create_common.py post_create_claude_reset.py post_create_tools.py post_create_seeds.py post_create_auth_logins.py post_create_auth_sync.py post_create_container.py post_create_git.py post_create_overlays.py post_create_main.py"
+# AIC_HOOK_FILES is the only list in aic of the managed hook files. aic copies
+# only these from template/hooks/, so a stray file there (a __pycache__ from a
+# test run in a git checkout) never reaches a project. In build mode,
+# .devcontainer/hooks/ must hold exactly these files. It must equal the hooks
+# COPY list in template/Dockerfile and the files in template/hooks/:
+# tests/test-aic-hook-files.py checks this. template.sh and validation.sh read it.
+# shellcheck disable=SC2034
+AIC_HOOK_FILES="agent-status.py claude-settings.json opencode-guardrail.js pre-tool-use.sh"
 AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py $AIC_POST_CREATE_MODULES aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh statusline.sh statusline.mjs statusline.js statusline.py"
 
 validate_devcontainer_paths () {
