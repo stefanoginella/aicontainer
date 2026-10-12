@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import sys
 import tomllib
 import unittest
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
+# -I ignores PYTHONDONTWRITEBYTECODE. Never write bytecode into template/.
+sys.dont_write_bytecode = True
 HOOK_PATH = ROOT / "template" / "hooks" / "agent-status.py"
 SPEC = importlib.util.spec_from_file_location("aic_agent_status", HOOK_PATH)
 assert SPEC is not None and SPEC.loader is not None

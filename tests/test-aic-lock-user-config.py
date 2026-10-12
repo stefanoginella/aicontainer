@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import io
 import os
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -12,6 +13,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+# -I ignores PYTHONDONTWRITEBYTECODE. Never write bytecode into template/.
+sys.dont_write_bytecode = True
 LOADER = importlib.machinery.SourceFileLoader(
     "aic_lock_user_config", str(ROOT / "template" / "aic-lock-user-config")
 )
