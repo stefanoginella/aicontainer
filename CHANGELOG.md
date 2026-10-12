@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `gist.github.com`. Other hosts still get no helper. (post-create.py,
   aic-lock-user-config)
 
+- **Hooks, MCP servers, and `docker exec` now find `node` without a shell.**
+  The default Node of fnm (`node`, `npm`, `npx`) is now the last entry on the
+  image `PATH`. A shell in the container still uses the `.nvmrc` version
+  first. (Dockerfile)
+
 ## [0.10.0] - 2026-10-12
 
 ### Security

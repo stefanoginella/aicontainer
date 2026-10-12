@@ -356,6 +356,21 @@ for line in 'COPY .zshrc /etc/aic/shell/zsh/.zshrc' \
 done
 grep -Fq "sed -e '/^if \\[ -f ~\\/\\.bash_aliases \\]; then\$/,/^fi\$/d'" "$dockerfile" \
   || fail "managed bashrc still sources ~/.bash_aliases"
+# A process that no managed shell starts (hooks, MCP servers, `docker exec`)
+# finds the fnm default Node through the image PATH. The vscode-owned entry
+# must come after the system directories, so it never shadows a system binary.
+# No system directory may link to that Node: the startup PATH of the managed
+# shells and the PATH of root processes search those directories.
+fnm_path_line='ENV PATH="$PATH:/home/vscode/.fnm/aliases/default/bin"'
+grep -Fqx -- "$fnm_path_line" "$dockerfile" \
+  || fail "Dockerfile does not append the fnm default Node to the end of the image PATH"
+[ "$(grep -E '^ENV PATH=' "$dockerfile" | tail -n 1)" = "$fnm_path_line" ] \
+  || fail "an ENV PATH after the fnm default Node entry can move it before the system directories"
+[ "$(grep -E '^ENV PATH=' "$dockerfile" | grep -c '\.fnm')" = 1 ] \
+  || fail "the fnm default Node is on the image PATH more than once"
+if grep -Ev '^[[:space:]]*#' "$dockerfile" | grep -Eq '(^|[^[:alnum:]_-])ln[[:space:]].*(\.fnm|/node([[:space:]]|$))'; then
+  fail "Dockerfile links the vscode-owned Node into another directory"
+fi
 # Image download integrity (docs/contributing/image-integrity.md). `sh -c "$(curl …)"` exits 0 when curl
 # fails, and a pipe into a shell or an unpacker runs whatever arrived. Every
 # curl or git fetch must start with `set -eu`, use no `||` or `set +e`, and be
@@ -758,6 +773,8 @@ grep -Fq 'FAIL: shell startup ran vscode-writable code' "$smoke_workflow" \
   || fail "smoke.yml lost the shell-startup plant smoke"
 grep -Fq 'OK: managed zsh loads powerlevel10k, both plugins, node, fnm, fzf, and delta' "$smoke_workflow" \
   || fail "smoke.yml lost the pinned zsh theme/plugins/tools smoke"
+grep -Fq 'OK: a plain /bin/sh finds the fnm default Node last on PATH; system directories hold no node' "$smoke_workflow" \
+  || fail "smoke.yml lost the fnm default Node without shell startup smoke"
 grep -Fq '"$GITHUB_WORKSPACE/aic" init --build --force' "$smoke_workflow" \
   || fail "workflow pre-created override is not passed through explicit init --force"
 grep -Fq 'CODEX_NON_INTERACTIVE=1' "$smoke_workflow" \
