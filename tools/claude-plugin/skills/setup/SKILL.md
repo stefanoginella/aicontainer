@@ -101,7 +101,7 @@ Before anything, confirm the ground is solid:
    exists and references aicontainer (the GHCR image or `AIC_TOOLS`), this is a
    *re-setup*, not a fresh install — you're in **update mode**. Don't regenerate
    from scratch and don't re-propose files that already exist and are correct.
-   Still read the README (Step 1) and re-detect/confirm the stack (Steps 2–3),
+   Still read the docs (Step 1) and re-detect/confirm the stack (Steps 2–3),
    then follow "Update mode" below instead of the greenfield Step 5. (If no
    `.devcontainer/` exists, it's a fresh setup — continue straight through
    Steps 1–10.) A missing `.devcontainer/` still isn't proof of a clean slate: a
@@ -127,7 +127,7 @@ When Step 0 found an existing aic setup, the job is **not** "generate config." I
 is "check whether this project's personalization still fits its stack, and update
 only what's missing, stale, or drifted." A project set up months ago may have
 gained a language, a service, browser e2e tests, or new build artifacts — or had
-the global `aic` upgraded under it. Read the README (Step 1) and refresh the
+the global `aic` upgraded under it. Read the docs (Step 1) and refresh the
 stack profile (Steps 2–3) first, then:
 
 1. **Inventory what's already there.** List which project-owned files exist and
@@ -170,18 +170,27 @@ stack profile (Steps 2–3) first, then:
    Step 9 to confirm the refreshed setup actually boots — an update that
    "should" fix a gap isn't done until you've watched it come up clean.
 
-## Step 1 — Read the current aicontainer README
+## Step 1 — Read the current aicontainer docs
 
-Fetch the live README so your recipes match the current release (override-file
-syntax and the `Dockerfile.project` / LSP recipes occasionally change):
+Fetch the live user-guide pages so your recipes match the current release
+(override-file syntax and the `Dockerfile.project` / LSP recipes occasionally
+change). Base URL:
+`https://raw.githubusercontent.com/stefanoginella/aicontainer/main/docs/user/`
 
-- Primary: WebFetch `https://raw.githubusercontent.com/stefanoginella/aicontainer/main/README.md`
-- Human URL (for linking the user): `https://github.com/stefanoginella/aicontainer`
+- `customization.md` — `docker-compose.override.yml`, named volumes +
+  `chown-paths`, `post-create.project.sh`, VS Code extensions/settings, LSP
+  and `.venv` recipes. Always fetch this one.
+- `extra-tools.md` — `Dockerfile.project` and the Playwright recipe. Fetch when
+  the project needs OS packages or a browser.
+- `personal-config.md` — shell overlay and statusline. Fetch when the user asks
+  about their prompt or statusline.
+- Index of all pages: `https://raw.githubusercontent.com/stefanoginella/aicontainer/main/docs/README.md`
+- Human URL (for linking the user): `https://github.com/stefanoginella/aicontainer/tree/main/docs`
 
 If the fetch fails (offline, firewall), degrade gracefully — don't abort. Use, in
 order: (a) the `.devcontainer/README.md` that `aic init` drops into the project
 (version-matched, documents the managed-vs-project-owned split), (b) `aic help`,
-and (c) `references/stack-and-suitability.md` in this skill. The README is the
+and (c) `references/stack-and-suitability.md` in this skill. The docs are the
 source of truth for *recipe syntax*; this skill carries the *judgment* (stack
 detection, suitability, LSP-by-language).
 
@@ -250,7 +259,7 @@ First the two `aic init` choices (ask, or take the defaults and say so):
 - **Shell** (`--shell`): `zsh` (default), `bash`, or `fish`.
 
 Then map the confirmed stack to **project-owned files**. The aim is a sandbox the
-project actually builds and runs in. Common mappings (full syntax: the README from
+project actually builds and runs in. Common mappings (full syntax: the docs from
 Step 1; rationale and the LSP-by-language table: `references/stack-and-suitability.md`):
 
 - **Named volume + `chown-paths`** — for build artifacts you don't want on the
@@ -269,7 +278,7 @@ Step 1; rationale and the LSP-by-language table: `references/stack-and-suitabili
   value is baked into the image rather than an override `environment:` key the
   validator has to re-review.
 - **`Dockerfile.project`** — for anything needing `apt` / root or baked-in
-  browsers: native build deps, DB clients, Playwright/Chromium (README has the
+  browsers: native build deps, DB clients, Playwright/Chromium (`extra-tools.md` has the
   exact recipe), extra language runtimes. `FROM` must match the pinned tag in the
   generated `docker-compose.yml` (read it after init). Point at it with a `build:`
   block in `docker-compose.override.yml`, **not** by editing `docker-compose.yml`.
@@ -294,7 +303,7 @@ Step 1; rationale and the LSP-by-language table: `references/stack-and-suitabili
   + `charliermarsh.ruff`; TS → `dbaeumer.vscode-eslint` + `esbenp.prettier-vscode`;
   etc.), interpreter path, format-on-save. Include the **stop-auto-activating-`.venv`**
   settings for Python projects (otherwise VS Code types `source .../activate` into
-  the terminal and clobbers the AI CLI you just launched — README has the two keys).
+  the terminal and clobbers the AI CLI you just launched — `customization.md` has the two keys).
 - **`post-create.project.sh`** — runs as `vscode`, cwd `/workspace`, on every
   create. Two jobs: (1) **install the agent's LSP server** binary on `PATH` so
   Claude Code's go-to-def / find-refs tool works — this is *separate* from the

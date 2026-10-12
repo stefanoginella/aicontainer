@@ -1,7 +1,7 @@
 # Stack detection, suitability, and LSP wiring
 
 This file carries the skill's own judgment — the parts that aren't in the
-aicontainer README. The README (fetched live in Step 1) remains the source of
+aicontainer docs. The user-guide pages (fetched live in Step 1) remain the source of
 truth for override-file *syntax*; this file is for *deciding what to generate*.
 
 ## 1. Stack detection signals
@@ -25,7 +25,7 @@ Read these files to infer the profile. Presence is the signal; versions refine i
 | `CMakeLists.txt`, `Makefile`, `*.c`/`*.cpp` | C/C++ — clangd; native build deps likely need `Dockerfile.project` |
 | `docker-compose.yml` services (postgres, redis, mysql, mongo, …) | App depends on those services → host-service wiring or sibling containers |
 | `.env.example` keys (`DATABASE_URL`, `REDIS_URL`, `*_HOST`) | Same — needs the service reachable; wire via the override |
-| `@playwright/test` / `cypress` / `puppeteer` in deps | Browser e2e → `Dockerfile.project` (baked Chromium); README has the Playwright recipe |
+| `@playwright/test` / `cypress` / `puppeteer` in deps | Browser e2e → `Dockerfile.project` (baked Chromium); `extra-tools.md` has the Playwright recipe |
 | `.md` design docs (ARCHITECTURE, PRD, TECH-STACK, DESIGN, specs, `docs/`, `_bmad-output`, `.specstral`, `.specify/`) | Authoritative when code is sparse/greenfield — a spec naming the stack is a real signal |
 
 When the entire manifest glob comes back **empty** (greenfield / pre-first-commit
@@ -55,7 +55,7 @@ generating config.
 ### Doable with a documented recipe (proceed, add config)
 - **Browser e2e** (Playwright/Cypress/Puppeteer) → `Dockerfile.project` bakes
   Chromium + its apt deps (runtime `sudo apt` is blocked, so it must be in the
-  image). README has the exact Playwright recipe, including `--no-sandbox`.
+  image). `extra-tools.md` has the exact Playwright recipe, including `--no-sandbox`.
 - **Databases / caches** → run them on the host and reach via
   `host.docker.internal` (override env + `extra_hosts` on Linux), or as sibling
   containers through the socket-proxy (`docker compose up` works inside).
@@ -98,7 +98,7 @@ There are **two** LSP surfaces, and they're configured in different files:
    `.devcontainer/post-create.project.sh` so it survives rebuilds. This is the
    half people forget.
 
-A project usually wants both. The README documents Python and TypeScript in full;
+A project usually wants both. `customization.md` documents Python and TypeScript in full;
 generalize the same pattern to other languages with this table.
 
 | Language | Agent LSP binary (install in `post-create.project.sh`) | Editor extensions (`vscode-extensions`) |
@@ -117,7 +117,7 @@ Python-specific gotcha to always include: VS Code auto-activates a project
 which clobbers the AI CLI you just launched. Add the two suppression keys
 (`python.terminal.activateEnvironment: false` and
 `python-envs.terminal.autoActivationType: "off"`) to `vscode-settings.json`.
-README's "Stop VS Code auto-activating a `.venv`" recipe is the source.
+The `customization.md` recipe "Stop VS Code from activating a `.venv` in the terminal" is the source.
 
 ## 4. Quick stack → files cheatsheet
 
