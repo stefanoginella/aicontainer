@@ -57,26 +57,29 @@ These files are intentionally powerful. aic-launched `up`, `rebuild`, and
 generated VS Code initializer repeats that gate after the bootstrap caveat
 above. Ordinary data mounts under `/workspace` or `/home/vscode/.cache` pass
 without a prompt. A custom image, host bind, capability, namespace, device, or
-other host-boundary expansion must be reviewed once with `aic trust`; the
+other host-boundary expansion must be reviewed once with `aic trust`. So must
+files that run code in the container: `post-create.project.sh`,
+`shell-rc.zsh`, `p10k.zsh`, `statusline.*`, and the extensions or settings
+that `vscode-extensions` / `vscode-settings.json` add to `devcontainer.json`. The
 approval is stored outside the repository and is invalidated by any relevant
 change. Use `aic up --allow-unsafe` or `aic rebuild --allow-unsafe` for a
 reviewed one-off instead. Build contexts outside `.devcontainer/` cannot be
 covered by persistent trust and always need that per-run flag.
 
-| File | Use it to customize | aicontainer README section |
+| File | Use it to customize | aicontainer docs page |
 | --- | --- | --- |
-| `Dockerfile.project` | Extra OS packages / tools layered on the base image | *Installing extra tools* |
-| `docker-compose.override.yml` | literal app env and safe data mounts; host-variable pass-through, managed startup env, reviewed host access, or a `build:` for `Dockerfile.project` requires `aic trust` | *docker-compose.override.yml* |
-| `firewall-allowlist` | Extra outbound hosts allowed when the firewall is enabled (one host per line) | *Firewall* |
-| `chown-paths` | Named-volume mountpoints to re-own to `vscode` (one path per line) | *Persisting a named volume* |
-| `post-create.project.sh` | Commands to run on every container create (`lefthook install`, `npm ci`, …) | *Project-specific post-create steps* |
-| `vscode-extensions` | VS Code editor extensions to auto-install (one `publisher.name` id per line) | *Project-specific VS Code extensions & settings* |
-| `vscode-settings.json` | VS Code editor settings (a JSON object) | *Project-specific VS Code extensions & settings* |
-| `shell-rc.zsh` | Personal zsh startup (aliases, functions, prompt) sourced after the managed baseline | *Personal shell config* |
-| `p10k.zsh` | Personal powerlevel10k prompt config (`p10k configure` output) | *Personal shell config* |
-| `statusline.{sh,mjs,js,py}` | Personal Claude Code statusline script, run by the managed launcher | *Personal Claude Code statusline* |
+| `Dockerfile.project` | Extra OS packages / tools layered on the base image | [Installing extra tools](https://github.com/stefanoginella/aicontainer/blob/main/docs/user/extra-tools.md) |
+| `docker-compose.override.yml` | literal app env and safe data mounts; host-variable pass-through, managed startup env, reviewed host access, or a `build:` for `Dockerfile.project` requires `aic trust` | [Customization](https://github.com/stefanoginella/aicontainer/blob/main/docs/user/customization.md) |
+| `firewall-allowlist` | Extra outbound hosts allowed when the firewall is enabled (one host per line) | [Network allowlist](https://github.com/stefanoginella/aicontainer/blob/main/docs/user/network-allowlist.md) |
+| `chown-paths` | Named-volume mountpoints to re-own to `vscode` (one path per line) | [Customization](https://github.com/stefanoginella/aicontainer/blob/main/docs/user/customization.md) |
+| `post-create.project.sh` | Commands to run on every container create (`lefthook install`, `npm ci`, …) | [Customization](https://github.com/stefanoginella/aicontainer/blob/main/docs/user/customization.md) |
+| `vscode-extensions` | VS Code editor extensions to auto-install (one `publisher.name` id per line) | [Customization](https://github.com/stefanoginella/aicontainer/blob/main/docs/user/customization.md) |
+| `vscode-settings.json` | VS Code editor settings (a JSON object) | [Customization](https://github.com/stefanoginella/aicontainer/blob/main/docs/user/customization.md) |
+| `shell-rc.zsh` | Personal zsh startup (aliases, functions, prompt) sourced after the managed baseline | [Personal config](https://github.com/stefanoginella/aicontainer/blob/main/docs/user/personal-config.md) |
+| `p10k.zsh` | Personal powerlevel10k prompt config (`p10k configure` output) | [Personal config](https://github.com/stefanoginella/aicontainer/blob/main/docs/user/personal-config.md) |
+| `statusline.{sh,mjs,js,py}` | Personal Claude Code statusline script, run by the managed launcher | [Personal config](https://github.com/stefanoginella/aicontainer/blob/main/docs/user/personal-config.md) |
 
-Full docs: <https://github.com/stefanoginella/aicontainer#readme>
+Full docs: <https://github.com/stefanoginella/aicontainer/tree/main/docs>
 
 > **Need to override a setting aic already sets in `devcontainer.json`** (e.g. a
 > `terminal.*` value)? Put it in a workspace **`.vscode/settings.json`** at the

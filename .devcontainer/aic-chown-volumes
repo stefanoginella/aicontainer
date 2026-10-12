@@ -8,8 +8,8 @@
 #
 #   1. The hardcoded list below — aic's own auth/session/history volumes.
 #   2. Optional project-declared mountpoints, one path per line in
-#      /workspace/.devcontainer/chown-paths (see README "Persisting a named
-#      volume"). Only exact Docker named-volume mountpoints under /workspace/
+#      /workspace/.devcontainer/chown-paths (see docs/user/customization.md,
+#      "named volume"). Only exact Docker named-volume mountpoints under /workspace/
 #      or /home/vscode/.cache/ are honored.
 #
 # Targets are NEVER read from this script's arguments. The scoped sudoers entry
@@ -204,13 +204,13 @@ main() {
     exit 1
   fi
 
+  # ~/.config/gh and ~/.config/npm are image-baked symlinks into the per-project
+  # sessions volume, so its recursive chown already covers them.
   local d
   for d in /home/vscode/.shell-history \
            /home/vscode/.config/aic-auth/signing \
            /home/vscode/.config/aic-auth/semgrep \
-           /home/vscode/.aic-sessions \
-           /home/vscode/.config/gh \
-           /home/vscode/.config/npm; do
+           /home/vscode/.aic-sessions; do
     [ -e "$d" ] || [ -L "$d" ] || continue
     chown_safe "$d"
   done
