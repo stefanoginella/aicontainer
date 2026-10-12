@@ -29,53 +29,55 @@ scan_project_overrides () {
   [ -n "${AIC_NO_OVERRIDE_SCAN:-}" ] && return 0
   local ov=".devcontainer/docker-compose.override.yml"
   local df=".devcontainer/Dockerfile.project"
-  local findings=()
+  # An array. ShellCheck tracks a name across the whole file, so this name
+  # must differ from the findings file paths of the gate below.
+  local override_findings=()
 
   if [ -f "$ov" ]; then
     if grep -qE '^[[:space:]]*privileged:[[:space:]]*(true|yes)([[:space:]]|$)' "$ov"; then
-      findings+=("override: privileged: true — full host device access")
+      override_findings+=("override: privileged: true — full host device access")
     fi
     if grep -qE '^[[:space:]]*cap_add:' "$ov"; then
-      findings+=("override: cap_add — adds Linux capabilities (e.g. SYS_ADMIN)")
+      override_findings+=("override: cap_add — adds Linux capabilities (e.g. SYS_ADMIN)")
     fi
     if grep -qE '^[[:space:]]*(network_mode|pid|ipc|userns_mode):[[:space:]]*["'"'"']?host' "$ov"; then
-      findings+=("override: shares a host namespace (network/pid/ipc/userns: host)")
+      override_findings+=("override: shares a host namespace (network/pid/ipc/userns: host)")
     fi
     if grep -qE '^[[:space:]]*security_opt:' "$ov"; then
-      findings+=("override: security_opt — may disable seccomp/apparmor")
+      override_findings+=("override: security_opt — may disable seccomp/apparmor")
     fi
     if grep -qE '/(var/)?run/docker\.sock' "$ov"; then
-      findings+=("override: mounts the Docker socket — full host daemon control")
+      override_findings+=("override: mounts the Docker socket — full host daemon control")
     fi
     if grep -qE '^[[:space:]]*-[[:space:]]*"?/(:|etc|root|home|var|usr|boot|sys|proc)([/:]|$)' "$ov" \
        || grep -qE '^[[:space:]]*source:[[:space:]]*"?/(etc|root|home|var|usr|boot|sys|proc)?([/:]|$)' "$ov"; then
-      findings+=("override: binds a sensitive host path into the container")
+      override_findings+=("override: binds a sensitive host path into the container")
     fi
     if grep -qE '^[[:space:]]*(POST|BUILD):[[:space:]]*1[[:space:]]*$' "$ov"; then
-      findings+=("override: re-enables socket-proxy POST/BUILD — host container control (prefer 'aic sync --docker')")
+      override_findings+=("override: re-enables socket-proxy POST/BUILD — host container control (prefer 'aic sync --docker')")
     fi
     if grep -qE '^[[:space:]]*devices:' "$ov"; then
-      findings+=("override: devices — maps host devices into the container")
+      override_findings+=("override: devices — maps host devices into the container")
     fi
     if grep -qE '^[[:space:]]*(post_start|pre_stop):' "$ov"; then
-      findings+=("override: post_start/pre_stop — lifecycle hooks can run commands as privileged root")
+      override_findings+=("override: post_start/pre_stop — lifecycle hooks can run commands as privileged root")
     fi
   fi
 
   if [ -f "$df" ]; then
     if grep -qE '^[[:space:]]*FROM[[:space:]]' "$df" \
        && ! grep -qE '^[[:space:]]*FROM[[:space:]]+(ghcr\.io/stefanoginella/aicontainer|aicontainer-base)([:@[:space:]]|$)' "$df"; then
-      findings+=("Dockerfile.project: FROM is not the aicontainer base — sandbox hardening may be absent")
+      override_findings+=("Dockerfile.project: FROM is not the aicontainer base — sandbox hardening may be absent")
     fi
   fi
 
-  [ "${#findings[@]}" -eq 0 ] && return 0
+  [ "${#override_findings[@]}" -eq 0 ] && return 0
 
   local y r rst
   if [ -t 2 ]; then y=$'\033[33m'; r=$'\033[31m'; rst=$'\033[0m'; else y=""; r=""; rst=""; fi
   printf '%saic: project-owned devcontainer files request extra host access:%s\n' "$r" "$rst" >&2
   local f
-  for f in "${findings[@]}"; do printf '  %s!%s %s\n' "$y" "$rst" "$f" >&2; done
+  for f in "${override_findings[@]}"; do printf '  %s!%s %s\n' "$y" "$rst" "$f" >&2; done
   printf '%saic: these take effect when the container comes up. Review them if this repo is not fully trusted.%s\n' "$y" "$rst" >&2
   printf 'aic: (silence this scan with AIC_NO_OVERRIDE_SCAN=1)\n' >&2
 

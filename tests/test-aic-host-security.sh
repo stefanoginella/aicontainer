@@ -331,6 +331,7 @@ n=$(zshrc_line 'PATH=$_aic_path')
   || fail ".zshrc does not restore the full PATH after oh-my-zsh loads"
 grep -Fqx 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell zsh)"' "$zshrc" \
   || fail ".zshrc does not run the root-owned fnm"
+# shellcheck disable=SC2088 # '~/' is a literal grep pattern, not a path to expand
 if grep -Ev '^[[:space:]]*#' "$zshrc" | grep -Eq '~/|\$HOME|\$\{HOME'; then
   fail ".zshrc reads a file in the vscode-owned home"
 fi
@@ -1028,14 +1029,14 @@ out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" 
 echo "$out" | grep -q 'incomplete aicontainer install: lib/cli.mjs is missing' \
   || fail "an install without lib/ did not name the missing lib/cli.mjs"
 # A module that lib/cli.mjs imports is named too, not hidden behind Node's error.
-rm -rf "$broken_home/lib"
+rm -rf "${broken_home:?}/lib"
 cp -R "$ROOT/lib" "$broken_home/lib"
 rm -f "$broken_home/lib/project-identity.mjs"
 out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
   && fail "aic validate passed without lib/project-identity.mjs"
 echo "$out" | grep -q 'incomplete aicontainer install: lib/project-identity.mjs is missing' \
   || fail "an install without lib/project-identity.mjs did not name it"
-rm -rf "$broken_home/lib"
+rm -rf "${broken_home:?}/lib"
 cp -R "$ROOT/lib" "$broken_home/lib"
 rm -f "$broken_home/lib/validate-cli.mjs"
 out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
