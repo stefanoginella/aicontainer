@@ -1,6 +1,6 @@
 # Security review checklist
 
-Read this page before you change `aic`, the modules in `lib/aic/`, `lib/validate.mjs`, `lib/trust-hash.mjs`, `lib/docker-inspect.mjs`, `lib/project-identity.mjs`, `template/Dockerfile`, `template/aic-firewall`, the files in `template/hooks/`, the privileged helper scripts, or `.github/workflows/*.yml`.
+Read this page before you change `aic`, the modules in `lib/aic/`, `lib/validate.mjs`, `lib/trust-hash.mjs`, `lib/docker-inspect.mjs`, `lib/project-identity.mjs`, `template/Dockerfile`, `template/post-create.py` and the `template/post_create_*.py` modules, `template/aic-firewall`, the files in `template/hooks/`, the privileged helper scripts, or `.github/workflows/*.yml`.
 
 ## Security stance
 

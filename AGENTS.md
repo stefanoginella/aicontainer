@@ -59,6 +59,8 @@ Review a change to these files for security regressions. Read
 - `lib/validate.mjs`, `lib/trust-hash.mjs`, `lib/docker-inspect.mjs`,
   `lib/project-identity.mjs`
 - `template/Dockerfile`
+- `template/post-create.py` and `template/post_create_*.py` (the seed
+  sanitizer runs this code as root)
 - `template/aic-firewall`
 - `template/hooks/pre-tool-use.sh`, `template/hooks/opencode-guardrail.js`,
   `template/hooks/agent-status.py`
