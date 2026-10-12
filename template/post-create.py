@@ -181,6 +181,40 @@ CLAUDE_ALLOWED_FIELDS = frozenset({
     "messageIdleNotifThresholdMs",
 })
 
+# Claude's state file ($CLAUDE_CONFIG_DIR/.claude.json) lives in the writable
+# per-project tool home, so a previous session can leave keys in it that run
+# code or add context when Claude next starts. reset_claude_state() removes
+# them on every create and keeps everything else (onboarding, workspace trust,
+# caches, counters). The host's MCP choices come back through settings.json,
+# which is rewritten from the sanitized seed.
+#
+# Removed at the top level and in every projects.<path> entry: user/local MCP
+# servers, the grants that approve a workspace .mcp.json server or turn on a
+# built-in one, and MCP resources added as context. The denials
+# (disabledMcpjsonServers, disabledMcpServers) stay: they can only stop a
+# server, never start one.
+CLAUDE_STATE_GRANT_KEYS = (
+    "mcpServers",
+    "enabledMcpjsonServers", "enableAllProjectMcpServers",
+    "enabledMcpServers", "mcpContextUris",
+)
+# Removed at the top level only: Claude applies this `env` to its own process
+# environment at startup (NODE_OPTIONS, BASH_ENV, PATH, ... would run code),
+# and an API-key helper is a command.
+CLAUDE_STATE_TOPLEVEL_CODE_KEYS = ("env", "apiKeyHelper")
+CLAUDE_STATE_MAX_BYTES = 8 * 1024 * 1024
+# Claude picks its state file name from its environment (".claude.json" in
+# production, a suffixed name for another OAuth endpoint), so reset each one.
+# A ".config.json" in the same directory would load in place of all of them;
+# setup_claude() removes it.
+CLAUDE_STATE_FILES = (
+    ".claude.json", ".claude-staging-oauth.json",
+    ".claude-local-oauth.json", ".claude-custom-oauth.json",
+)
+# What a new project starts with (see refresh_ai_tools()). An unusable state
+# file is replaced with this, never kept or merged.
+CLAUDE_STATE_SEED = {"installMethod": "native"}
+
 # Codex config.toml: top-level scalars and tables to keep. We force
 # approval_policy / sandbox_mode / [hooks] regardless of what the host has.
 # [mcp_servers.*] is preserved even though some entries may reference host
@@ -464,6 +498,195 @@ def _replace_managed_file(path: Path, text: str) -> None:
         os.close(dir_fd)
 
 
+CLAUDE_RULES_RESET_PREFIX = ".rules.aic-reset-"
+
+
+def _list_directory(dir_fd: int) -> list[str]:
+    """List an open directory through a new open file of it.
+
+    os.listdir(fd) reads through a duplicate that shares the file position of
+    dir_fd, and on overlayfs it can return nothing after the directory changed
+    through dir_fd. A new open file of "." has its own position.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(".", flags, dir_fd=dir_fd)
+    try:
+        return os.listdir(fd)
+    finally:
+        os.close(fd)
+
+
+def _remove_tree_at(name: str, dir_fd: int) -> None:
+    """Delete one entry below an open directory without following a link.
+
+    A link or other non-directory is unlinked, never followed, so a link inside
+    the tree cannot send the delete outside it. A directory is opened with
+    O_NOFOLLOW, given back its owner bits (a previous session can remove them),
+    emptied the same way, and removed.
+    """
+    info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode):
+        os.unlink(name, dir_fd=dir_fd)
+        return
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    except PermissionError:
+        # Never follows: lchmod semantics, or no change at all.
+        if os.chmod not in os.supports_follow_symlinks:
+            raise
+        os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise OSError(f"directory changed while opening: {name}")
+        os.fchmod(fd, 0o700)
+        for child in _list_directory(fd):
+            _remove_tree_at(child, fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=dir_fd)
+
+
+def reset_claude_rules(claude_dir: Path) -> None:
+    """Empty Claude's user rules directory (~/.claude/rules/**/*.md).
+
+    Claude loads every rule file there into each session, like CLAUDE.md, so a
+    previous session could plant instructions in it. A link at `rules` is
+    removed, never followed. A real directory is renamed aside first, so
+    `rules` is empty as soon as the new one exists; the old tree is then
+    deleted without following any link inside it. Claude does not load the
+    dot-named aside name, and a later create retries one that could not be
+    deleted.
+    """
+    dir_fd = _open_directory_nofollow(claude_dir)
+    try:
+        try:
+            info = os.stat("rules", dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            info = None
+        if info is not None:
+            if stat.S_ISDIR(info.st_mode):
+                aside = f"{CLAUDE_RULES_RESET_PREFIX}{secrets.token_hex(8)}"
+                os.rename("rules", aside, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            else:
+                os.unlink("rules", dir_fd=dir_fd)
+        os.mkdir("rules", 0o700, dir_fd=dir_fd)
+        log(f"reset {claude_dir / 'rules'}")
+        for name in _list_directory(dir_fd):
+            if not name.startswith(CLAUDE_RULES_RESET_PREFIX):
+                continue
+            try:
+                _remove_tree_at(name, dir_fd)
+            except (OSError, RecursionError) as error:
+                log(f"warning: could not delete old rules {claude_dir / name}: {error}; "
+                    "Claude does not load it, and the next create retries")
+    finally:
+        os.close(dir_fd)
+
+
+class _UnusableClaudeState(ValueError):
+    """The Claude state file cannot be read safely or parsed as an object."""
+
+
+def _read_claude_state(path: Path) -> bytes | None:
+    """Read the Claude state file without following a link, or return None
+    when it is missing. Anything but a single-link regular file of a bounded
+    size is unusable."""
+    dir_fd = _open_directory_nofollow(path.parent)
+    try:
+        try:
+            info = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise _UnusableClaudeState("not a single-link regular file")
+        flags = (
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            fd = os.open(path.name, flags, dir_fd=dir_fd)
+        except OSError as error:
+            raise _UnusableClaudeState(f"cannot open: {error}") from error
+        try:
+            opened = os.fstat(fd)
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                    or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)):
+                raise _UnusableClaudeState("file changed while opening")
+            chunks: list[bytes] = []
+            size = 0
+            while size <= CLAUDE_STATE_MAX_BYTES:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+        finally:
+            os.close(fd)
+        if size > CLAUDE_STATE_MAX_BYTES:
+            raise _UnusableClaudeState(f"larger than {CLAUDE_STATE_MAX_BYTES} bytes")
+        return b"".join(chunks)
+    finally:
+        os.close(dir_fd)
+
+
+def _reject_json_constant(name: str) -> None:
+    raise ValueError(f"non-standard JSON constant {name}")
+
+
+def _strip_claude_state(state: dict) -> list[str]:
+    """Remove the keys that run code or start a server; return what went."""
+    removed: list[str] = []
+    for key in (*CLAUDE_STATE_GRANT_KEYS, *CLAUDE_STATE_TOPLEVEL_CODE_KEYS):
+        if key in state:
+            del state[key]
+            removed.append(key)
+    projects = state.get("projects")
+    if projects is None:
+        return removed
+    if not isinstance(projects, dict):
+        raise _UnusableClaudeState("projects is not a JSON object")
+    for project_path, project in projects.items():
+        if not isinstance(project, dict):
+            continue
+        for key in CLAUDE_STATE_GRANT_KEYS:
+            if key in project:
+                del project[key]
+                removed.append(f"projects[{project_path!r}].{key}")
+    return removed
+
+
+def reset_claude_state(path: Path) -> None:
+    """Remove MCP servers, MCP grants, and code-bearing keys from Claude's
+    state file before Claude can start (see CLAUDE_STATE_GRANT_KEYS).
+
+    Every other key is kept. A file that cannot be read safely (a link, a hard
+    link, a directory or other special file, too large) or parsed into a JSON
+    object is replaced with the new-project seed: the reset never follows it,
+    never keeps it, and never fails open. Only a failed write is an error. A
+    missing file is left to refresh_ai_tools(), which seeds it.
+    """
+    try:
+        data = _read_claude_state(path)
+        if data is None:
+            return
+        state = json.loads(data, parse_constant=_reject_json_constant)
+        if not isinstance(state, dict):
+            raise _UnusableClaudeState("not a JSON object")
+        removed = _strip_claude_state(state)
+        text = json.dumps(state, indent=2, allow_nan=False) + "\n"
+    except (ValueError, RecursionError) as error:  # JSONDecodeError/UnicodeDecodeError too
+        log(f"warning: replacing unusable Claude state {path} ({error}); "
+            "Claude onboarding and workspace trust start fresh, login is kept")
+        _replace_managed_file(path, json.dumps(CLAUDE_STATE_SEED, indent=2) + "\n")
+        return
+    if removed:
+        _replace_managed_file(path, text)
+        log(f"removed from {path}: {', '.join(removed)}")
+
+
 def _project_chown_paths() -> list[Path]:
     """Parse .devcontainer/chown-paths (project-owned, RO-mounted) into the
     list of extra volume mountpoints to re-own. Entries outside the prefix
@@ -574,9 +797,20 @@ def setup_claude() -> None:
 
     # User-level memory is project-local and reset to the managed note on every
     # create, preventing a prior autonomous session from planting instructions.
+    # The same holds for user rules (loaded like CLAUDE.md) and for MCP servers
+    # and other startup code in the state file. All of this runs before
+    # refresh_ai_tools() first starts Claude.
+    #
+    # Auto memory (projects/<path>/memory/MEMORY.md), skills, agents, commands,
+    # and plugins are kept on purpose: they are the project's working state.
+    # They can still carry planted text; the README threat model says so.
     _reset_managed_files(
         lambda: ensure_sandbox_memory(claude_dir / "CLAUDE.md"),
         write_settings,
+        lambda: reset_claude_rules(claude_dir),
+        # Claude reads a legacy .config.json in place of .claude.json.
+        lambda: _remove_managed_name(claude_dir / ".config.json"),
+        *(lambda name=name: reset_claude_state(claude_dir / name) for name in CLAUDE_STATE_FILES),
     )
 
     # Every session/history/customization path now lives in this whole
@@ -586,7 +820,7 @@ def setup_claude() -> None:
     # "statusline" is the conventional home for a statusline script's own state
     # (caches, counters). Precreate it so an overlay statusline can write there
     # on first render without special-casing a missing directory.
-    for dirname in ("projects", "skills", "agents", "commands", "plugins", "statusline"):
+    for dirname in ("projects", "skills", "agents", "commands", "rules", "plugins", "statusline"):
         (claude_dir / dirname).mkdir(exist_ok=True)
 
 
@@ -2098,14 +2332,15 @@ def refresh_ai_tools() -> None:
     if "claude-code" in ENABLED_TOOLS:
         # Claude's native updater records its install method in this ordinary
         # per-project state file. Seed only a missing file so a brand-new
-        # project does not emit a migration warning before self-healing; never
-        # replace or merge an existing user's state.
+        # project does not emit a migration warning before self-healing.
+        # setup_claude() already removed the MCP and startup-code keys from an
+        # existing file; nothing else in it is replaced or merged here.
         claude_state = CLAUDE_HOME / ".claude.json"
         if not claude_state.exists():
             try:
                 _safe_write_text(
                     claude_state,
-                    json.dumps({"installMethod": "native"}, indent=2) + "\n",
+                    json.dumps(CLAUDE_STATE_SEED, indent=2) + "\n",
                     create=True,
                 )
             except OSError as error:

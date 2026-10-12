@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -243,6 +244,301 @@ class ManagedFileResetTests(unittest.TestCase):
         with self.assertRaises(OSError):
             POST_CREATE._replace_managed_file(link / "CLAUDE.md", "text")
         self.assertFalse((self.claude_home / "CLAUDE.md").exists())
+
+    # --- Claude user rules -------------------------------------------------
+
+    def assert_empty_rules(self) -> None:
+        rules = self.claude_home / "rules"
+        self.assertTrue(rules.is_dir() and not rules.is_symlink(), rules)
+        self.assertEqual(list(rules.iterdir()), [])
+        leftovers = [p.name for p in self.claude_home.iterdir()
+                     if p.name.startswith(POST_CREATE.CLAUDE_RULES_RESET_PREFIX)]
+        self.assertEqual(leftovers, [])
+
+    def test_planted_rules_are_removed(self) -> None:
+        rules = self.claude_home / "rules"
+        (rules / "nested" / "deeper").mkdir(parents=True)
+        (rules / "planted.md").write_text(PLANTED)
+        (rules / "nested" / "deeper" / "planted.md").write_text(PLANTED)
+
+        self.run_setup()
+
+        self.assert_empty_rules()
+
+    def test_new_project_gets_an_empty_rules_dir(self) -> None:
+        self.run_setup()
+
+        self.assert_empty_rules()
+
+    def test_symlinked_rules_dir_is_replaced_and_its_target_kept(self) -> None:
+        planted_rules = self.outside / "rules"
+        planted_rules.mkdir()
+        (planted_rules / "planted.md").write_text(PLANTED)
+        (self.claude_home / "rules").symlink_to(planted_rules)
+
+        self.run_setup()
+
+        self.assert_empty_rules()
+        self.assertEqual((planted_rules / "planted.md").read_text(), PLANTED)
+
+    def test_links_inside_rules_are_removed_not_followed(self) -> None:
+        rules = self.claude_home / "rules"
+        rules.mkdir()
+        outside_dir = self.outside / "rules-target"
+        outside_dir.mkdir()
+        (outside_dir / "keep.md").write_text(PLANTED)
+        (rules / "file-link.md").symlink_to(self.planted)
+        (rules / "dir-link").symlink_to(outside_dir)
+        (rules / "dangling.md").symlink_to(self.outside / "never-created")
+        os.link(self.planted, rules / "hard-link.md")
+
+        self.run_setup()
+
+        self.assert_empty_rules()
+        self.assertEqual(self.planted.read_text(), PLANTED)
+        self.assertEqual(self.planted.stat().st_nlink, 1)
+        self.assertEqual((outside_dir / "keep.md").read_text(), PLANTED)
+        self.assertFalse((self.outside / "never-created").exists())
+
+    def test_rules_with_removed_write_bits_are_still_removed(self) -> None:
+        rules = self.claude_home / "rules"
+        locked = rules / "locked"
+        locked.mkdir(parents=True)
+        (locked / "planted.md").write_text(PLANTED)
+        locked.chmod(0o500)
+        rules.chmod(0o500)
+        self.addCleanup(lambda: [p.chmod(0o700) for p in (rules, locked) if p.exists()])
+
+        self.run_setup()
+
+        self.assert_empty_rules()
+
+    def test_unreadable_old_rules_do_not_block_the_reset(self) -> None:
+        # Without lchmod (Linux), a 0000 subdirectory cannot be emptied. The
+        # old tree then stays under the dot-named aside name, which Claude does
+        # not load; `rules` itself must still be a new, empty directory.
+        locked = self.claude_home / "rules" / "locked"
+        locked.mkdir(parents=True)
+        (locked / "planted.md").write_text(PLANTED)
+        locked.chmod(0)
+
+        def unlock() -> None:
+            for path in self.claude_home.glob(f"{POST_CREATE.CLAUDE_RULES_RESET_PREFIX}*/locked"):
+                path.chmod(0o700)
+        self.addCleanup(unlock)
+
+        self.run_setup()
+
+        rules = self.claude_home / "rules"
+        self.assertTrue(rules.is_dir() and not rules.is_symlink())
+        self.assertEqual(list(rules.iterdir()), [])
+
+    def test_old_rules_left_by_an_interrupted_reset_are_deleted(self) -> None:
+        leftover = self.claude_home / f"{POST_CREATE.CLAUDE_RULES_RESET_PREFIX}0123456789abcdef"
+        leftover.mkdir()
+        (leftover / "planted.md").write_text(PLANTED)
+
+        self.run_setup()
+
+        self.assert_empty_rules()
+
+    # --- Claude state file (.claude.json) ---------------------------------
+
+    def claude_state(self) -> Path:
+        return self.claude_home / ".claude.json"
+
+    def test_mcp_servers_and_grants_are_removed_and_other_state_kept(self) -> None:
+        kept_project = {
+            "hasTrustDialogAccepted": True,
+            "allowedTools": [],
+            "disabledMcpjsonServers": ["refused"],
+            "projectOnboardingSeenCount": 3,
+        }
+        planted_server = {"command": "sh", "args": ["-c", PLANTED]}
+        state = {
+            "numStartups": 7,
+            "installMethod": "native",
+            "hasCompletedOnboarding": True,
+            "oauthAccount": {"emailAddress": "user@example.invalid"},
+            "disabledMcpServers": ["off"],
+            "mcpServers": {"planted": planted_server},
+            "enabledMcpServers": ["builtin"],
+            "env": {"NODE_OPTIONS": f"--require /tmp/{PLANTED}.js"},
+            "apiKeyHelper": f"/tmp/{PLANTED}",
+            "projects": {
+                "/workspace": {
+                    **kept_project,
+                    "mcpServers": {"planted": planted_server},
+                    "enabledMcpjsonServers": ["planted"],
+                    "enableAllProjectMcpServers": True,
+                    "enabledMcpServers": ["builtin"],
+                    "mcpContextUris": [f"planted://{PLANTED}"],
+                },
+                "/other": "not an object",
+            },
+        }
+        self.claude_state().write_text(json.dumps(state))
+
+        self.run_setup()
+
+        self.assert_fresh_managed_file(self.claude_state())
+        result = json.loads(self.claude_state().read_text())
+        self.assertEqual(result, {
+            "numStartups": 7,
+            "installMethod": "native",
+            "hasCompletedOnboarding": True,
+            "oauthAccount": {"emailAddress": "user@example.invalid"},
+            "disabledMcpServers": ["off"],
+            "projects": {"/workspace": kept_project, "/other": "not an object"},
+        })
+
+    def test_suffixed_state_files_are_reset_too(self) -> None:
+        planted = {"keep": 1, "mcpServers": {"planted": {"command": PLANTED}}}
+        for name in POST_CREATE.CLAUDE_STATE_FILES:
+            (self.claude_home / name).write_text(json.dumps(planted))
+
+        self.run_setup()
+
+        for name in POST_CREATE.CLAUDE_STATE_FILES:
+            self.assertEqual(json.loads((self.claude_home / name).read_text()), {"keep": 1}, name)
+
+    def test_legacy_config_json_that_loads_in_place_of_state_is_removed(self) -> None:
+        legacy = self.claude_home / ".config.json"
+        with self.subTest("file"):
+            legacy.write_text(json.dumps({"mcpServers": {"planted": {"command": PLANTED}}}))
+            self.run_setup()
+            self.assertFalse(os.path.lexists(legacy))
+        with self.subTest("symlink"):
+            legacy.symlink_to(self.planted)
+            self.run_setup()
+            self.assertFalse(os.path.lexists(legacy))
+            self.assertEqual(self.planted.read_text(), PLANTED)
+
+    def test_clean_state_file_is_not_rewritten(self) -> None:
+        self.claude_state().write_text('{"numStartups": 1, "projects": {"/workspace": {}}}\n')
+        self.claude_state().chmod(0o600)
+        before = self.claude_state().stat()
+
+        self.run_setup()
+
+        after = self.claude_state().stat()
+        self.assertEqual((before.st_ino, before.st_mtime_ns), (after.st_ino, after.st_mtime_ns))
+
+    def test_missing_state_file_is_left_for_the_updater_seed(self) -> None:
+        self.run_setup()
+
+        self.assertFalse(os.path.lexists(self.claude_state()))
+
+    def assert_seed_state(self) -> None:
+        self.assert_fresh_managed_file(self.claude_state())
+        self.assertEqual(json.loads(self.claude_state().read_text()), POST_CREATE.CLAUDE_STATE_SEED)
+
+    def test_unusable_state_contents_are_replaced_with_the_seed(self) -> None:
+        planted = json.dumps({"mcpServers": {"planted": {"command": PLANTED}}})
+        cases = {
+            "invalid JSON": planted[:-1].encode(),
+            "invalid UTF-8": b'{"mcpServers": "\xff' + PLANTED.encode() + b'"}',
+            "non-standard constant": planted[:-1].encode() + b', "n": NaN}',
+            "array": f"[{planted}]".encode(),
+            "projects not an object": b'{"projects": ["' + PLANTED.encode() + b'"]}',
+            "oversized": b'{"pad": "' + b"x" * POST_CREATE.CLAUDE_STATE_MAX_BYTES + b'"}',
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                self.claude_state().write_bytes(payload)
+                output = self.run_setup()
+                self.assert_seed_state()
+                self.assertIn("replacing unusable Claude state", output)
+
+    def test_state_with_a_byte_order_mark_is_stripped_and_rewritten(self) -> None:
+        payload = {"numStartups": 2, "mcpServers": {"planted": {"command": PLANTED}}}
+        self.claude_state().write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode())
+
+        self.run_setup()
+
+        self.assert_fresh_managed_file(self.claude_state())
+        self.assertFalse(self.claude_state().read_bytes().startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(json.loads(self.claude_state().read_text()), {"numStartups": 2})
+
+    def test_symlinked_state_file_is_replaced_and_its_target_kept(self) -> None:
+        target = self.outside / "claude.json"
+        target.write_text(json.dumps({"mcpServers": {"planted": {"command": PLANTED}}}))
+        original = target.read_text()
+        self.claude_state().symlink_to(target)
+
+        self.run_setup()
+
+        self.assert_seed_state()
+        self.assertEqual(target.read_text(), original)
+
+    def test_hard_linked_state_file_is_replaced_and_other_link_kept(self) -> None:
+        other = self.tool_homes / "other-claude.json"
+        other.write_text(json.dumps({"mcpServers": {"planted": {"command": PLANTED}}}))
+        original = other.read_text()
+        os.link(other, self.claude_state())
+
+        self.run_setup()
+
+        self.assert_seed_state()
+        self.assertEqual(other.read_text(), original)
+
+    def test_special_state_files_are_replaced(self) -> None:
+        with self.subTest("directory"):
+            self.claude_state().mkdir()
+            (self.claude_state() / "planted.md").write_text(PLANTED)
+            self.run_setup()
+            self.assert_seed_state()
+        with self.subTest("fifo"):
+            self.claude_state().unlink()
+            os.mkfifo(self.claude_state())
+            self.run_setup()
+            self.assert_seed_state()
+
+    def test_failed_state_write_still_resets_rules_and_memory(self) -> None:
+        self.claude_state().write_text(json.dumps({"mcpServers": {"x": {}}}))
+        (self.claude_home / "CLAUDE.md").write_text(PLANTED)
+        (self.claude_home / "rules").mkdir()
+        (self.claude_home / "rules" / "planted.md").write_text(PLANTED)
+        original = POST_CREATE._replace_managed_file
+
+        def fail_state(path: Path, text: str) -> None:
+            if path.name == ".claude.json":
+                raise OSError("blocked")
+            original(path, text)
+
+        with mock.patch.object(POST_CREATE, "_replace_managed_file", side_effect=fail_state), \
+                self.assertRaises(OSError), redirect_stderr(io.StringIO()):
+            POST_CREATE.setup_claude()
+
+        self.assert_fresh_managed_file(self.claude_home / "CLAUDE.md")
+        self.assert_empty_rules()
+
+    # --- What is kept on purpose -------------------------------------------
+
+    def test_auto_memory_skills_and_commands_are_kept(self) -> None:
+        kept = [
+            self.claude_home / "projects" / "-workspace" / "memory" / "MEMORY.md",
+            self.claude_home / "skills" / "kept" / "SKILL.md",
+            self.claude_home / "commands" / "kept.md",
+        ]
+        for path in kept:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(PLANTED)
+
+        self.run_setup()
+
+        for path in kept:
+            self.assertEqual(path.read_text(), PLANTED, path)
+
+    def test_codex_rules_are_not_reset(self) -> None:
+        # Codex rules are command-approval policy, not instructions; they stay.
+        rule = self.codex_home / "rules" / "default.rules"
+        rule.parent.mkdir()
+        rule.write_text('prefix_rule(pattern=["git"], decision="allow")\n')
+
+        self.run_setup()
+
+        self.assertTrue(rule.is_file())
 
 
 class MainStepIsolationTests(unittest.TestCase):

@@ -576,14 +576,52 @@ with the parent opened one component at a time without following links. A
 directory at the name is moved aside first. A previous session owns these
 homes, so never "fix" this into an in-place write: a symlink or hard link would
 then keep its planted text. Names that load in place of or over a managed file
-(Codex `AGENTS.override.md`, OpenCode `config.json`/`opencode.jsonc`) are
-removed. `_ensure_tool_home()` replaces a tool home (or `tool-homes/`) that is
-a link, never its target, and restores the owner's write bit. Load-bearing:
+(Codex `AGENTS.override.md`, Claude `.config.json`, OpenCode
+`config.json`/`opencode.jsonc`) are removed. `_ensure_tool_home()` replaces a
+tool home (or `tool-homes/`) that is a link, never its target, and restores the
+owner's write bit.
+
+Two more Claude surfaces load before any prompt, so `setup_claude()` resets
+them too:
+
+- **User rules** (`~/.claude/rules/**/*.md`, loaded like `CLAUDE.md`).
+  `reset_claude_rules()` removes a link at `rules` (never its target) or renames
+  a real directory aside, creates a new empty `rules`, and then deletes the old
+  tree with fd-relative calls that unlink every link inside it and never follow
+  one. A tree it cannot delete stays under the dot-named aside name, which
+  Claude does not load, and the next create tries again.
+- **The state file** (`$CLAUDE_CONFIG_DIR/.claude.json` and its suffixed
+  variants in `CLAUDE_STATE_FILES`). `reset_claude_state()` removes MCP
+  servers, the grants that start a server (`enabledMcpjsonServers`,
+  `enableAllProjectMcpServers`, `enabledMcpServers`) and `mcpContextUris` at the
+  top level and in every `projects.<path>`, plus the top-level `env` (Claude
+  applies it to its own process) and `apiKeyHelper`. All other state stays
+  (onboarding, workspace trust, caches). The denials
+  (`disabledMcpjsonServers`, `disabledMcpServers`) stay too: they can only
+  stop a server. The file is read with no-follow, inode-checked, bounded reads;
+  a link, a hard link, a special file, an oversized file, or content that does
+  not parse as a JSON object is replaced with the new-project seed, never kept
+  or merged. Only a failed write is a step error. The host's MCP choices come
+  back through `settings.json` from the sanitized seed.
+
+Kept on purpose, and documented in the README threat model as able to carry
+planted text: Claude auto memory (`projects/<path>/memory/MEMORY.md`), skills,
+agents/commands, plugins (with their hooks), and Codex skills/prompts. They
+are the project's working state; resetting them would delete user work. Codex
+`rules/` is also kept: it holds command-approval policy (`prefix_rule`), not
+instructions, and `approval_policy = "never"` is forced anyway. Workspace
+`.mcp.json` servers are repository content: in the managed bypass mode Claude
+can approve them without a prompt unless they are denied, and newer Claude
+versions keep approvals in the workspace `.claude/settings.local.json`. Neither
+is in a tool home.
+
+Load-bearing:
 
 - In each `setup_*`, `_reset_managed_files()` attempts every reset even when
   one fails, so a blocked config file cannot skip the memory reset.
 - The `setup_*` resets run before `refresh_ai_tools()`: the updaters start the
-  tools, which must not load a previous session's settings or memory.
+  tools, which must not load a previous session's settings, memory, rules, or
+  MCP servers.
   `lock_config()` also runs before it, so a slow network cannot hold back the
   Git identity and the root-locked config.
 - `main()` runs every step through `_run_step()`, so one failure cannot skip

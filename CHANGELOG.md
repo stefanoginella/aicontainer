@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Planted Claude rules no longer survive a rebuild.** Each create empties
+  `~/.claude/rules/`; a link there or inside it is removed, never followed.
+  (post-create.py)
+
+- **Planted Claude MCP servers no longer survive a rebuild.** Each create
+  removes MCP servers, MCP approvals, and `env` from Claude's state file and
+  keeps onboarding and trust. Auto memory (`MEMORY.md`) is kept by design.
+  (post-create.py)
+
 - **`aic-firewall enable` now cuts connections opened before it.** An outbound
   session started earlier to a host off the allowlist kept running. Replies to
   sessions that started from outside still pass. (aic-firewall)

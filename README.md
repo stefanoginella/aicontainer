@@ -38,7 +38,7 @@ shown automatically at the end of every `aic up`).
 | Package-manager caches | **No** — container-local volumes, not your host caches. |
 | Clipboard / browser | **No** — nothing bridged. |
 | `.env*` files | **Best-effort only.** Your project's own `.env` is physically in `/workspace`. The [PreToolUse hook](#whats-in-the-box) refuses the obvious reads, but it matches file names in the tool call, so it is not a boundary: keep secrets you cannot lose out of the project directory. |
-| Session transcripts, prompt history, user-level skills/plugins/instructions | Persist in a **path-unique per-project volume**, never written back to your host home or shared with another checkout. See [Multi-project model](#multi-project-model). |
+| Session transcripts, prompt history, auto memory, user-level skills/plugins | Persist in a **path-unique per-project volume**, never written back to your host home or shared with another checkout. User-level instructions, settings, Claude rules, and Claude MCP servers are reset on each create. See [Multi-project model](#multi-project-model). |
 | Host Docker daemon | **Object APIs off by default**: only proxy ping/version remain. `--docker-read` opts into sensitive object/inspect/log/file APIs; `--docker` opts into read-write host-daemon control for testcontainers / in-container Compose. See [Threat model](#threat-model). |
 | **Outbound network** | **Mostly open by default.** Reaches the internet, your LAN, and services on your host machine (including ones bound to `127.0.0.1`, through `host.docker.internal` on Docker Desktop and OrbStack); IPv4/IPv6 link-local and common cloud-provider metadata endpoints are blocked on every create. Opt in to the [allowlist](#opt-in-network-allowlist) to restrict the rest. |
 
@@ -922,18 +922,21 @@ checkouts with the same folder name no longer collide. The legacy container-side
 ## Multi-project model
 
 > **Your work survives without crossing projects.** Claude/Codex transcripts and
-> prompt history, OpenCode's database/checkpoints, and user-level instruction,
-> skill, command, rule, prompt, and plugin surfaces live in a path-unique
-> **per-project named volume** (`aic-<folder>-<path-hash>_aic-sessions`). They
-> survive `up`/`rebuild`, are never written into the host home, and are removed
-> only by the explicitly confirmed `aic destroy`.
+> prompt history, OpenCode's database/checkpoints, Claude auto memory, and
+> user-level skill, agent, command, prompt, and plugin surfaces live in a
+> path-unique **per-project named volume** (`aic-<folder>-<path-hash>_aic-sessions`).
+> They survive `up`/`rebuild`, are never written into the host home, and are
+> removed only by the explicitly confirmed `aic destroy`. Each create resets the
+> parts that load before your first prompt: user-level `CLAUDE.md`/`AGENTS.md`,
+> tool settings, Claude rules, and Claude MCP servers (see
+> [Config seeding](#config-seeding-from-the-host)).
 
 | Data | Scope | Storage |
 |---|---|---|
 | Claude/Codex/OpenCode login state; `gh` and npm login entries; Semgrep login; sandbox signing key | **Global** | Fixed subpaths of `aic-auth-global` |
 | Shell command history entered inside aicontainer | **Global** | `aic-shell-history` (host history is never mounted) |
 | Claude/Codex transcripts and prompt history | **Per-project** | `<path-unique-project>_aic-sessions` |
-| Claude/Codex user config, memory, skills, agents/commands, rules/prompts, plugins | **Per-project** | Whole tool homes below the same sessions volume |
+| Claude/Codex user config, memory, skills, agents/commands, rules/prompts, plugins | **Per-project** | Whole tool homes below the same sessions volume. Reset on each create: `CLAUDE.md`/`AGENTS.md`, settings, Claude `rules/`, and Claude MCP servers. Kept: auto memory (`MEMORY.md`), skills, agents/commands, plugins, Codex rules/prompts |
 | OpenCode config/instructions, session db, storage, and snapshots | **Per-project** | Same sessions volume; its two credential files are synchronized globally |
 | `gh` config (`config.yml`: aliases, pager, editor, …) and npm settings (`npmrc`: registry, `script-shell`, …) | **Per-project** | Same sessions volume; only the login entries are synchronized globally |
 | Sanitized host preferences | **Per-project, regenerated** | `<path-unique-project>_aic-sanitized-seed`, read-only to the agent |
@@ -1032,7 +1035,12 @@ on recreate; root-managed policy remains separate from those writable homes.
 Each create also replaces the user-level `CLAUDE.md`/`AGENTS.md` with aic's
 sandbox note, also when an earlier session made it a link, and removes Codex
 `AGENTS.override.md` and OpenCode `opencode.jsonc`/`config.json` from the tool
-homes. Keep lasting instructions in the repository's own `CLAUDE.md`/`AGENTS.md`.
+homes. It also empties Claude's user `rules/` directory, and removes MCP
+servers, MCP approvals, and `env` from Claude's state file (`.claude.json`);
+onboarding, workspace trust, and the other state stay. Your host MCP servers
+come back from the sanitized seed. Auto memory (`MEMORY.md`), skills,
+agents/commands, and plugins are kept, because they are the project's working
+state. Keep lasting instructions in the repository's own `CLAUDE.md`/`AGENTS.md`.
 VS Code opens a terminal only after this setup is done, which includes the
 AI-tool update, so the first open after a rebuild can take a minute or more.
 
@@ -1177,6 +1185,18 @@ there is no live unlock/update primitive.
     entirely and write `.git/config.worktree`. If an agent could have been
     compromised in a checkout, review `.git/config` and
     `.git/config.worktree` on the host once.
+- **Planted text in project tool state**: each create resets the parts of the
+  tool homes that load before your first prompt (user-level
+  `CLAUDE.md`/`AGENTS.md`, tool settings, Claude `rules/`, and MCP servers,
+  MCP approvals, and `env` in Claude's state file). The rest persists in the
+  project's volume and can carry text or code that an earlier session
+  planted: Claude auto memory (`~/.claude/projects/*/memory/MEMORY.md`),
+  skills, agents/commands, plugins (with their hooks), and Codex
+  skills/prompts. It never reaches another project. If an agent in a project
+  could have been compromised, read these before you continue there, or start
+  fresh with `aic destroy`. A workspace `.mcp.json` is repository content:
+  in bypass mode Claude can start its servers without asking, so review it
+  like any other code in the checkout.
 - **Commands you run in a container shell**: shell startup runs only
   root-owned code, but after startup `PATH` starts with tool directories the
   agent can write (`~/.local/bin`, fnm's Node versions), because the AI CLIs

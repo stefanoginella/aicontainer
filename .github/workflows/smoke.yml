@@ -762,6 +762,29 @@ jobs:
             printf "%s\n" "$marker" > "$HOME/.codex/AGENTS.override.md"
             mkdir -p "$HOME/.codex/plugins/aic-project-a"
             printf "%s\n" "$marker" > "$HOME/.codex/plugins/aic-project-a/probe"
+            # Claude user rules load like CLAUDE.md. A link inside rules must
+            # be removed, never followed: its target has to survive.
+            mkdir -p "$HOME/.claude/rules/nested"
+            printf "%s\n" "$marker" > "$HOME/.claude/rules/nested/aic-project-a.md"
+            ln -s "$planted_link" "$HOME/.claude/rules/aic-link.md"
+            # MCP servers, their grants, and env in the Claude state file run
+            # code when Claude starts. Other state must stay.
+            state="$HOME/.claude/.claude.json"
+            [ -f "$state" ] || printf "{}\n" > "$state"
+            jq --arg m "$marker" "
+              .mcpServers = {aicplanted: {command: \"sh\", args: [\"-c\", \$m]}}
+              | .env = {AIC_PLANTED: \$m}
+              | .hasCompletedOnboarding = true
+              | .projects[\"/workspace\"].mcpServers = {aicplanted: {command: \"sh\", args: [\"-c\", \$m]}}
+              | .projects[\"/workspace\"].enabledMcpjsonServers = [\$m]
+              | .projects[\"/workspace\"].enableAllProjectMcpServers = true
+            " "$state" > "$state.aic-smoke"
+            mv -f "$state.aic-smoke" "$state"
+            # Claude reads a legacy .config.json in place of .claude.json.
+            cp "$state" "$HOME/.claude/.config.json"
+            # Auto memory is kept on purpose (documented as a residual risk).
+            mkdir -p "$HOME/.claude/projects/-workspace/memory"
+            printf "%s\n" "$marker" > "$HOME/.claude/projects/-workspace/memory/MEMORY.md"
           '
           devcontainer up --workspace-folder . --remove-existing-container
           devcontainer exec --workspace-folder . bash -lc '
@@ -798,6 +821,25 @@ jobs:
             fi
             [ ! -e "$HOME/.codex/AGENTS.override.md" ] && [ ! -L "$HOME/.codex/AGENTS.override.md" ] \
               || { echo "FAIL: planted Codex AGENTS.override.md survived the recreate"; exit 1; }
+            rules="$HOME/.claude/rules"
+            [ -d "$rules" ] && [ ! -L "$rules" ] && [ -z "$(ls -A "$rules")" ] \
+              || { echo "FAIL: planted Claude rules survived the recreate"; ls -lA "$rules"; exit 1; }
+            state="$HOME/.claude/.claude.json"
+            if grep -Fq "$marker" "$state"; then
+              echo "FAIL: planted MCP server or env survived in the Claude state file"; exit 1
+            fi
+            jq -e "
+              .mcpServers == null and .env == null
+              and .projects[\"/workspace\"].mcpServers == null
+              and .projects[\"/workspace\"].enabledMcpjsonServers == null
+              and .projects[\"/workspace\"].enableAllProjectMcpServers == null
+              and .hasCompletedOnboarding == true
+            " "$state" >/dev/null \
+              || { echo "FAIL: Claude state reset removed the wrong keys"; exit 1; }
+            [ ! -e "$HOME/.claude/.config.json" ] && [ ! -L "$HOME/.claude/.config.json" ] \
+              || { echo "FAIL: planted Claude .config.json survived the recreate"; exit 1; }
+            grep -Fqx "$marker" "$HOME/.claude/projects/-workspace/memory/MEMORY.md" \
+              || { echo "FAIL: Claude auto memory (MEMORY.md) was not kept"; exit 1; }
             for managed in "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
                            "$HOME/.codex/AGENTS.md" "$HOME/.codex/config.toml"; do
               # Resolve only the tool-home link, never the managed file itself.
@@ -815,7 +857,7 @@ jobs:
             for child in "$HOME/.config/aic-auth"/*; do
               case "$(basename "$child")" in signing|semgrep) ;; *) echo "FAIL: broad auth-root child exposed: $child"; exit 1 ;; esac
             done
-            echo "OK: managed memory/config reset on recreate, symlinks and hard links included; project-local skills/plugins persist only here"
+            echo "OK: managed memory/config, Claude rules, and Claude MCP state reset on recreate, symlinks and hard links included; auto memory and project-local skills/plugins persist only here"
           '
           mkdir -p /tmp/proj-b
           git -C /tmp/proj-b init -q
@@ -845,7 +887,8 @@ jobs:
             marker=AIC_PROJECT_A_INJECTION
             for path in "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
                         "$HOME/.claude/skills" "$HOME/.claude/agents" \
-                        "$HOME/.claude/commands" "$HOME/.claude/plugins" \
+                        "$HOME/.claude/commands" "$HOME/.claude/rules" \
+                        "$HOME/.claude/plugins" \
                         "$HOME/.codex/AGENTS.md" "$HOME/.codex/config.toml" \
                         "$HOME/.codex/skills" "$HOME/.codex/rules" \
                         "$HOME/.codex/prompts" "$HOME/.codex/plugins"; do
