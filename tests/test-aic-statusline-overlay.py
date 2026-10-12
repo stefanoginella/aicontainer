@@ -12,12 +12,15 @@ verbatim code file be installed at all.
 
 from __future__ import annotations
 
+import importlib
 import importlib.machinery
 import importlib.util
 import io
 import json
 import re
+import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -26,12 +29,16 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SPEC = importlib.util.spec_from_file_location(
-    "aic_post_create_statusline", ROOT / "template" / "post-create.py"
-)
-assert SPEC is not None and SPEC.loader is not None
-POST_CREATE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(POST_CREATE)
+# Load the template modules as the aic_post_create package, as in the image
+# (/opt/aic-post-create/aic_post_create/). Patch a name on the module that
+# reads it. Never write bytecode into template/.
+sys.dont_write_bytecode = True
+PACKAGE = types.ModuleType("aic_post_create")
+PACKAGE.__path__ = [str(ROOT / "template")]
+sys.modules["aic_post_create"] = PACKAGE
+COMMON = importlib.import_module("aic_post_create.post_create_common")
+SEEDS = importlib.import_module("aic_post_create.post_create_seeds")
+OVERLAYS = importlib.import_module("aic_post_create.post_create_overlays")
 
 LOADER = importlib.machinery.SourceFileLoader(
     "aic_lock_user_config_statusline", str(ROOT / "template" / "aic-lock-user-config")
@@ -72,7 +79,7 @@ class FixedTableAlignmentTests(unittest.TestCase):
             for t in LOCK.TARGETS
             if t.dest_dir.as_posix() == MANAGED_DIR
         }
-        variants = {name: staging for name, staging in POST_CREATE.STATUSLINE_VARIANTS}
+        variants = {name: staging for name, staging in OVERLAYS.STATUSLINE_VARIANTS}
         self.assertEqual(
             sorted(lock_targets), sorted(variants),
             "post-create STATUSLINE_VARIANTS and aic-lock-user-config TARGETS diverged",
@@ -88,7 +95,7 @@ class FixedTableAlignmentTests(unittest.TestCase):
             self.assertEqual(
                 lock_targets[name].staging.parent.as_posix(), "/home/vscode",
             )
-            self.assertEqual(staging.parent, POST_CREATE.HOME)
+            self.assertEqual(staging.parent, COMMON.HOME)
 
     def test_launcher_handles_every_variant_and_nothing_else(self) -> None:
         launcher = DOCKERFILE.split("cat > /usr/local/bin/aic-statusline", 1)
@@ -96,7 +103,7 @@ class FixedTableAlignmentTests(unittest.TestCase):
         body = launcher[1].split("STATUSLINE_EOF", 2)[1]
         referenced = set(re.findall(r'\$dir/(statusline\.[a-z]+)', body))
         self.assertEqual(
-            referenced, {name for name, _ in POST_CREATE.STATUSLINE_VARIANTS},
+            referenced, {name for name, _ in OVERLAYS.STATUSLINE_VARIANTS},
             "the launcher and STATUSLINE_VARIANTS support different extensions",
         )
         # Every dispatch is an exec of a hardcoded interpreter against a
@@ -111,51 +118,51 @@ class FixedTableAlignmentTests(unittest.TestCase):
         self.assertIn("/usr/local/bin/aic-statusline", DOCKERFILE.split("chown -R root:root")[-1])
 
     def test_command_written_into_settings_is_the_fixed_launcher(self) -> None:
-        self.assertEqual(POST_CREATE.STATUSLINE_COMMAND, "/usr/local/bin/aic-statusline")
-        self.assertEqual(POST_CREATE.STATUSLINE_MANAGED_DIR.as_posix(), MANAGED_DIR)
+        self.assertEqual(OVERLAYS.STATUSLINE_COMMAND, "/usr/local/bin/aic-statusline")
+        self.assertEqual(OVERLAYS.STATUSLINE_MANAGED_DIR.as_posix(), MANAGED_DIR)
 
 
 class HostBoundaryTests(unittest.TestCase):
     def test_host_statusline_field_is_still_dropped_by_the_sanitizer(self) -> None:
         """The overlay must not become a reason to seed the host command string."""
-        self.assertNotIn("statusLine", POST_CREATE.CLAUDE_ALLOWED_FIELDS)
-        with mock.patch.object(POST_CREATE, "RAW_HOST_SEED", Path("/nonexistent")):
+        self.assertNotIn("statusLine", SEEDS.CLAUDE_ALLOWED_FIELDS)
+        with mock.patch.object(SEEDS, "RAW_HOST_SEED", Path("/nonexistent")):
             with redirect_stderr(io.StringIO()):
-                self.assertEqual(POST_CREATE._sanitize_claude_seed(), {})
+                self.assertEqual(SEEDS._sanitize_claude_seed(), {})
 
     def test_sanitizer_reads_only_fixed_seed_filenames(self) -> None:
         copied: list[tuple[str, str]] = []
         with mock.patch.object(
-            POST_CREATE, "_copy_verbatim_seed",
+            SEEDS, "_copy_verbatim_seed",
             lambda name, src: copied.append((name, src.as_posix())),
-        ), mock.patch.object(POST_CREATE, "_write_sanitized_seed", lambda *a: None), \
-                mock.patch.object(POST_CREATE.os, "geteuid", lambda: 0), \
-                mock.patch.object(POST_CREATE.os, "chmod", lambda *a: None), \
-                mock.patch.object(POST_CREATE, "_sanitize_claude_seed", dict), \
-                mock.patch.object(POST_CREATE, "_sanitize_codex_seed", dict), \
-                mock.patch.object(POST_CREATE, "_sanitize_opencode_seed", dict), \
-                mock.patch.object(POST_CREATE, "_sanitize_git_seed", dict), \
+        ), mock.patch.object(SEEDS, "_write_sanitized_seed", lambda *a: None), \
+                mock.patch.object(SEEDS.os, "geteuid", lambda: 0), \
+                mock.patch.object(SEEDS.os, "chmod", lambda *a: None), \
+                mock.patch.object(SEEDS, "_sanitize_claude_seed", dict), \
+                mock.patch.object(SEEDS, "_sanitize_codex_seed", dict), \
+                mock.patch.object(SEEDS, "_sanitize_opencode_seed", dict), \
+                mock.patch.object(SEEDS, "_sanitize_git_seed", dict), \
                 redirect_stderr(io.StringIO()):
-            self.assertEqual(POST_CREATE.sanitize_seeds(), 0)
-        seed_dir = (POST_CREATE.RAW_HOST_SEED / "aic-config").as_posix()
-        for name, _ in POST_CREATE.STATUSLINE_VARIANTS:
+            self.assertEqual(SEEDS.sanitize_seeds(), 0)
+        seed_dir = (SEEDS.RAW_HOST_SEED / "aic-config").as_posix()
+        for name, _ in SEEDS.STATUSLINE_VARIANTS:
             self.assertIn((name, f"{seed_dir}/{name}"), copied)
         # No glob/discovery: only the fixed overlay names are ever copied.
         self.assertEqual(
             sorted(name for name, _ in copied),
-            sorted(["p10k.zsh", "shell-rc.zsh", *(n for n, _ in POST_CREATE.STATUSLINE_VARIANTS)]),
+            sorted(["p10k.zsh", "shell-rc.zsh", *(n for n, _ in SEEDS.STATUSLINE_VARIANTS)]),
         )
 
     def _run_sanitizer(self, raw: Path, sanitized: Path) -> int:
-        with mock.patch.object(POST_CREATE, "RAW_HOST_SEED", raw), \
-                mock.patch.object(POST_CREATE, "SANITIZED_HOST_SEED", sanitized), \
-                mock.patch.object(POST_CREATE.os, "geteuid", lambda: 0), \
-                mock.patch.object(POST_CREATE, "_sanitize_claude_seed", dict), \
-                mock.patch.object(POST_CREATE, "_sanitize_codex_seed", dict), \
-                mock.patch.object(POST_CREATE, "_sanitize_opencode_seed", dict), \
-                mock.patch.object(POST_CREATE, "_sanitize_git_seed", dict), \
+        with mock.patch.object(SEEDS, "RAW_HOST_SEED", raw), \
+                mock.patch.object(SEEDS, "SANITIZED_HOST_SEED", sanitized), \
+                mock.patch.object(SEEDS.os, "geteuid", lambda: 0), \
+                mock.patch.object(SEEDS, "_sanitize_claude_seed", dict), \
+                mock.patch.object(SEEDS, "_sanitize_codex_seed", dict), \
+                mock.patch.object(SEEDS, "_sanitize_opencode_seed", dict), \
+                mock.patch.object(SEEDS, "_sanitize_git_seed", dict), \
                 redirect_stderr(io.StringIO()):
-            return POST_CREATE.sanitize_seeds()
+            return SEEDS.sanitize_seeds()
 
     def test_removed_or_rejected_host_overlay_is_removed_from_the_volume(self) -> None:
         """The sanitized volume outlives the container. Deleting a host overlay
@@ -181,7 +188,7 @@ class HostBoundaryTests(unittest.TestCase):
             (aic_config / "p10k.zsh").write_text("")
             (aic_config / "statusline.js").symlink_to(outside)
             (aic_config / "statusline.mjs").write_bytes(
-                b"x" * (POST_CREATE.MAX_PERSONAL_OVERLAY_BYTES + 1)
+                b"x" * (SEEDS.MAX_PERSONAL_OVERLAY_BYTES + 1)
             )
             (aic_config / "statusline.py").write_text("print('new')\n")
             try:
@@ -222,7 +229,7 @@ class HostBoundaryTests(unittest.TestCase):
         control = re.search(r'AIC_CONTROL_FILES="([^"]+)"', AIC)
         assert control is not None
         names = control.group(1).split()
-        for name, _ in POST_CREATE.STATUSLINE_VARIANTS:
+        for name, _ in OVERLAYS.STATUSLINE_VARIANTS:
             self.assertIn(name, names, f"{name} must be symlink-checked by the host CLI")
 
 
@@ -238,11 +245,11 @@ class WiringTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw).resolve()
             settings = self._settings(tmp)
-            with mock.patch.object(POST_CREATE, "CLAUDE_HOME", settings.parent), \
-                    mock.patch.object(POST_CREATE, "STATUSLINE_MANAGED_DIR", tmp / "absent"), \
-                    mock.patch.object(POST_CREATE, "ENABLED_TOOLS", frozenset({"claude-code"})), \
+            with mock.patch.object(OVERLAYS, "CLAUDE_HOME", settings.parent), \
+                    mock.patch.object(OVERLAYS, "STATUSLINE_MANAGED_DIR", tmp / "absent"), \
+                    mock.patch.object(OVERLAYS, "ENABLED_TOOLS", frozenset({"claude-code"})), \
                     redirect_stderr(io.StringIO()):
-                POST_CREATE.apply_statusline()
+                OVERLAYS.apply_statusline()
             self.assertNotIn("statusLine", json.loads(settings.read_text()))
 
     def test_apply_statusline_wires_the_installed_file(self) -> None:
@@ -252,15 +259,15 @@ class WiringTests(unittest.TestCase):
             managed = tmp / "managed"
             managed.mkdir()
             (managed / "statusline.mjs").write_text("// personal\n")
-            with mock.patch.object(POST_CREATE, "CLAUDE_HOME", settings.parent), \
-                    mock.patch.object(POST_CREATE, "STATUSLINE_MANAGED_DIR", managed), \
-                    mock.patch.object(POST_CREATE, "ENABLED_TOOLS", frozenset({"claude-code"})), \
+            with mock.patch.object(OVERLAYS, "CLAUDE_HOME", settings.parent), \
+                    mock.patch.object(OVERLAYS, "STATUSLINE_MANAGED_DIR", managed), \
+                    mock.patch.object(OVERLAYS, "ENABLED_TOOLS", frozenset({"claude-code"})), \
                     redirect_stderr(io.StringIO()):
-                POST_CREATE.apply_statusline()
+                OVERLAYS.apply_statusline()
             written = json.loads(settings.read_text())
             self.assertEqual(
                 written["statusLine"],
-                {"type": "command", "command": POST_CREATE.STATUSLINE_COMMAND},
+                {"type": "command", "command": OVERLAYS.STATUSLINE_COMMAND},
             )
             self.assertEqual(written["model"], "opus", "existing settings must survive")
 
@@ -271,11 +278,11 @@ class WiringTests(unittest.TestCase):
             managed = tmp / "managed"
             managed.mkdir()
             (managed / "statusline.sh").write_text("echo hi\n")
-            with mock.patch.object(POST_CREATE, "CLAUDE_HOME", settings.parent), \
-                    mock.patch.object(POST_CREATE, "STATUSLINE_MANAGED_DIR", managed), \
-                    mock.patch.object(POST_CREATE, "ENABLED_TOOLS", frozenset({"codex"})), \
+            with mock.patch.object(OVERLAYS, "CLAUDE_HOME", settings.parent), \
+                    mock.patch.object(OVERLAYS, "STATUSLINE_MANAGED_DIR", managed), \
+                    mock.patch.object(OVERLAYS, "ENABLED_TOOLS", frozenset({"codex"})), \
                     redirect_stderr(io.StringIO()):
-                POST_CREATE.apply_statusline()
+                OVERLAYS.apply_statusline()
             self.assertNotIn("statusLine", json.loads(settings.read_text()))
 
     def test_project_file_wins_and_only_one_variant_is_staged(self) -> None:
@@ -292,15 +299,15 @@ class WiringTests(unittest.TestCase):
             (seed / "statusline.sh").write_text("echo seed\n")
             variants = tuple(
                 (name, staging_dir / f".aic-{name}.staging")
-                for name, _ in POST_CREATE.STATUSLINE_VARIANTS
+                for name, _ in OVERLAYS.STATUSLINE_VARIANTS
             )
-            with mock.patch.object(POST_CREATE, "PROJECT_DEVCONTAINER", project), \
-                    mock.patch.object(POST_CREATE, "HOST_SEED", seed), \
-                    mock.patch.object(POST_CREATE, "STATUSLINE_VARIANTS", variants), \
-                    mock.patch.object(POST_CREATE, "STATUSLINE_MANAGED_DIR", tmp / "absent"), \
-                    mock.patch.object(POST_CREATE, "ENABLED_TOOLS", frozenset({"claude-code"})), \
+            with mock.patch.object(OVERLAYS, "PROJECT_DEVCONTAINER", project), \
+                    mock.patch.object(OVERLAYS, "HOST_SEED", seed), \
+                    mock.patch.object(OVERLAYS, "STATUSLINE_VARIANTS", variants), \
+                    mock.patch.object(OVERLAYS, "STATUSLINE_MANAGED_DIR", tmp / "absent"), \
+                    mock.patch.object(OVERLAYS, "ENABLED_TOOLS", frozenset({"claude-code"})), \
                     redirect_stderr(io.StringIO()):
-                POST_CREATE.setup_statusline()
+                OVERLAYS.setup_statusline()
             staged = sorted(p.name for p in staging_dir.iterdir())
             self.assertEqual(staged, [".aic-statusline.py.staging"])
             self.assertEqual(
@@ -320,15 +327,15 @@ class WiringTests(unittest.TestCase):
             (project / "statusline.sh").symlink_to(tmp / "elsewhere.sh")
             variants = tuple(
                 (name, staging_dir / f".aic-{name}.staging")
-                for name, _ in POST_CREATE.STATUSLINE_VARIANTS
+                for name, _ in OVERLAYS.STATUSLINE_VARIANTS
             )
-            with mock.patch.object(POST_CREATE, "PROJECT_DEVCONTAINER", project), \
-                    mock.patch.object(POST_CREATE, "HOST_SEED", seed), \
-                    mock.patch.object(POST_CREATE, "STATUSLINE_VARIANTS", variants), \
-                    mock.patch.object(POST_CREATE, "STATUSLINE_MANAGED_DIR", tmp / "absent"), \
-                    mock.patch.object(POST_CREATE, "ENABLED_TOOLS", frozenset({"claude-code"})), \
+            with mock.patch.object(OVERLAYS, "PROJECT_DEVCONTAINER", project), \
+                    mock.patch.object(OVERLAYS, "HOST_SEED", seed), \
+                    mock.patch.object(OVERLAYS, "STATUSLINE_VARIANTS", variants), \
+                    mock.patch.object(OVERLAYS, "STATUSLINE_MANAGED_DIR", tmp / "absent"), \
+                    mock.patch.object(OVERLAYS, "ENABLED_TOOLS", frozenset({"claude-code"})), \
                     redirect_stderr(io.StringIO()):
-                POST_CREATE.setup_statusline()
+                OVERLAYS.setup_statusline()
             self.assertEqual(list(staging_dir.iterdir()), [])
 
 

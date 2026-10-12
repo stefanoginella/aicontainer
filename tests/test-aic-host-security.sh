@@ -797,12 +797,14 @@ done
 [ "$action_pins" -gt 0 ] || fail "action-pin check found no workflow actions"
 grep -Fq '"helpers:pinGitHubActionDigests"' "$ROOT/renovate.json" \
   || fail "Renovate does not keep GitHub Action digests pinned"
-grep -Fq '"CODEX_NON_INTERACTIVE": "1"' "$ROOT/template/post-create.py" \
+# refresh_ai_tools() and _refresh_codex() are in post_create_tools.py. The
+# regression check reads the entry and every post-create module.
+grep -Fq '"CODEX_NON_INTERACTIVE": "1"' "$ROOT/template/post_create_tools.py" \
   || fail "runtime Codex refresh is not noninteractive"
 grep -Fq 'CODEX_INSTALLER_URL = "https://chatgpt.com/codex/install.sh"' \
-  "$ROOT/template/post-create.py" \
+  "$ROOT/template/post_create_tools.py" \
   || fail "runtime Codex refresh does not use the official standalone installer"
-grep -Fq '["codex", "update"]' "$ROOT/template/post-create.py" \
+grep -Fq '["codex", "update"]' "$ROOT/template/post-create.py" "$ROOT"/template/post_create_*.py \
   && fail "runtime Codex refresh regressed to installation-method detection"
 
 # The local release gate runs with pipefail. A direct `git show | grep -q`
@@ -1532,8 +1534,35 @@ grep -q '"editor.wordWrap": "on"' "$TMP/settings/.devcontainer/devcontainer.json
 new_project "$TMP/mode"
 (cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" sync --build >/dev/null)
 [ -f "$TMP/mode/.devcontainer/Dockerfile" ] || fail "build sync did not install Dockerfile"
+# The post-create modules are managed build files like post-create.py: copied
+# byte-identical, symlink-checked, provenance-checked, and removed in pull mode.
+# AIC_POST_CREATE_MODULES in lib/aic/identity.sh is their only list in aic.
+post_create_modules=$(bash -c 'source "$1"; printf "%s" "$AIC_POST_CREATE_MODULES"' _ \
+  "$ROOT/lib/aic/identity.sh")
+[ -n "$post_create_modules" ] || fail "AIC_POST_CREATE_MODULES is empty"
+for name in $post_create_modules; do
+  cmp -s "$ROOT/template/$name" "$TMP/mode/.devcontainer/$name" \
+    || fail "build sync did not install .devcontainer/$name from the template"
+done
+first_module=${post_create_modules%% *}
+printf '\n# drift\n' >> "$TMP/mode/.devcontainer/$first_module"
+out=$(cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
+echo "$out" | grep -Fq ".devcontainer/$first_module differs from the managed build template" \
+  || fail "post-create module drift was not rejected"
+target="$TMP/outside-module-target"
+: > "$target"
+rm "$TMP/mode/.devcontainer/$first_module"
+ln -s "$target" "$TMP/mode/.devcontainer/$first_module"
+if (cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1); then
+  fail "sync accepted a symlinked post-create module"
+fi
+[ ! -s "$target" ] || fail "post-create module symlink target was overwritten"
+rm "$TMP/mode/.devcontainer/$first_module"
 (cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" sync --pull >/dev/null)
 [ ! -e "$TMP/mode/.devcontainer/Dockerfile" ] || fail "pull sync left build Dockerfile behind"
+for name in $post_create_modules; do
+  [ ! -e "$TMP/mode/.devcontainer/$name" ] || fail "pull sync left build file $name behind"
+done
 (cd "$TMP/mode" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
 [ ! -e "$TMP/mode/.devcontainer/Dockerfile" ] || fail "plain sync flipped back to build mode"
 

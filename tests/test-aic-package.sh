@@ -59,6 +59,8 @@ mkdir -p "$stage/template/hooks/__pycache__"
 : > "$stage/template/Thumbs.db"
 : > "$stage/template/hooks/__pycache__/agent-status.cpython-312.pyc"
 : > "$stage/template/post-create.pyc"
+mkdir -p "$stage/template/__pycache__"
+: > "$stage/template/__pycache__/post_create_common.cpython-313.pyc"
 
 # Print the packed paths from `npm pack --json`. npm <= 11 prints an array
 # with one entry; npm 12 prints an object keyed by the package name. Any other
@@ -183,6 +185,12 @@ tar -xzf "$TMP/tarball/$tarball" -C "$TMP/unpacked"
 pkg="$TMP/unpacked/package"
 [ -x "$pkg/aic" ] || fail "packed aic is not executable"
 
+# The post-create modules that build mode copies. AIC_POST_CREATE_MODULES in
+# the packed lib/aic/identity.sh is their only list in aic.
+post_create_modules=$(bash -c 'source "$1"; printf "%s" "$AIC_POST_CREATE_MODULES"' _ \
+  "$pkg/lib/aic/identity.sh")
+[ -n "$post_create_modules" ] || fail "packed lib/aic/identity.sh has no AIC_POST_CREATE_MODULES"
+
 for mode in pull build; do
   project="$TMP/project-$mode"
   mkdir -p "$project"
@@ -205,8 +213,12 @@ for mode in pull build; do
   if [ "$mode" = build ]; then
     for name in Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-user-config \
       .zshrc hooks/pre-tool-use.sh hooks/opencode-guardrail.js hooks/agent-status.py \
-      hooks/claude-settings.json; do
+      hooks/claude-settings.json $post_create_modules; do
       [ -f "$project/.devcontainer/$name" ] || fail "aic init --build wrote no .devcontainer/$name"
+    done
+  else
+    for name in $post_create_modules; do
+      [ ! -e "$project/.devcontainer/$name" ] || fail "aic init (pull) wrote build file .devcontainer/$name"
     done
   fi
   # The validator runs from the package (no Docker: it reads the files only).

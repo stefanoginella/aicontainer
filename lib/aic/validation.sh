@@ -186,7 +186,7 @@ validate_managed_build_files () {
     fi
   done
   [ -f .devcontainer/Dockerfile ] || return 0
-  for name in Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-user-config .zshrc; do
+  for name in Dockerfile post-create.py $AIC_POST_CREATE_MODULES aic-firewall aic-chown-volumes aic-lock-user-config .zshrc; do
     if [ ! -f "$TEMPLATE_DIR/$name" ] || ! cmp -s "$TEMPLATE_DIR/$name" ".devcontainer/$name"; then
       printf 'MANAGED\t.devcontainer/%s differs from the managed build template; run aic sync\n' "$name" >> "$out"
     fi

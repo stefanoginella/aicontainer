@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -16,12 +18,17 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC = importlib.util.spec_from_file_location(
-    "aic_post_create_auth_sync", ROOT / "template" / "post-create.py"
-)
-assert SPEC is not None and SPEC.loader is not None
-POST_CREATE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(POST_CREATE)
+# Load the template modules as the aic_post_create package, as in the image
+# (/opt/aic-post-create/aic_post_create/). Patch a name on the module that
+# reads it. Never write bytecode into template/.
+sys.dont_write_bytecode = True
+PACKAGE = types.ModuleType("aic_post_create")
+PACKAGE.__path__ = [str(ROOT / "template")]
+sys.modules["aic_post_create"] = PACKAGE
+COMMON = importlib.import_module("aic_post_create.post_create_common")
+TOOLS = importlib.import_module("aic_post_create.post_create_tools")
+AUTH_LOGINS = importlib.import_module("aic_post_create.post_create_auth_logins")
+AUTH_SYNC = importlib.import_module("aic_post_create.post_create_auth_sync")
 
 SECRET = "AIC_TEST_SECRET_MUST_NEVER_APPEAR_IN_LOGS"
 
@@ -40,13 +47,13 @@ class ToolRefreshTests(unittest.TestCase):
         }
 
         with mock.patch.object(
-            POST_CREATE.subprocess, "run", side_effect=[completed, completed]
+            TOOLS.subprocess, "run", side_effect=[completed, completed]
         ) as run:
-            POST_CREATE._refresh_codex(env)
+            TOOLS._refresh_codex(env)
 
         download, install = run.call_args_list
-        self.assertIn(POST_CREATE.CODEX_INSTALLER_URL, download.args[0])
-        self.assertEqual(download.kwargs["stdout"], POST_CREATE.subprocess.PIPE)
+        self.assertIn(TOOLS.CODEX_INSTALLER_URL, download.args[0])
+        self.assertEqual(download.kwargs["stdout"], TOOLS.subprocess.PIPE)
         self.assertEqual(install.args[0], ["sh"])
         self.assertEqual(install.kwargs["input"], script)
         self.assertEqual(install.kwargs["env"], env)
@@ -71,15 +78,15 @@ class ToolRefreshTests(unittest.TestCase):
             (claude_home / ".claude.json").write_text("{}\n")
             with (
                 mock.patch.dict(os.environ, {"AIC_FREEZE_TOOLS": ""}),
-                mock.patch.object(POST_CREATE, "CLAUDE_HOME", claude_home),
+                mock.patch.object(TOOLS, "CLAUDE_HOME", claude_home),
                 mock.patch.object(
-                    POST_CREATE, "ENABLED_TOOLS",
+                    TOOLS, "ENABLED_TOOLS",
                     frozenset({"claude-code", "codex", "opencode"}),
                 ),
-                mock.patch.object(POST_CREATE, "_refresh_command", fake_command),
-                mock.patch.object(POST_CREATE, "_refresh_codex", fake_codex),
+                mock.patch.object(TOOLS, "_refresh_command", fake_command),
+                mock.patch.object(TOOLS, "_refresh_codex", fake_codex),
             ):
-                POST_CREATE.refresh_ai_tools()
+                TOOLS.refresh_ai_tools()
 
         self.assertEqual(sorted(started), ["claude", "codex", "opencode"])
 
@@ -91,20 +98,20 @@ class ToolHomeInitializationTests(unittest.TestCase):
             claude_home = root / "claude"
             codex_home = root / "codex"
             missing_seed = root / "missing-seed.json"
-            original_path = POST_CREATE.sys.path[:]
+            original_path = TOOLS.sys.path[:]
             fake_tomli_w = mock.Mock(dumps=lambda _value: "")
             try:
                 with (
-                    mock.patch.object(POST_CREATE, "CLAUDE_HOME", claude_home),
-                    mock.patch.object(POST_CREATE, "CODEX_HOME", codex_home),
-                    mock.patch.object(POST_CREATE, "HOST_SEED_CLAUDE", missing_seed),
-                    mock.patch.object(POST_CREATE, "HOST_SEED_CODEX", missing_seed),
-                    mock.patch.dict(POST_CREATE.sys.modules, {"tomli_w": fake_tomli_w}),
+                    mock.patch.object(TOOLS, "CLAUDE_HOME", claude_home),
+                    mock.patch.object(TOOLS, "CODEX_HOME", codex_home),
+                    mock.patch.object(TOOLS, "HOST_SEED_CLAUDE", missing_seed),
+                    mock.patch.object(TOOLS, "HOST_SEED_CODEX", missing_seed),
+                    mock.patch.dict(TOOLS.sys.modules, {"tomli_w": fake_tomli_w}),
                 ):
-                    POST_CREATE.setup_claude()
-                    POST_CREATE.setup_codex()
+                    TOOLS.setup_claude()
+                    TOOLS.setup_codex()
             finally:
-                POST_CREATE.sys.path[:] = original_path
+                TOOLS.sys.path[:] = original_path
 
             for dirname in ("projects", "skills", "agents", "commands", "plugins"):
                 self.assertTrue((claude_home / dirname).is_dir(), dirname)
@@ -115,15 +122,15 @@ class ToolHomeInitializationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
             with (
-                mock.patch.object(POST_CREATE, "GH_HOME", root / "gh"),
-                mock.patch.object(POST_CREATE, "NPM_HOME", root / "npm"),
+                mock.patch.object(TOOLS, "GH_HOME", root / "gh"),
+                mock.patch.object(TOOLS, "NPM_HOME", root / "npm"),
             ):
-                POST_CREATE.setup_cli_homes()
+                TOOLS.setup_cli_homes()
             for name in ("gh", "npm"):
                 self.assertTrue((root / name).is_dir(), name)
                 self.assertEqual(stat_mode(root / name), 0o700, name)
-        self.assertEqual(POST_CREATE.GH_HOME, POST_CREATE.TOOL_HOMES / "gh")
-        self.assertEqual(POST_CREATE.NPM_HOME, POST_CREATE.TOOL_HOMES / "npm")
+        self.assertEqual(TOOLS.GH_HOME, COMMON.TOOL_HOMES / "gh")
+        self.assertEqual(TOOLS.NPM_HOME, COMMON.TOOL_HOMES / "npm")
 
 
 class SyncFixture(unittest.TestCase):
@@ -148,11 +155,11 @@ class SyncFixture(unittest.TestCase):
         for name in ("gh", "npm"):
             (self.global_root / name).mkdir(mode=0o700)
             (self.project_root / "tool-homes" / name).mkdir(mode=0o700)
-        POST_CREATE.AUTH_SYNC_GLOBAL = self.global_root
-        POST_CREATE.AUTH_SYNC_PROJECT = self.project_root
+        AUTH_SYNC.AUTH_SYNC_GLOBAL = self.global_root
+        AUTH_SYNC.AUTH_SYNC_PROJECT = self.project_root
         # Tests write files and sync at once; one test covers the settle delay.
-        POST_CREATE.AUTH_SYNC_SETTLE_NS = 0
-        POST_CREATE._AUTH_SYNC_WARNED.clear()
+        AUTH_SYNC.AUTH_SYNC_SETTLE_NS = 0
+        AUTH_SYNC._AUTH_SYNC_WARNED.clear()
         self.states: dict = {}
 
     def tearDown(self) -> None:
@@ -174,7 +181,7 @@ class SyncFixture(unittest.TestCase):
     def sync(
         self, tool: str, global_dir: str, local_dir: str, filename: str, fmt: str = "json"
     ) -> None:
-        POST_CREATE._sync_credential_pair(
+        AUTH_SYNC._sync_credential_pair(
             tool, global_dir, local_dir, filename, fmt, self.states
         )
 
@@ -242,7 +249,7 @@ class AuthSyncTests(SyncFixture):
         self.assertEqual(json.loads(local_path.read_text()), trusted)
         self.assertEqual(json.loads(outside.read_text()), {"outside": SECRET})
 
-        local_path.write_bytes(b"{" + b"x" * POST_CREATE.AUTH_SYNC_MAX_BYTES + b"}")
+        local_path.write_bytes(b"{" + b"x" * AUTH_SYNC.AUTH_SYNC_MAX_BYTES + b"}")
         local_path.chmod(0o600)
         with redirect_stderr(captured):
             self.sync("Claude", "claude", "claude", ".credentials.json")
@@ -330,7 +337,7 @@ class LoginEntrySyncTests(SyncFixture):
         root = self.root / name
         for tool_home in ("gh", "npm"):
             (root / "tool-homes" / tool_home).mkdir(parents=True, mode=0o700)
-        POST_CREATE.AUTH_SYNC_PROJECT = root
+        AUTH_SYNC.AUTH_SYNC_PROJECT = root
         self.states = {}
         return root / "tool-homes"
 
@@ -341,7 +348,7 @@ class LoginEntrySyncTests(SyncFixture):
 
     def test_spec_list_is_exact(self) -> None:
         self.assertEqual(
-            {(spec[1], spec[3], spec[4]) for spec in POST_CREATE.AUTH_SYNC_SPECS},
+            {(spec[1], spec[3], spec[4]) for spec in AUTH_SYNC.AUTH_SYNC_SPECS},
             {
                 ("claude", ".credentials.json", "json"),
                 ("codex", "auth.json", "json"),
@@ -516,7 +523,7 @@ class LoginEntrySyncTests(SyncFixture):
             "evil host:\n    oauth_token: gho_x\n",
         ):
             with self.subTest(text=text):
-                self.assertIsNone(POST_CREATE._canonical_login("gh-hosts", text.encode()))
+                self.assertIsNone(AUTH_LOGINS._canonical_login("gh-hosts", text.encode()))
         # Values outside the strict grammars are dropped, never passed through.
         for text in (
             "github.com:\n    oauth_token: gho x\n    user: a\n",
@@ -525,10 +532,10 @@ class LoginEntrySyncTests(SyncFixture):
             "evil..host/x:\n    oauth_token: gho_x\n",
         ):
             with self.subTest(text=text):
-                self.assertEqual(POST_CREATE._canonical_login("gh-hosts", text.encode()), b"")
+                self.assertEqual(AUTH_LOGINS._canonical_login("gh-hosts", text.encode()), b"")
 
     def test_half_written_files_wait_until_settled(self) -> None:
-        POST_CREATE.AUTH_SYNC_SETTLE_NS = 2_000_000_000
+        AUTH_SYNC.AUTH_SYNC_SETTLE_NS = 2_000_000_000
         npmrc = self.project_root / "tool-homes" / "npm" / "npmrc"
         global_npmrc = self.global_root / "npm" / "npmrc"
         old = time.time_ns() - 10_000_000_000

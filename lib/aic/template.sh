@@ -275,7 +275,7 @@ apply_runtime_user () {
 # for $mode (pull or build) and only the files that mode needs. Idempotent:
 # overwrites any existing target files; safe to call from init or sync.
 apply_template () {
-  local mode="$1" src="$2" dst="$3" docker="${4:-$DEFAULT_DOCKER}"
+  local mode="$1" src="$2" dst="$3" docker="${4:-$DEFAULT_DOCKER}" name
   [ -d "$src" ] || die "template not found at $src (set AIC_HOME or reinstall aic)"
   validate_devcontainer_paths optional
   ensure_git_control_paths lenient
@@ -306,12 +306,18 @@ apply_template () {
       rm -f "$dst/Dockerfile" "$dst/post-create.py" "$dst/aic-firewall" \
         "$dst/aic-chown-volumes" "$dst/aic-lock-user-config" \
         "$dst/aic-lock-gitconfig" "$dst/.zshrc"
+      for name in $AIC_POST_CREATE_MODULES; do
+        rm -f "$dst/$name"
+      done
       rm -rf "$dst/hooks"
       ;;
     build)
       atomic_copy_file "$src/docker-compose.build.yml" "$dst/docker-compose.yml"
       atomic_copy_file "$src/Dockerfile"         "$dst/Dockerfile"
       atomic_copy_file "$src/post-create.py"     "$dst/post-create.py"
+      for name in $AIC_POST_CREATE_MODULES; do
+        atomic_copy_file "$src/$name" "$dst/$name"
+      done
       atomic_copy_file "$src/aic-firewall"       "$dst/aic-firewall"
       atomic_copy_file "$src/aic-chown-volumes"  "$dst/aic-chown-volumes"
       atomic_copy_file "$src/aic-lock-user-config" "$dst/aic-lock-user-config"

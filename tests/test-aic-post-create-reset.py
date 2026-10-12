@@ -9,11 +9,14 @@ not skip the later reset/lock steps.
 """
 from __future__ import annotations
 
-import importlib.util
+import contextlib
+import importlib
 import io
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -21,12 +24,17 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC = importlib.util.spec_from_file_location(
-    "aic_post_create_reset", ROOT / "template" / "post-create.py"
-)
-assert SPEC is not None and SPEC.loader is not None
-POST_CREATE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(POST_CREATE)
+# Load the template modules as the aic_post_create package, as in the image
+# (/opt/aic-post-create/aic_post_create/). Patch a name on the module that
+# reads it. Never write bytecode into template/.
+sys.dont_write_bytecode = True
+PACKAGE = types.ModuleType("aic_post_create")
+PACKAGE.__path__ = [str(ROOT / "template")]
+sys.modules["aic_post_create"] = PACKAGE
+COMMON = importlib.import_module("aic_post_create.post_create_common")
+CLAUDE_RESET = importlib.import_module("aic_post_create.post_create_claude_reset")
+TOOLS = importlib.import_module("aic_post_create.post_create_tools")
+MAIN = importlib.import_module("aic_post_create.post_create_main")
 
 PLANTED = "AIC_PLANTED_INSTRUCTIONS"
 
@@ -46,18 +54,18 @@ class ManagedFileResetTests(unittest.TestCase):
         self.planted = self.outside / "planted.md"
         self.planted.write_text(PLANTED)
         missing = self.root / "missing-seed.json"
-        original_path = POST_CREATE.sys.path[:]
-        self.addCleanup(POST_CREATE.sys.path.__setitem__, slice(None), original_path)
+        original_path = TOOLS.sys.path[:]
+        self.addCleanup(TOOLS.sys.path.__setitem__, slice(None), original_path)
         for patch in (
-            mock.patch.object(POST_CREATE, "CLAUDE_HOME", self.claude_home),
-            mock.patch.object(POST_CREATE, "CODEX_HOME", self.codex_home),
-            mock.patch.object(POST_CREATE, "OPENCODE_CONFIG_DIR", self.opencode_config),
-            mock.patch.object(POST_CREATE, "OPENCODE_DATA_DIR", self.tool_homes / "opencode-data"),
-            mock.patch.object(POST_CREATE, "HOST_SEED_CLAUDE", missing),
-            mock.patch.object(POST_CREATE, "HOST_SEED_CODEX", missing),
-            mock.patch.object(POST_CREATE, "HOST_SEED_OPENCODE", missing),
+            mock.patch.object(TOOLS, "CLAUDE_HOME", self.claude_home),
+            mock.patch.object(TOOLS, "CODEX_HOME", self.codex_home),
+            mock.patch.object(TOOLS, "OPENCODE_CONFIG_DIR", self.opencode_config),
+            mock.patch.object(TOOLS, "OPENCODE_DATA_DIR", self.tool_homes / "opencode-data"),
+            mock.patch.object(TOOLS, "HOST_SEED_CLAUDE", missing),
+            mock.patch.object(TOOLS, "HOST_SEED_CODEX", missing),
+            mock.patch.object(TOOLS, "HOST_SEED_OPENCODE", missing),
             mock.patch.dict(
-                POST_CREATE.sys.modules,
+                TOOLS.sys.modules,
                 {"tomli_w": mock.Mock(dumps=lambda _value: 'approval_policy = "never"\n')},
             ),
         ):
@@ -65,12 +73,22 @@ class ManagedFileResetTests(unittest.TestCase):
             self.addCleanup(patch.stop)
         self.addCleanup(self._temp.cleanup)
 
+    @staticmethod
+    def patch_replace(side_effect) -> contextlib.ExitStack:
+        """Patch _replace_managed_file in each module that setup_claude() calls
+        it from, as one patch did when post-create was one file."""
+        stack = contextlib.ExitStack()
+        for module in (TOOLS, CLAUDE_RESET):
+            stack.enter_context(mock.patch.object(
+                module, "_replace_managed_file", side_effect=side_effect))
+        return stack
+
     def run_setup(self) -> str:
         captured = io.StringIO()
         with redirect_stderr(captured):
-            POST_CREATE.setup_claude()
-            POST_CREATE.setup_codex()
-            POST_CREATE.setup_opencode()
+            TOOLS.setup_claude()
+            TOOLS.setup_codex()
+            TOOLS.setup_opencode()
         return captured.getvalue()
 
     def managed_files(self) -> list[Path]:
@@ -90,7 +108,7 @@ class ManagedFileResetTests(unittest.TestCase):
         self.assertEqual(info.st_mode & 0o777, 0o600, path)
         self.assertNotIn(PLANTED, path.read_text(), path)
         if path.name in ("CLAUDE.md", "AGENTS.md"):
-            self.assertIn(POST_CREATE.SANDBOX_MEMORY_BEGIN, path.read_text(), path)
+            self.assertIn(TOOLS.SANDBOX_MEMORY_BEGIN, path.read_text(), path)
 
     def test_symlinked_managed_files_are_replaced_not_followed(self) -> None:
         for path in self.managed_files():
@@ -157,7 +175,7 @@ class ManagedFileResetTests(unittest.TestCase):
 
         captured = io.StringIO()
         with redirect_stderr(captured):
-            POST_CREATE.setup_claude()
+            TOOLS.setup_claude()
 
         self.assertFalse(self.tool_homes.is_symlink())
         self.assert_fresh_managed_file(self.claude_home / "CLAUDE.md")
@@ -179,31 +197,31 @@ class ManagedFileResetTests(unittest.TestCase):
 
     def test_blocked_config_does_not_skip_the_memory_reset(self) -> None:
         (self.claude_home / "CLAUDE.md").write_text(PLANTED)
-        original = POST_CREATE._replace_managed_file
+        original = COMMON._replace_managed_file
 
         def fail_settings(path: Path, text: str) -> None:
             if path.name == "settings.json":
                 raise OSError("blocked")
             original(path, text)
 
-        with mock.patch.object(POST_CREATE, "_replace_managed_file", side_effect=fail_settings), \
+        with self.patch_replace(fail_settings), \
                 self.assertRaises(OSError), redirect_stderr(io.StringIO()):
-            POST_CREATE.setup_claude()
+            TOOLS.setup_claude()
 
         self.assert_fresh_managed_file(self.claude_home / "CLAUDE.md")
 
     def test_failed_memory_reset_still_resets_config(self) -> None:
         (self.claude_home / "settings.json").write_text(PLANTED)
-        original = POST_CREATE._replace_managed_file
+        original = COMMON._replace_managed_file
 
         def fail_memory(path: Path, text: str) -> None:
             if path.name == "CLAUDE.md":
                 raise OSError("blocked")
             original(path, text)
 
-        with mock.patch.object(POST_CREATE, "_replace_managed_file", side_effect=fail_memory), \
+        with self.patch_replace(fail_memory), \
                 self.assertRaises(OSError), redirect_stderr(io.StringIO()):
-            POST_CREATE.setup_claude()
+            TOOLS.setup_claude()
 
         self.assert_fresh_managed_file(self.claude_home / "settings.json")
 
@@ -242,7 +260,7 @@ class ManagedFileResetTests(unittest.TestCase):
         link.symlink_to(self.claude_home)
 
         with self.assertRaises(OSError):
-            POST_CREATE._replace_managed_file(link / "CLAUDE.md", "text")
+            COMMON._replace_managed_file(link / "CLAUDE.md", "text")
         self.assertFalse((self.claude_home / "CLAUDE.md").exists())
 
     # --- Claude user rules -------------------------------------------------
@@ -252,7 +270,7 @@ class ManagedFileResetTests(unittest.TestCase):
         self.assertTrue(rules.is_dir() and not rules.is_symlink(), rules)
         self.assertEqual(list(rules.iterdir()), [])
         leftovers = [p.name for p in self.claude_home.iterdir()
-                     if p.name.startswith(POST_CREATE.CLAUDE_RULES_RESET_PREFIX)]
+                     if p.name.startswith(CLAUDE_RESET.CLAUDE_RULES_RESET_PREFIX)]
         self.assertEqual(leftovers, [])
 
     def test_planted_rules_are_removed(self) -> None:
@@ -323,7 +341,7 @@ class ManagedFileResetTests(unittest.TestCase):
         locked.chmod(0)
 
         def unlock() -> None:
-            for path in self.claude_home.glob(f"{POST_CREATE.CLAUDE_RULES_RESET_PREFIX}*/locked"):
+            for path in self.claude_home.glob(f"{CLAUDE_RESET.CLAUDE_RULES_RESET_PREFIX}*/locked"):
                 path.chmod(0o700)
         self.addCleanup(unlock)
 
@@ -334,7 +352,7 @@ class ManagedFileResetTests(unittest.TestCase):
         self.assertEqual(list(rules.iterdir()), [])
 
     def test_old_rules_left_by_an_interrupted_reset_are_deleted(self) -> None:
-        leftover = self.claude_home / f"{POST_CREATE.CLAUDE_RULES_RESET_PREFIX}0123456789abcdef"
+        leftover = self.claude_home / f"{CLAUDE_RESET.CLAUDE_RULES_RESET_PREFIX}0123456789abcdef"
         leftover.mkdir()
         (leftover / "planted.md").write_text(PLANTED)
 
@@ -394,12 +412,12 @@ class ManagedFileResetTests(unittest.TestCase):
 
     def test_suffixed_state_files_are_reset_too(self) -> None:
         planted = {"keep": 1, "mcpServers": {"planted": {"command": PLANTED}}}
-        for name in POST_CREATE.CLAUDE_STATE_FILES:
+        for name in CLAUDE_RESET.CLAUDE_STATE_FILES:
             (self.claude_home / name).write_text(json.dumps(planted))
 
         self.run_setup()
 
-        for name in POST_CREATE.CLAUDE_STATE_FILES:
+        for name in CLAUDE_RESET.CLAUDE_STATE_FILES:
             self.assertEqual(json.loads((self.claude_home / name).read_text()), {"keep": 1}, name)
 
     def test_legacy_config_json_that_loads_in_place_of_state_is_removed(self) -> None:
@@ -431,7 +449,7 @@ class ManagedFileResetTests(unittest.TestCase):
 
     def assert_seed_state(self) -> None:
         self.assert_fresh_managed_file(self.claude_state())
-        self.assertEqual(json.loads(self.claude_state().read_text()), POST_CREATE.CLAUDE_STATE_SEED)
+        self.assertEqual(json.loads(self.claude_state().read_text()), CLAUDE_RESET.CLAUDE_STATE_SEED)
 
     def test_unusable_state_contents_are_replaced_with_the_seed(self) -> None:
         planted = json.dumps({"mcpServers": {"planted": {"command": PLANTED}}})
@@ -441,7 +459,7 @@ class ManagedFileResetTests(unittest.TestCase):
             "non-standard constant": planted[:-1].encode() + b', "n": NaN}',
             "array": f"[{planted}]".encode(),
             "projects not an object": b'{"projects": ["' + PLANTED.encode() + b'"]}',
-            "oversized": b'{"pad": "' + b"x" * POST_CREATE.CLAUDE_STATE_MAX_BYTES + b'"}',
+            "oversized": b'{"pad": "' + b"x" * CLAUDE_RESET.CLAUDE_STATE_MAX_BYTES + b'"}',
         }
         for name, payload in cases.items():
             with self.subTest(name):
@@ -499,16 +517,16 @@ class ManagedFileResetTests(unittest.TestCase):
         (self.claude_home / "CLAUDE.md").write_text(PLANTED)
         (self.claude_home / "rules").mkdir()
         (self.claude_home / "rules" / "planted.md").write_text(PLANTED)
-        original = POST_CREATE._replace_managed_file
+        original = COMMON._replace_managed_file
 
         def fail_state(path: Path, text: str) -> None:
             if path.name == ".claude.json":
                 raise OSError("blocked")
             original(path, text)
 
-        with mock.patch.object(POST_CREATE, "_replace_managed_file", side_effect=fail_state), \
+        with self.patch_replace(fail_state), \
                 self.assertRaises(OSError), redirect_stderr(io.StringIO()):
-            POST_CREATE.setup_claude()
+            TOOLS.setup_claude()
 
         self.assert_fresh_managed_file(self.claude_home / "CLAUDE.md")
         self.assert_empty_rules()
@@ -564,18 +582,18 @@ class MainStepIsolationTests(unittest.TestCase):
             "verify_git_identity",
         ]
         patches: list = [
-            mock.patch.object(POST_CREATE, name, make(name, fail=name == "setup_claude"))
+            mock.patch.object(MAIN, name, make(name, fail=name == "setup_claude"))
             for name in names
         ]
         patches.append(mock.patch.object(
-            POST_CREATE, "ENABLED_TOOLS", frozenset({"claude-code", "codex", "opencode"})
+            MAIN, "ENABLED_TOOLS", frozenset({"claude-code", "codex", "opencode"})
         ))
         captured = io.StringIO()
         for patch in patches:
             patch.start()
         try:
             with redirect_stderr(captured):
-                status = POST_CREATE.main()
+                status = MAIN.main()
         finally:
             for patch in reversed(patches):
                 patch.stop()
@@ -595,13 +613,13 @@ class MainStepIsolationTests(unittest.TestCase):
             "verify_socket_proxy", "refresh_ai_tools", "run_project_hook",
             "verify_git_identity",
         ]
-        patches: list = [mock.patch.object(POST_CREATE, name, lambda: None) for name in names]
-        patches.append(mock.patch.object(POST_CREATE, "ENABLED_TOOLS", frozenset()))
+        patches: list = [mock.patch.object(MAIN, name, lambda: None) for name in names]
+        patches.append(mock.patch.object(MAIN, "ENABLED_TOOLS", frozenset()))
         for patch in patches:
             patch.start()
         try:
             with redirect_stderr(io.StringIO()):
-                self.assertEqual(POST_CREATE.main(), 0)
+                self.assertEqual(MAIN.main(), 0)
         finally:
             for patch in reversed(patches):
                 patch.stop()

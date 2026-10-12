@@ -136,7 +136,16 @@ check_devcontainer_project_name () {
 # control inputs. Never follow a repository-provided symlink at this boundary:
 # `aic init --force` / `aic sync` run as the host user, so following one could
 # overwrite or read an arbitrary host file outside the repository.
-AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh statusline.sh statusline.mjs statusline.js statusline.py"
+#
+# AIC_POST_CREATE_MODULES is the only list in aic of the modules that
+# post-create.py imports. They are managed build-mode files, flat in
+# .devcontainer/, and the image installs them as the aic_post_create package.
+# The control-path checks, apply_template(), and the build-file provenance
+# check read this list. It must equal the COPY list in template/Dockerfile and
+# the post_create_*.py files in template/: tests/test-aic-post-create-package.py
+# checks this.
+AIC_POST_CREATE_MODULES="post_create_common.py post_create_claude_reset.py post_create_tools.py post_create_seeds.py post_create_auth_logins.py post_create_auth_sync.py post_create_container.py post_create_git.py post_create_overlays.py post_create_main.py"
+AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py $AIC_POST_CREATE_MODULES aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh statusline.sh statusline.mjs statusline.js statusline.py"
 
 validate_devcontainer_paths () {
   local require_dir="${1:-optional}" path name linked
