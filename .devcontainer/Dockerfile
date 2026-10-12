@@ -503,6 +503,14 @@ RUN set -eu; \
     rm -rf "$tmp"; \
     "$FNM_DIR/fnm" default "$node_version"; \
     test "$("$FNM_DIR/aliases/default/bin/node" --version)" = "v${node_version}"
+# A process that no managed shell starts (Claude Code hooks, MCP servers, the
+# VS Code server, `docker exec`) never runs `fnm env`. Put the fnm default
+# Node (node, npm, npx) LAST on the image PATH: it never shadows a system
+# binary, and `fnm env` in a managed shell still puts the per-directory Node
+# first. Do not link this vscode-owned Node into a system directory: the
+# startup PATH of the managed shells and the PATH of root processes search
+# those directories (docs/contributing/shell-and-overlays.md).
+ENV PATH="$PATH:/home/vscode/.fnm/aliases/default/bin"
 
 # Semgrep (used by Claude Code's semgrep plugin; installed into ~/.local/bin
 # via uv tool so the binary is on PATH for the vscode user). Its settings path
