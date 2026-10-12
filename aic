@@ -1634,10 +1634,16 @@ docker_consent_matches () {
 
 # The exact-trust hash of the resolved Compose model and the .devcontainer
 # tree (lib/trust-hash.mjs). Stored approvals hold it, so its output must not
-# change.
+# change. Anything but a sha256 hex digest fails, so a helper that could not
+# run never stores or matches an empty approval.
 hash_validation_inputs () {
-  local final_json="$1"
-  node "$AIC_HOME/lib/cli.mjs" trust-hash "$final_json"
+  local final_json="$1" hash
+  hash="$(node "$AIC_HOME/lib/cli.mjs" trust-hash "$final_json")" || return 1
+  case "$hash" in
+    *[!0-9a-f]*|"") return 1 ;;
+  esac
+  [ "${#hash}" -eq 64 ] || return 1
+  printf '%s\n' "$hash"
 }
 
 store_project_trust () {
@@ -1878,7 +1884,11 @@ validate_project_security () {
     unsafe="${unsafe}${unsafe:+
 }${docker_unsafe}"
   fi
-  hash="$(hash_validation_inputs "$final_json")"
+  if ! hash="$(hash_validation_inputs "$final_json")"; then
+    hash=""
+    managed="${managed}${managed:+
+}MANAGED could not compute the trust hash (is the aicontainer install complete?)"
+  fi
   rm -f "$base_json" "$expected_json" "$final_json" "$noenv_json" \
     "$raw_base_json" "$raw_final_json"
 

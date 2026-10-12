@@ -1001,6 +1001,18 @@ out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" 
 echo "$out" | grep -q 'aic validator (lib/validate-cli.mjs) failed to run' \
   || fail "a failing validator was not a MANAGED finding"
 
+# The trust hash is a file of the install too (lib/trust-hash.mjs). An empty or
+# malformed digest must never store or match an approval.
+cp "$ROOT/lib/validate-cli.mjs" "$broken_home/lib/validate-cli.mjs"
+for digest in "''" "'not-a-sha256-digest'" "'$(printf 'a%.0s' $(seq 1 63))'"; do
+  printf 'export function hashValidationInputs() { return %s; }\n' "$digest" \
+    > "$broken_home/lib/trust-hash.mjs"
+  out=$(cd "$TMP/validator-missing" && AIC_HOME="$broken_home" "$broken_home/aic" validate 2>&1) \
+    && fail "aic validate passed with the trust-hash digest $digest"
+  echo "$out" | grep -q 'could not compute the trust hash' \
+    || fail "the trust-hash digest $digest was not a MANAGED finding"
+done
+
 # Values normalized only to account for installation/project paths must first
 # be proven to point at this exact checkout. Otherwise a tracked managed file
 # could hide a host bind, shared volume/network alias, or root build context
