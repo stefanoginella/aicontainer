@@ -4,7 +4,7 @@
   "description": "Sandboxed devcontainer for running Claude Code, Codex, and OpenCode in bypass / auto-approve mode.",
   "scripts": {
     "preversion": "node scripts/promote-changelog.mjs --check",
-    "version": "node scripts/promote-changelog.mjs && git add CHANGELOG.md"
+    "version": "node scripts/promote-changelog.mjs && git add CHANGELOG.md docs/user/stack-reference.md"
   },
   "bin": {
     "aic": "./aic",

@@ -9,6 +9,9 @@ Select the method that agrees with the tool:
 - A tool that you use for a short time: install it ad hoc.
 - A tool that the project needs: put it in a project Dockerfile.
 
+For the toolchain lines of each language (Go, Rust, Ruby, PHP, Java, C and
+C++), see the [Stack reference](stack-reference.md).
+
 **Rule of thumb:** put the tool in `Dockerfile.project` if you do not want to
 install it again after each container rebuild. If you only want to try
 something, install it ad hoc.

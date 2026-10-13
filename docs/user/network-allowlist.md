@@ -88,6 +88,8 @@ go
 | `rubygems` | `rubygems.org`, `index.rubygems.org` |
 | `semgrep` | `semgrep.dev` |
 
+The [Stack reference](stack-reference.md) names the presets for each stack.
+
 Each preset has only the hosts that the default client of the registry needs:
 
 - `go`: a module that the proxy does not have falls back to its source

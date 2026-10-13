@@ -373,14 +373,16 @@ Examples:
 - a `Dockerfile.project` for Playwright
 - environment variables for host services
 
-See [Customization](customization.md).
+See [Customization](customization.md). The
+[Stack reference](stack-reference.md) lists the files for each stack.
 
 The optional **aicontainer** Claude Code plugin does this work in a
 conversation:
 
 1. It finds your stack.
 2. It checks whether a headless Linux devcontainer is applicable.
-3. It proposes the files and writes them for you.
+3. It proposes the files from the [Stack reference](stack-reference.md) and
+   writes them for you.
 
 If the `aic` CLI is missing, the plugin offers to install it first. It can
 also set up a project again: it audits an existing `.devcontainer/` and updates

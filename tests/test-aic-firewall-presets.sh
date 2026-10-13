@@ -128,7 +128,9 @@ for bad in evil.example.com Go 'crates io' 'go,crates' ../crates 'nodejs.org' \
     *"unknown firewall preset"*) ;;
     *) fail "preset file line '$bad' was refused without the preset message: $err" ;;
   esac
-  case "$err" in
+  # Drop the file path first: the random mktemp name can contain a short bad
+  # line such as "Go".
+  case "${err//"$PRESETS_FILE"/}" in
     *"$bad"*) fail "the refusal echoes the raw preset line: $err" ;;
   esac
 done

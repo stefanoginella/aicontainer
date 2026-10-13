@@ -70,7 +70,8 @@ gates fail it.
 - If a plain `npm version` already ran and the bump commit is still
   **local**, do these steps:
   1. Run `node scripts/promote-changelog.mjs` by hand.
-  2. Run `git commit --amend` to add the promoted `CHANGELOG.md` to the commit.
+  2. Run `git add CHANGELOG.md docs/user/stack-reference.md`, then
+     `git commit --amend`, to add the promoted files to the commit.
   3. Run `git tag -f -a vX.Y.Z -m X.Y.Z`.
   4. Push.
 
@@ -102,7 +103,14 @@ lifecycle scripts, unless they are suppressed (see the warning above):
   - renames `[Unreleased]` to `## [X.Y.Z] - <date>`,
   - opens a new, empty `[Unreleased]`,
   - fixes the compare links,
-  - runs `git add` on `CHANGELOG.md`, so it goes into the bump commit.
+  - writes the new version into each `(since Unreleased)` marker in
+    `docs/user/stack-reference.md`,
+  - runs `git add` on `CHANGELOG.md` and the stack reference, so they go into
+    the bump commit.
+
+When a change adds a feature that a stack-reference snippet uses, mark the
+item `(since Unreleased)` in the same commit. Tools that read the page from
+`main` use the markers to skip items that the installed aic does not have.
 
 `promote-changelog.mjs` only relabels the notes that you wrote. It never
 generates content.

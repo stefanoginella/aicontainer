@@ -300,3 +300,15 @@ helpers. They run before the real-devcontainer smoke suite.
   - Bump the `version` in its `plugin.json` when the skill changes.
   - Validate both with `claude plugin validate .` and `claude plugin validate
     tools/claude-plugin`.
+  - The skill gets the stack-to-files mapping from
+    `docs/user/stack-reference.md`. Do not copy the mapping into the skill.
+- `docs/user/stack-reference.md` is also a contract for other tools. Keep
+  its structure: one `## Stack: <name>` section for each stack, with the same
+  seven level-3 headings in the same order, and a target-file line before
+  each code block. When a change to a preset, a mount rule, or the image
+  affects a snippet, update the page. Mark an item that needs a new aic
+  feature `(since Unreleased)`; the release fills in the version (see
+  [Releasing](releasing.md)). The skill reads the page from the tag of the
+  installed aic. Guarded by
+  `tests/test-aic-stack-reference.mjs`. With Docker Compose, it runs the
+  merged snippets through `aic validate`.

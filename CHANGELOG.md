@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.devcontainer/firewall-presets`; the hosts are fixed in the image, and the
   default allowlist does not change. (aic-firewall, validate.mjs)
 
+- **A stack reference lists the project-owned files for each stack.** It gives
+  copy-ready snippets for Node.js, Python, Go, Rust, Ruby, PHP, Java, and C and
+  C++, in a fixed structure that tools can read. The `/aicontainer:setup`
+  plugin now reads it. (docs, Claude Code plugin)
+
 ### Fixed
 
 - **`sudo aic-firewall enable` works in the devcontainer again.** It failed
