@@ -34,7 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`sudo aic-firewall enable` works in the devcontainer again.** It failed
   with "Can't open socket to ipset", because its rules needed `NET_RAW`, which
-  the container drops. The rules no longer need it. (aic-firewall)
+  the container drops. The rules no longer need it. `enable` also pins each
+  allowlist name to its allowed addresses in `/etc/hosts`: a CDN host such as
+  `index.crates.io` or `pypi.org` gives other addresses to other resolvers,
+  and a later lookup timed out on an address that the rules block.
+  (aic-firewall)
+
+- **`firewall-allowlist` refuses the host gateway and the managed services.**
+  `host.docker.internal`, other `*.internal` and `localhost` names,
+  `socket-proxy`, the other managed service names, and any entry that resolves
+  to the host gateway or a managed service now stop the enable. Before, such
+  an entry got the all-port allowlist rule. (aic-firewall)
 
 ## [0.11.0] - 2026-10-13
 

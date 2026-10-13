@@ -94,9 +94,11 @@ This file sets the outbound allowlist and the unconditional metadata chains. The
 - Never use `-m set` in a rule. It needs `CAP_NET_RAW`, which the devcontainer drops, so `enable` fails there. `accept_set_members_v4()` writes one exact `-d` rule for each member of the inactive set.
 - Never silently ignore configured IPv6 that cannot be filtered.
 - The host status relay uses its own ipset and an exact TCP-8787 rule. Never put `host.docker.internal` in the general all-port allowlist.
+- `is_internal_name()` refuses `localhost`, `*.localhost`, `*.internal`, and the managed service names in `firewall-allowlist` and in the presets. `refuse_internal_addresses_v4()` aborts the enable when the allowlist set holds the default gateway or an address of a host-gateway name or a managed service. Thus a raw address or a name that resolves there also fails.
 - A preset host comes only from the fixed `preset_domains()` table. A project file selects names, never hosts. Keep the names equal to `FIREWALL_PRESETS` in `lib/validate.mjs`.
 - `auto` only enables, and only when `.devcontainer/firewall-enable` exists. Keep the fail-closed start command in both Compose templates. See "Declarative enable and presets" in [Runtime policy](runtime-policy.md#declarative-enable-and-presets).
 - There is no `disable` or `flush` subcommand.
+- `enable` pins each allowlist name to its allowed addresses in a managed block in `/etc/hosts`. A CDN name (Fastly, CloudFront) gives other valid addresses to other resolvers, with a TTL of seconds. Without the pins, a later lookup in the container gets an address that the rules block. Pin only names of the allowlist set and only addresses in that set: never the socket proxy or the status relay. Remove the old block before the lookups (`getent` reads `/etc/hosts`), and write the new block after the IPv4 switch. A failed write is a warning: the rules stay on. `write_hosts_file()` never truncates first (it opens without `O_TRUNC`, writes, then cuts the tail) and ignores the signals that sudo relays while it writes.
 
 The OUTPUT chains accept `ESTABLISHED,RELATED` only with `--ctdir REPLY`. This matches replies to sessions that started from outside.
 
