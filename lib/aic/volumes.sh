@@ -317,7 +317,7 @@ initialize_managed_volumes () {
 
   # The sanitizer is a one-shot service. Remove its exited container so every
   # create re-runs it and refreshes allowlisted host preferences.
-  docker compose -p "$project" -f "$(trusted_compose_template)" rm -sf aic-seed-sanitizer >/dev/null 2>&1 || true
+  trusted_template_compose -p "$project" -f "$(trusted_compose_template)" rm -sf aic-seed-sanitizer >/dev/null 2>&1 || true
 }
 
 # After sync, an old devcontainer stack may still be running under the legacy
@@ -374,7 +374,7 @@ stop_owned_stack_named () {
 
   echo "aic: stopping this workspace's legacy Compose stack '$legacy' (current managed name: '$expected')"
   template="$(trusted_compose_template)"
-  docker compose -p "$legacy" -f "$template" down \
+  trusted_template_compose -p "$legacy" -f "$template" down \
     || err "could not stop legacy stack '$legacy'; continuing with the isolated project name"
 }
 

@@ -1,8 +1,8 @@
 {
-  "name": "aic-project",
+  "name": "aic-fixture-0123456789ab",
   "networks": {
     "default": {
-      "name": "aic-project_default",
+      "name": "aic-fixture-0123456789ab_default",
       "ipam": {}
     }
   },
@@ -374,10 +374,10 @@
       "external": true
     },
     "aic-sanitized-seed": {
-      "name": "aic-project_aic-sanitized-seed"
+      "name": "aic-fixture-0123456789ab_aic-sanitized-seed"
     },
     "aic-sessions": {
-      "name": "aic-project_aic-sessions"
+      "name": "aic-fixture-0123456789ab_aic-sessions"
     },
     "aic-shell-history": {
       "name": "aic-shell-history",

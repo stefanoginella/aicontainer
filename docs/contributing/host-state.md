@@ -14,9 +14,23 @@ The selected local Docker socket is generated host state. `aic init`, `aic sync`
 
 The managed `template/gitignore` is copied as `.devcontainer/.gitignore`, and it excludes that file. So rootless Docker, Docker Desktop, Colima, and OrbStack work without flags and without machine-specific diffs.
 
+### The project name in `.env`
+
+`.devcontainer/.env` also holds `AIC_PROJECT_NAME`, the path-unique Compose project name. The committed name line of the Compose file reads it (see [Project identity](project-identity.md#path-unique-project-name)). The same writes create it, and the same exact-content check covers it:
+
+- `write_runtime_environment_file()` writes one fixed set of keys in one fixed order.
+- `validate_runtime_environment_file()` compares the whole file with the expected content. A changed value, an added key, or a duplicate key (Compose takes the last one) is a finding.
+- `aic validate` is read-only. It does not write `.env`: it exports `AIC_PROJECT_NAME` for its own Compose calls. A missing `.env` is not a finding.
+- A `.devcontainer/.env` that Git tracks is a MANAGED finding in the gate and a failure in `doctor` (`runtime_environment_file_tracked()`). Rules for that query:
+  - It matches every letter case (`:(icase)` pathspec), because `.devcontainer/.ENV` is the same file on a case-insensitive volume.
+  - It fails closed. `git ls-files` exits 0 for a match and for no match, so the output decides. Any other exit status is a finding.
+  - It runs only when `git_control_path_problems()` reports nothing. A planted `.git/commondir` would make host Git read the config of another directory. That problem is already a finding.
+  - It runs host Git with `core.fsmonitor` off.
+
 Hard rules:
 
 - Do not trust `AIC_DOCKER_SOCKET` from the environment or from the repository.
+- Do not trust `AIC_PROJECT_NAME` from the environment or from the repository. `aic` exports its own value, and a direct start refuses a different one.
 - Do not accept a remote TCP/SSH endpoint.
 - Do not make the dotenv grammar wider.
 - Keep `.env`/`.gitignore` in the control-path checks and in the template copies.

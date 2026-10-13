@@ -225,7 +225,7 @@ cmd_down () {
   # host-side code; --remove-orphans still removes every project-labelled
   # override service without evaluating that untrusted file.
   stop_owned_legacy_stack
-  docker compose -p "$project" -f "$template" down --remove-orphans
+  trusted_template_compose -p "$project" -f "$template" down --remove-orphans
 }
 
 cmd_destroy () {
@@ -271,7 +271,7 @@ cmd_destroy () {
   fi
 
   stop_owned_legacy_stack
-  docker compose -p "$project" -f "$template" down --volumes --remove-orphans
+  trusted_template_compose -p "$project" -f "$template" down --volumes --remove-orphans
   docker volume rm "$vol" 2>/dev/null || true
   docker volume rm "$seed_vol" 2>/dev/null || true
   echo "aic: destroyed '$project' (container + per-project volumes removed)."

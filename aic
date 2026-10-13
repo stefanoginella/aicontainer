@@ -34,6 +34,13 @@ TEMPLATE_DIR="$AIC_HOME/template"
 aic_bind_source=""
 # shellcheck disable=SC2034
 aic_bind_source_for=""
+# The AIC_PROJECT_NAME that this process inherited. aic exports its own value
+# before Compose runs, so check_devcontainer_project_name() reads this copy to
+# judge the environment that a direct Dev Containers start has.
+# shellcheck disable=SC2034
+if [ -n "${AIC_PROJECT_NAME+set}" ]; then aic_inherited_project_name_set=1; else aic_inherited_project_name_set=0; fi
+# shellcheck disable=SC2034
+aic_inherited_project_name="${AIC_PROJECT_NAME-}"
 
 err()  { echo "aic: $*" >&2; }
 die()  { err "$*"; exit 1; }

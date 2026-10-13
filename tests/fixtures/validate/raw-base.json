@@ -1,8 +1,8 @@
 {
-  "name": "aic-fixture-0123456789ab",
+  "name": "aic_project_namerunaicuporaicsync",
   "networks": {
     "default": {
-      "name": "aic-fixture-0123456789ab_default"
+      "name": "aic_project_namerunaicuporaicsync_default"
     }
   },
   "services": {
@@ -381,10 +381,10 @@
       "name": "aic-auth-global"
     },
     "aic-sanitized-seed": {
-      "name": "aic-fixture-0123456789ab_aic-sanitized-seed"
+      "name": "aic_project_namerunaicuporaicsync_aic-sanitized-seed"
     },
     "aic-sessions": {
-      "name": "aic-fixture-0123456789ab_aic-sessions"
+      "name": "aic_project_namerunaicuporaicsync_aic-sessions"
     },
     "aic-shell-history": {
       "external": true,
