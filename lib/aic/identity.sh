@@ -112,7 +112,9 @@ project_name () {
 compose_name_line_problem () {
   local file=.devcontainer/docker-compose.yml first
   [ -f "$file" ] && [ ! -L "$file" ] || return 0
-  first="$(grep -vE '^[[:space:]]*(#|$)' "$file" | head -n1)"
+  # sed stops at the first line itself. A `grep | head` pipe here wrote
+  # "grep: write error: Broken pipe" where SIGPIPE is ignored (CI runners).
+  first="$(sed -n -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' -e p -e q "$file")"
   if ! printf '%s\n' "$first" | grep -qE '^[A-Za-z][A-Za-z0-9_-]*:'; then
     printf '%s\n' ".devcontainer/docker-compose.yml must start its top-level mapping with a plain key at column 0; run aic sync"
   elif [ "$(grep -cE '^name[[:space:]]*:' "$file")" != "1" ] \

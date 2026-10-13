@@ -165,7 +165,10 @@ check_for_update () {
 # Compose commonly add a leading "v" or a vendor suffix; diagnostics only need
 # the numeric compatibility floor.
 diagnostic_version () {
-  printf '%s\n' "$1" | grep -Eo '[0-9]+(\.[0-9]+){0,2}' | head -n1 || true
+  # A bash match, not `grep -o | head`: that pipe prints a broken-pipe error
+  # where SIGPIPE is ignored. Both take the leftmost, longest match.
+  [[ "$1" =~ [0-9]+(\.[0-9]+){0,2} ]] && printf '%s\n' "${BASH_REMATCH[0]}"
+  return 0
 }
 
 version_at_least () {
