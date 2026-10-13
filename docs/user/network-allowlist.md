@@ -30,6 +30,12 @@ To add hosts for one project, put them in `.devcontainer/firewall-allowlist`.
 Write one validated domain on each line. `#` comments are permitted. After you
 edit the file, run `sudo aic-firewall enable` again.
 
+The file cannot open the host or the services of the stack. `enable` refuses
+`localhost`, `*.localhost`, `*.internal` (for example `host.docker.internal`),
+the managed service names (`socket-proxy`, `aic-auth-sync`,
+`aic-seed-sanitizer`, `devcontainer`), and every entry that resolves to the
+host gateway or to a managed service. The active policy then stays the same.
+
 ## Enable the allowlist on every start
 
 The firewall rules do not survive a container restart. To turn the firewall on
@@ -120,8 +126,13 @@ impossible:
   go out inside DNS queries.
 - *Rules match IP addresses, resolved one time.* `enable` resolves each name
   to the addresses that it has at that moment. The firewall also allows all
-  other hosts that share one of those addresses. If the addresses of a host
-  change later, you possibly must run `sudo aic-firewall enable` again.
+  other hosts that share one of those addresses. `enable` also writes each
+  allowed name with these addresses into `/etc/hosts`, so programs in the
+  container connect only to them. Many hosts are on a CDN, which gives
+  different addresses at different times. If an address stops working later,
+  restart the container or run `sudo aic-firewall enable` again. Tools that
+  query DNS directly (`dig`, `nslookup`) do not read `/etc/hosts` and can show
+  other addresses, which the firewall blocks.
 - *It applies from the moment you run it.* It does not undo what the agent
   did before: data that it read or sent, code that it installed. Run `enable`
   before you start the agent.
@@ -147,6 +158,10 @@ impossible:
   `firewall-allowlist`) need no `aic trust`. The firewall only restricts the
   open default, so a file in a cloned repository cannot give more egress than
   a project without the files. Review them as part of the repository.
+- The pins in `/etc/hosts` are in a managed block between
+  `# BEGIN aic-firewall` and `# END aic-firewall`. `enable` replaces the block.
+  `sudo aic-firewall status` shows the number of pinned addresses. The agent
+  cannot change the file.
 - The firewall needs only `NET_ADMIN`. `NET_RAW` stays dropped. If IPv6 is
   configured but the firewall cannot filter it, `enable` refuses a policy that
   IPv6 can bypass.

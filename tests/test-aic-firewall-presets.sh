@@ -154,6 +154,150 @@ if load_preset_domains test-set >/dev/null 2>&1; then
 fi
 echo "OK: firewall-presets selects fixed names only; hosts, unknown names, and links abort the enable"
 
+# --- /etc/hosts pins ---------------------------------------------------------------
+# A CDN name resolves to other valid addresses on each resolver. enable pins
+# each allowlist name to its allowed addresses, so a later lookup in the
+# container cannot get an address that the rules block.
+is_prohibited_v4() { [[ "$1" == 169.254.* ]]; }
+ipset() { :; }
+HOSTS_FILE="$TMP/hosts"
+docker_hosts='127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+172.18.0.3	abc123
+192.168.65.254	host.docker.internal'
+printf '%s\n' "$docker_hosts" > "$HOSTS_FILE"
+# shellcheck disable=SC2034 # read by add_resolved_ipv4 in the sourced helper
+PIN_SET=aic-allowed-v4-a
+PIN_LINES=()
+PROHIBITED_RESOLUTION=0
+add_resolved_ipv4 aic-allowed-v4-a index.crates.io 52.85.185.102
+add_resolved_ipv4 aic-allowed-v4-a index.crates.io 151.101.2.137
+add_resolved_ipv4 aic-allowed-v4-a index.crates.io 151.101.2.137
+add_resolved_ipv4 aic-allowed-v4-a api.github.com 140.82.121.5
+add_resolved_ipv4 aic-allowed-v4-a evil.example 169.254.169.254 2>/dev/null
+add_resolved_ipv4 aic-status-v4-a host.docker.internal 192.168.65.254
+add_resolved_ipv4 aic-proxy-v4-a socket-proxy 172.18.0.2
+[ "$PROHIBITED_RESOLUTION" = 1 ] || fail "a prohibited address was not refused"
+pin_hosts || fail "pin_hosts failed on a writable hosts file"
+expected_hosts="$docker_hosts
+$HOSTS_BEGIN
+140.82.121.5 api.github.com
+151.101.2.137 index.crates.io
+52.85.185.102 index.crates.io
+$HOSTS_END"
+[ "$(cat "$HOSTS_FILE")" = "$expected_hosts" ] \
+  || fail "pin_hosts did not pin exactly the allowlist set addresses:
+$(cat "$HOSTS_FILE")"
+
+# shellcheck disable=SC2034 # read by pin_hosts in the sourced helper
+PIN_LINES=("151.101.66.137 index.crates.io")
+pin_hosts || fail "a second pin_hosts failed"
+[ "$(cat "$HOSTS_FILE")" = "$docker_hosts
+$HOSTS_BEGIN
+151.101.66.137 index.crates.io
+$HOSTS_END" ] || fail "a second enable kept old pins or added a second block:
+$(cat "$HOSTS_FILE")"
+unpin_hosts || fail "unpin_hosts failed"
+[ "$(cat "$HOSTS_FILE")" = "$docker_hosts" ] \
+  || fail "unpin_hosts changed lines outside the managed block:
+$(cat "$HOSTS_FILE")"
+
+printf '%s\n' "$docker_hosts" > "$TMP/real-hosts"
+rm -f "$HOSTS_FILE"
+ln -s "$TMP/real-hosts" "$HOSTS_FILE"
+if pin_hosts || unpin_hosts; then
+  fail "the pins followed a symlinked hosts file"
+fi
+[ "$(cat "$TMP/real-hosts")" = "$docker_hosts" ] || fail "the symlink target of the hosts file changed"
+rm -f "$HOSTS_FILE"
+
+# The write is never a truncate first (the file is never empty), and the
+# signals that sudo relays from the agent are ignored while it writes.
+if grep -Eq '(^|[^<])>>?[[:space:]]*"\$HOSTS_FILE"' "$FIREWALL"; then
+  fail "aic-firewall truncates /etc/hosts with a > redirect; use write_hosts_file"
+fi
+printf 'old line one that is long\nold line two that is long\n' > "$HOSTS_FILE"
+truncate() { trap -p TERM INT HUP TSTP > "$TMP/traps-during-write"; command truncate "$@"; }
+write_hosts_file "short"$'\n' || fail "write_hosts_file failed"
+unset -f truncate
+[ "$(cat "$HOSTS_FILE")" = "short" ] || fail "write_hosts_file left old content: $(cat "$HOSTS_FILE")"
+for sig in TERM INT HUP TSTP; do
+  grep -Eq "^trap -- '' (SIG)?$sig\$" "$TMP/traps-during-write" \
+    || fail "write_hosts_file does not ignore $sig while it writes: $(cat "$TMP/traps-during-write")"
+done
+[ -z "$(trap -p TERM)" ] || fail "write_hosts_file did not restore the TERM handler"
+rm -f "$HOSTS_FILE"
+
+# --- Internal names never get the all-port allowlist rule ----------------------
+for name in host.docker.internal gateway.docker.internal host.containers.internal \
+    metadata.google.internal localhost foo.localhost socket-proxy aic-auth-sync \
+    aic-seed-sanitizer devcontainer aic-proj-0123abcd-socket-proxy-1; do
+  is_internal_name "$name" || fail "is_internal_name accepted $name"
+done
+for name in index.crates.io socket-proxy.example.com internal.example.com api.github.com; do
+  if is_internal_name "$name"; then fail "is_internal_name refused the public name $name"; fi
+done
+for name in $PRESET_NAMES; do
+  for host in $(preset_domains "$name"); do
+    if is_internal_name "$host"; then fail "preset $name has the internal host $host"; fi
+  done
+done
+for d in "${DEFAULT_ALLOWLIST[@]}"; do
+  if is_internal_name "$d"; then fail "the default allowlist has the internal host $d"; fi
+done
+# normalize_domain needs bash 4 (${x,,}); macOS /bin/bash is 3.2. CI runs this
+# part, and the static check below runs everywhere.
+printf '%s\n' "$(sed -n '/^load_extra_domains() {/,/^}/p' "$FIREWALL")" \
+  | grep -A1 -F 'normalize_domain "$domain") || return 1' | grep -Fq 'if is_internal_name "$domain"; then' \
+  || fail "load_extra_domains does not refuse internal names right after normalize_domain"
+EXTRA_FILE="$TMP/firewall-allowlist"
+if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
+for bad in host.docker.internal Socket-Proxy localhost aic-proj-0123abcd-socket-proxy-1; do
+  printf 'example.com\n%s\n' "$bad" > "$EXTRA_FILE"
+  LOADED=""
+  if load_extra_domains test-set >/dev/null 2>&1; then
+    fail "firewall-allowlist line '$bad' was accepted"
+  fi
+done
+printf 'example.com\n' > "$EXTRA_FILE"
+LOADED=""
+load_extra_domains test-set >/dev/null 2>&1 || fail "a public firewall-allowlist name was refused"
+[ "$LOADED" = "example.com " ] || fail "firewall-allowlist loaded the wrong hosts: $LOADED"
+rm -f "$EXTRA_FILE"
+fi
+
+# An address of the host gateway or a managed service in the allowlist set
+# (a raw address line, or a name that resolves to it) aborts the enable.
+internal_addresses_v4() { printf '%s\n' 172.18.0.1 192.168.65.254 172.18.0.2; }
+ipset_members_v4() { printf '%s\n' 151.101.2.137 140.82.121.5; }
+refuse_internal_addresses_v4 test-set 2>/dev/null || fail "a public allowlist set was refused"
+ipset_members_v4() { printf '%s\n' 151.101.2.137 192.168.65.254; }
+if refuse_internal_addresses_v4 test-set 2>/dev/null; then
+  fail "an allowlist set with the host-gateway address was accepted"
+fi
+ipset_members_v4() { printf '%s\n' 172.18.0.2/32; }
+if refuse_internal_addresses_v4 test-set 2>/dev/null; then
+  fail "an allowlist set with the socket-proxy address was accepted"
+fi
+enable_body=$(sed -n '/^enable_policy() {/,/^}/p' "$FIREWALL")
+printf '%s\n' "$enable_body" | grep -Fq 'refuse_internal_addresses_v4 "$allow_set" || exit 1' \
+  || fail "enable_policy does not refuse internal addresses in the allowlist set"
+echo "OK: internal names and addresses never get the all-port allowlist rule"
+
+# Order in enable_policy: remove the old pins before the first lookup (getent
+# reads /etc/hosts), and pin only after the switch to the new rules.
+enable_body=$(sed -n '/^enable_policy() {/,/^}/p' "$FIREWALL")
+line_of() { printf '%s\n' "$enable_body" | grep -n -m1 -- "$1" | cut -d: -f1; }
+unpin_at=$(line_of 'unpin_hosts')
+pin_set_at=$(line_of 'PIN_SET="$allow_set"')
+resolve_at=$(line_of 'resolve_domain_into_set')
+switch_at=$(line_of 'switch_chain_v4 OUTPUT')
+pin_at=$(line_of '! pin_hosts')
+[ -n "$unpin_at" ] && [ -n "$pin_set_at" ] && [ -n "$resolve_at" ] && [ -n "$switch_at" ] && [ -n "$pin_at" ] \
+  && [ "$unpin_at" -lt "$resolve_at" ] && [ "$pin_set_at" -lt "$resolve_at" ] && [ "$switch_at" -lt "$pin_at" ] \
+  || fail "enable_policy must unpin before it resolves and pin after the IPv4 switch"
+echo "OK: enable pins the allowlist names to the allowed addresses only, and replaces the old pins"
+
 # --- auto: enable only on the marker; never weaken -------------------------------
 CALLS=""
 ACTIVE=""

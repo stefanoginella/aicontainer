@@ -558,8 +558,10 @@ jobs:
           # the crates preset. The files need no trust. Every start (also a
           # plain `docker restart`, outside Dev Containers) must enable the
           # firewall. The selected preset host passes; the host of a preset
-          # that is not selected, and any other host, stay blocked. The agent
-          # cannot remove the marker or turn the firewall off.
+          # that is not selected, and any other host, stay blocked. The
+          # allowlist names are pinned to the allowed addresses in /etc/hosts.
+          # The agent cannot remove the marker, change the pins, or turn the
+          # firewall off.
           set -euo pipefail
           mkdir -p /tmp/proj-fw && cd /tmp/proj-fw && git init -q
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build --force
@@ -576,8 +578,28 @@ jobs:
           check_firewall() {
             devcontainer exec --workspace-folder . bash -lc '
               set -u
-              sudo -n /usr/local/bin/aic-firewall status | grep -q "policy DROP" \
+              fw_status=$(sudo -n /usr/local/bin/aic-firewall status)
+              printf "%s\n" "$fw_status" | grep -q "policy DROP" \
                 || { echo "FAIL: the declared firewall is off after start"; exit 1; }
+              # index.crates.io is a CDN name: each resolver can get other
+              # valid addresses, with a TTL of seconds. enable pins the
+              # allowed addresses in /etc/hosts, so every address that the
+              # container resolves for the name is in the active rules.
+              pins=$(sed -n "/^# BEGIN aic-firewall/,/^# END aic-firewall/p" /etc/hosts)
+              printf "%s\n" "$pins" | grep -Eq "^[0-9.]+ index\.crates\.io$" \
+                || { echo "FAIL: the selected preset host index.crates.io is not pinned"; exit 1; }
+              if printf "%s\n" "$pins" | grep -q "proxy\.golang\.org"; then
+                echo "FAIL: proxy.golang.org is pinned, but the go preset is not selected"; exit 1
+              fi
+              resolved=$(getent ahostsv4 index.crates.io | awk "{print \$1}" | sort -u)
+              [ -n "$resolved" ] || { echo "FAIL: index.crates.io does not resolve"; exit 1; }
+              for addr in $resolved; do
+                printf "%s\n" "$fw_status" | grep -Fqx "$addr" \
+                  || { echo "FAIL: index.crates.io resolves to $addr, which the rules do not allow"; exit 1; }
+              done
+              if { echo "192.0.2.1 index.crates.io" >> /etc/hosts; } 2>/dev/null; then
+                echo "FAIL: the agent could change the pinned names in /etc/hosts"; exit 1
+              fi
               curl -fsS --max-time 20 -o /dev/null https://index.crates.io/config.json \
                 || { echo "FAIL: the selected preset host index.crates.io is blocked"; exit 1; }
               if curl -sS --max-time 8 -o /dev/null https://proxy.golang.org/ 2>/dev/null; then
@@ -606,8 +628,10 @@ jobs:
           docker restart "$cid" >/dev/null
           on=0
           for _ in $(seq 60); do
-            if docker exec -u vscode "$cid" sudo -n /usr/local/bin/aic-firewall status 2>/dev/null \
-                | grep -q "policy DROP"; then
+            # Read all the output first: with pipefail, `grep -q` can end
+            # docker exec with SIGPIPE and hide a firewall that is on.
+            st=$(docker exec -u vscode "$cid" sudo -n /usr/local/bin/aic-firewall status 2>/dev/null) || st=""
+            if printf '%s\n' "$st" | grep -q "policy DROP"; then
               on=1; break
             fi
             sleep 1
