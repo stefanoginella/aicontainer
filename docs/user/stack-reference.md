@@ -180,8 +180,9 @@ Then add the post-create steps of each stack. Follow these rules:
   container start, but aic logs it.
 - **Do not run a Git hook installer unconditionally.** `.git/hooks` is
   read-only in the container, so `lefthook install`, `husky install`, and
-  `pre-commit install` fail. The host installs the hooks. The container only
-  needs the hook tool on `PATH`. Use this form:
+  `pre-commit install` fail. The host installs the hooks: keep them safe as
+  [Git hooks on the host](security.md#git-hooks-on-the-host) shows. The
+  container only needs the hook tool on `PATH`. Use this form:
 
   ```bash
   if ! command -v lefthook >/dev/null 2>&1; then

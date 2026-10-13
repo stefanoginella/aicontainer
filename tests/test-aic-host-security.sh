@@ -3175,6 +3175,104 @@ done
 rm "$TMP/git-paths/.devcontainer/docker-compose.override.yml"
 git_paths_check "$TMP/git-paths" sync >/dev/null
 
+# Host Git runs hooks from core.hooksPath, through hook symlinks, and the
+# programs that core.fsmonitor and core.sshCommand name. doctor, up, and
+# rebuild warn when one of these is in the worktree. They check only paths,
+# and they never run a hook.
+new_project "$TMP/git-hooks"
+hooks_doctor() { git_paths_check "$TMP/git-hooks" doctor || true; }
+hooks_warns() {
+  local out; out=$(hooks_doctor)
+  echo "$out" | grep '^WARN  ' | grep -Fq "$1" || { printf '%s\n' "$out" >&2; fail "doctor did not warn: $1"; }
+}
+hooks_clean() {
+  local out; out=$(hooks_doctor)
+  echo "$out" | grep -q '^OK    host Git hooks and hook programs are outside the worktree$' \
+    || { printf '%s\n' "$out" >&2; fail "doctor warned about safe Git hooks ($1)"; }
+}
+marker="$TMP/git-hook-ran"
+hook_body="#!/bin/sh
+touch '$marker'
+"
+for hook in pre-commit post-checkout pre-push fsmonitor-watchman; do
+  printf '%s' "$hook_body" > "$TMP/git-hooks/.git/hooks/$hook.sample"
+done
+chmod +x "$TMP/git-hooks/.git/hooks/"*
+hooks_clean "default .git/hooks with only samples"
+mkdir -p "$TMP/host-hooks"
+printf '%s' "$hook_body" > "$TMP/host-hooks/pre-commit"; chmod +x "$TMP/host-hooks/pre-commit"
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/host-hooks"
+hooks_clean "core.hooksPath outside the worktree"
+git -C "$TMP/git-hooks" config core.hooksPath .git/hooks
+hooks_clean "core.hooksPath set to .git/hooks"
+mkdir -p "$TMP/git-hooks/.githooks"
+for hook in pre-commit post-checkout post-index-change reference-transaction; do
+  printf '%s' "$hook_body" > "$TMP/git-hooks/.githooks/$hook"
+done
+chmod +x "$TMP/git-hooks/.githooks/"*
+git -C "$TMP/git-hooks" config core.hooksPath .githooks
+hooks_warns 'core.hooksPath is in the worktree (.githooks)'
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/git-hooks/.git/../.githooks"
+hooks_warns 'core.hooksPath is in the worktree'
+ln -s "$TMP/git-hooks/.githooks" "$TMP/linked-hooks"
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/linked-hooks"
+hooks_warns 'core.hooksPath is in the worktree'
+git -C "$TMP/git-hooks" config --unset core.hooksPath
+ln -s ../../.githooks/pre-commit "$TMP/git-hooks/.git/hooks/pre-commit"
+hooks_warns 'the Git hook .git/hooks/pre-commit is a symlink into the worktree'
+rm "$TMP/git-hooks/.git/hooks/pre-commit"
+ln -s "$TMP/git-hooks/.githooks/pre-commit" "$TMP/host-hooks/pre-push"
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/host-hooks"
+hooks_warns 'host-hooks/pre-push is a symlink into the worktree'
+rm "$TMP/host-hooks/pre-push"
+chmod 000 "$TMP/host-hooks"
+if [ ! -r "$TMP/host-hooks" ]; then
+  hooks_warns 'the Git hooks directory'
+fi
+chmod 755 "$TMP/host-hooks"
+git -C "$TMP/git-hooks" config core.fsmonitor true
+git -C "$TMP/git-hooks" config core.sshCommand 'ssh -o BatchMode=yes'
+hooks_clean "core.fsmonitor true and an ssh on PATH"
+git -C "$TMP/git-hooks" config core.fsmonitor .githooks/pre-commit
+hooks_warns 'core.fsmonitor runs a relative path (.githooks/pre-commit)'
+git -C "$TMP/git-hooks" config core.fsmonitor "$TMP/git-hooks/.githooks/pre-commit"
+hooks_warns 'core.fsmonitor runs a program in the worktree'
+git -C "$TMP/git-hooks" config --unset core.fsmonitor
+git -C "$TMP/git-hooks" config core.sshCommand "$TMP/git-hooks/.githooks/pre-commit -v"
+hooks_warns 'core.sshCommand runs a program in the worktree'
+# up and rebuild print the same problems as one stderr line, and still start
+# with the same exit code.
+git -C "$TMP/git-hooks" config core.hooksPath .githooks
+ln -s ../../.githooks/pre-commit "$TMP/git-hooks/.git/hooks/pre-commit"
+for command in up rebuild; do
+  : > "$log"
+  out=$(git_paths_run "$TMP/git-hooks" "$command") || fail "$command failed when it only had to warn about Git hooks"
+  [ "$(echo "$out" | grep -c 'warning: host Git can run code that the agent changes')" = 1 ] \
+    || { printf '%s\n' "$out" >&2; fail "$command did not print one Git hooks warning line"; }
+  echo "$out" | grep 'warning: host Git can run' | grep -Fq 'core.hooksPath is in the worktree (.githooks)' \
+    || fail "$command did not name core.hooksPath"
+  echo "$out" | grep 'warning: host Git can run' | grep -Fq 'core.sshCommand runs a program in the worktree' \
+    || fail "$command did not join the problems into its one warning line"
+  grep -Fq 'devcontainer <up>' "$log" || fail "$command did not start after the Git hooks warning: $(cat "$log")"
+done
+git -C "$TMP/git-hooks" config --unset core.sshCommand
+git -C "$TMP/git-hooks" config --unset core.hooksPath
+rm "$TMP/git-hooks/.git/hooks/pre-commit"
+out=$(git_paths_run "$TMP/git-hooks" up) || fail "up failed with safe Git hooks"
+echo "$out" | grep -q 'Git can run code' && fail "up warned about safe Git hooks"
+# A core.hooksPath that Git cannot read (an unknown ~user exits 128) gives a
+# warning, and up still starts. Under bash 4+ an unset variable here once
+# stopped the start with exit 1.
+git -C "$TMP/git-hooks" config core.hooksPath '~aic-no-such-user/hooks'
+hooks_warns 'could not read core.hooksPath'
+: > "$log"
+out=$(git_paths_run "$TMP/git-hooks" up) || fail "up failed when Git could not read core.hooksPath"
+grep -Fq 'devcontainer <up>' "$log" || fail "up did not start when Git could not read core.hooksPath"
+# git -C cannot run with this value set, so edit the file directly.
+git config --file "$TMP/git-hooks/.git/config" --unset core.hooksPath
+[ ! -e "$marker" ] || fail "a Git hook check ran a hook"
+git_paths_check "$TMP/git-hooks" sync >/dev/null
+
 # `aic signing` creates the signing/ dir as vscode (0700, owned by the runtime
 # UID) inside the container. The host-side signing_state probe runs busybox as
 # root, so it must keep DAC_READ_SEARCH: without it root cannot traverse that

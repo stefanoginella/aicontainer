@@ -239,4 +239,6 @@ These items stay writable by the agent by design:
 
 A read-only `.git/modules` would break submodule work. It also would not stop the agent from adding a new nested repository to the index. The user guide documents these residual risks for host Git (see [Threat model](../user/security.md)).
 
+`git_hooks_problems()` (`identity.sh`) warns when `core.hooksPath`, a hook symlink, or the program of `core.fsmonitor` or `core.sshCommand` is in the worktree. `aic doctor` (`git-hooks`), `aic up`, and `aic rebuild` call it only after the control-path checks pass. It checks paths only: it never reads what a hook does, never runs a hook, and never blocks a start. Guarded by the `git-hooks` cases in `tests/test-aic-host-security.sh`.
+
 Guarded by the Git-control cases in `tests/test-aic-host-security.sh` and the "Git control paths" smoke in `smoke.yml`.

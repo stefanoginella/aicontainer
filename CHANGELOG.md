@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`aic doctor`, `aic up`, and `aic rebuild` warn when host Git can run code
+  that the agent changes.** The new doctor check `git-hooks` warns when
+  `core.hooksPath`, a hook symlink, or the program of `core.fsmonitor` or
+  `core.sshCommand` is in the worktree. aic checks only where these files are,
+  never what they do, and it never runs a hook. The warning never stops a
+  start. See "Git hooks on the host" in the security guide. (aic)
+
 - **`doctor`, `status`, `validate`, and `version` take `--json`.** Each prints
   one JSON object with a `schema` version on stdout; checks, findings, and
   exit codes stay the same. `aic version` now refuses arguments other than

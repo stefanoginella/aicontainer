@@ -181,7 +181,7 @@ test('doctor --json: ready, warnings, and blockers keep the exit status', () => 
   assert.deepEqual(obj.checks.map(c => c.id).filter((id, i, a) => a.indexOf(id) === i), [
     'node', 'docker-daemon', 'docker-engine', 'docker-socket', 'docker-runtime',
     'compose-version', 'compose-flags', 'compose-subpath', 'devcontainer-cli', 'git-root',
-    'git-control-paths', 'install', 'control-paths', 'runtime-env', 'project-identity',
+    'git-control-paths', 'git-hooks', 'install', 'control-paths', 'runtime-env', 'project-identity',
     'devcontainer-name',
   ]);
 

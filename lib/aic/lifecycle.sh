@@ -62,6 +62,7 @@ cmd_up () {
   require_in_project
   pin_compose_project_name
   ensure_git_control_paths strict
+  warn_git_hooks
   write_runtime_environment_file
   # Keep the readable raw warning, then enforce structural + resolved-Compose
   # validation. Ordinary generated projects produce no prompt or extra output.
@@ -174,6 +175,7 @@ cmd_rebuild () {
   require_in_project
   pin_compose_project_name
   ensure_git_control_paths strict
+  warn_git_hooks
   write_runtime_environment_file
   scan_project_overrides warn
   validate_project_security gate "$allow_unsafe"
