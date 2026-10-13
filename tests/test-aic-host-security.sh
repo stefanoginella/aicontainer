@@ -400,6 +400,8 @@ echo "$out" | grep -q "\.git/commondir must contain only '\.'" \
   "$ROOT/aic" doctor >/dev/null 2>&1) && fail "doctor reported ready with a planted .git/commondir"
 grep -q 'ls-files' "$TMP/git-wrap.log" \
   && fail "host Git ran the tracked-.env check with a planted .git/commondir"
+grep -q 'rev-parse' "$TMP/git-wrap.log" \
+  && fail "doctor ran host Git rev-parse with a planted .git/commondir"
 printf '.\n' > "$TMP/clone/api/.git/commondir"
 clone_validate >/dev/null || fail "validate refused the clone after the commondir was restored"
 version=$(node -p 'require(process.argv[1]).version' "$ROOT/package.json")

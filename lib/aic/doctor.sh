@@ -210,11 +210,17 @@ doctor_check_devcontainer_cli () {
 }
 
 # Check Git, the Git-root shape, and, in an initialized project, the Git
-# control paths.
+# control paths. The control paths are checked first: host Git reads the
+# config that a planted .git/commondir names, so Git runs only when they pass.
 doctor_check_git () {
-  local git_root git_problems line
+  local git_root git_problems="" line
+  if [ -d .devcontainer ]; then
+    git_problems="$(git_control_path_problems)"
+  fi
   if ! command -v git >/dev/null 2>&1; then
     doctor_fail "Git not found — install Git before creating an aicontainer project"
+  elif [ -n "$git_problems" ]; then
+    doctor_warn "Git project root not checked: the Git control paths below are unsafe"
   elif git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     git_root="$(cd "$git_root" && canonical_root)"
     if [ "$git_root" = "$(canonical_root)" ]; then
@@ -226,7 +232,6 @@ doctor_check_git () {
     doctor_warn "not in a Git project; cd to a project root before 'aic init'"
   fi
   if [ -d .devcontainer ]; then
-    git_problems="$(git_control_path_problems)"
     if [ -n "$git_problems" ]; then
       while IFS= read -r line; do
         doctor_fail "$line"
