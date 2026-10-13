@@ -45,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`aic validate` passes in CI and in clones at other paths.** It no longer
   needs a sync first, and it does not write `.devcontainer/.env`. (aic)
 
+- **`aic doctor` no longer runs host Git when the Git control paths are
+  unsafe.** It ran `git rev-parse` before it checked them, so a planted
+  `.git/commondir` made host Git read the config of another directory.
+  (aic)
+
 ## [0.10.0] - 2026-10-12
 
 ### Security
