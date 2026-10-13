@@ -8,19 +8,61 @@
 # aic sources this file. It only defines functions.
 # =============================================================================
 
+# The pass-through options of aic up and aic rebuild, after `--`. Only these
+# devcontainer up options pass: they change only the log output. Every other
+# option can change the mounts, the configuration, the environment, the
+# container, the Docker binary, or skip post-create, so aic refuses it.
+AIC_UP_PASSTHROUGH="--log-level --log-format --terminal-columns --terminal-rows"
+
+# up_parse_args <command> [args...]: set allow_unsafe and passthrough, locals
+# of cmd_up and cmd_rebuild (bash dynamic scope). Before `--`, only
+# --allow-unsafe. After `--`, only the AIC_UP_PASSTHROUGH options, each with a
+# checked value. An unknown argument or a bad value exits 2. An option after
+# `--` that is not on the list is a security refusal: it exits 1.
+up_parse_args () {
+  local command="$1" option value
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --allow-unsafe) allow_unsafe=1 ;;
+      --) shift; break ;;
+      *) usage_die "unknown $command argument: $1 (try --allow-unsafe, or -- followed by $AIC_UP_PASSTHROUGH)" ;;
+    esac
+    shift
+  done
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --log-level=*|--log-format=*|--terminal-columns=*|--terminal-rows=*)
+        option="${1%%=*}"; value="${1#*=}" ;;
+      --log-level|--log-format|--terminal-columns|--terminal-rows)
+        flag_value "$@"; option="$1"; shift; value="$1" ;;
+      *) die "refusing to pass '$1' to devcontainer up: aic passes only $AIC_UP_PASSTHROUGH; other options can weaken the sandbox" ;;
+    esac
+    # A value that is an option is a refused option, not a bad value.
+    case "$value" in
+      -*) die "refusing to pass '$value' to devcontainer up: aic passes only $AIC_UP_PASSTHROUGH; other options can weaken the sandbox" ;;
+    esac
+    case "$option:$value" in
+      --log-level:info|--log-level:debug|--log-level:trace) ;;
+      --log-format:text|--log-format:json) ;;
+      --terminal-columns:[1-9]|--terminal-columns:[1-9][0-9]|--terminal-columns:[1-9][0-9][0-9]) ;;
+      --terminal-rows:[1-9]|--terminal-rows:[1-9][0-9]|--terminal-rows:[1-9][0-9][0-9]) ;;
+      *) usage_die "bad value for $option: '$value' (--log-level: info, debug, trace; --log-format: text, json; --terminal-columns and --terminal-rows: 1-999)" ;;
+    esac
+    passthrough+=("$option" "$value")
+    shift
+  done
+}
+
 cmd_up () {
+  local allow_unsafe=0
+  local -a passthrough=()
+  # Parse first: a bad call exits 2 before aic reads or changes anything.
+  up_parse_args up "$@"
   require_in_project
   pin_compose_project_name
   ensure_git_control_paths strict
   write_runtime_environment_file
-  local allow_unsafe=0 arg
-  local -a args=()
-  for arg in "$@"; do
-    case "$arg" in
-      --allow-unsafe) allow_unsafe=1 ;;
-      *) args+=("$arg") ;;
-    esac
-  done
   # Keep the readable raw warning, then enforce structural + resolved-Compose
   # validation. Ordinary generated projects produce no prompt or extra output.
   scan_project_overrides warn
@@ -28,16 +70,21 @@ cmd_up () {
   migrate_legacy_session_volume strict
   stop_owned_legacy_stack
   local devcontainer; devcontainer="$(resolve_devcontainer)"
-  if [ "${#args[@]}" -gt 0 ]; then
-    "$devcontainer" up --workspace-folder . "${args[@]}"
+  # Bash 3.2 (still the system Bash on macOS) treats expansion of an empty
+  # array as an unbound variable under `set -u`, even when it was declared.
+  # A failure of devcontainer up is a failure of aic up: exit 1, never the
+  # code of the Dev Container CLI, so 2 stays the code of a usage error.
+  if [ "${#passthrough[@]}" -gt 0 ]; then
+    "$devcontainer" up --workspace-folder . "${passthrough[@]}" || die "devcontainer up failed (exit $?)"
   else
-    "$devcontainer" up --workspace-folder .
+    "$devcontainer" up --workspace-folder . || die "devcontainer up failed (exit $?)"
   fi
   print_boundary_summary up
   warn_compose_drift
 }
 
 cmd_preflight () {
+  require_no_args preflight "$@"
   require_in_project
   # Review-only: surface all findings without prompting, persisting trust, or
   # failing before the boundary summary. `aic validate` is the strict CI gate.
@@ -96,6 +143,7 @@ cmd_supports () {
 # reads the repository command first, so unknown repo-supplied configuration
 # still has to be regenerated/reviewed before a direct editor bootstrap.
 cmd_initialize () {
+  require_no_args initialize "$@"
   require_in_project
   # The parent Dev Containers process has already chosen where it reads the
   # project name, and this child cannot change its environment. Refuse before
@@ -119,18 +167,14 @@ cmd_initialize () {
 }
 
 cmd_rebuild () {
+  local allow_unsafe=0
+  local -a passthrough=()
+  # Parse first: a bad call exits 2 before aic reads or changes anything.
+  up_parse_args rebuild "$@"
   require_in_project
   pin_compose_project_name
   ensure_git_control_paths strict
   write_runtime_environment_file
-  local allow_unsafe=0 arg
-  local -a args=()
-  for arg in "$@"; do
-    case "$arg" in
-      --allow-unsafe) allow_unsafe=1 ;;
-      *) args+=("$arg") ;;
-    esac
-  done
   scan_project_overrides warn
   validate_project_security gate "$allow_unsafe"
   migrate_legacy_session_volume strict
@@ -157,12 +201,13 @@ cmd_rebuild () {
     fi
   fi
   local devcontainer; devcontainer="$(resolve_devcontainer)"
-  # Bash 3.2 (still the system Bash on macOS) treats expansion of an empty
-  # array as an unbound variable under `set -u`, even when it was declared.
-  if [ "${#args[@]}" -gt 0 ]; then
-    "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache "${args[@]}"
+  # Bash 3.2 treats expansion of an empty array as unbound (see cmd_up).
+  if [ "${#passthrough[@]}" -gt 0 ]; then
+    "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache "${passthrough[@]}" \
+      || die "devcontainer up failed (exit $?)"
   else
-    "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache
+    "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache \
+      || die "devcontainer up failed (exit $?)"
   fi
 }
 
@@ -179,6 +224,7 @@ ensure_declared_firewall () {
 }
 
 cmd_shell () {
+  [ "$#" -eq 0 ] || usage_die "aic shell takes no arguments (got: $1); to run a command, use 'aic run CMD ...'"
   require_in_project
   pin_compose_project_name
   write_runtime_environment_file
@@ -197,22 +243,31 @@ cmd_shell () {
   shell="$(validate_shell "$shell")"
   case "$shell" in
     zsh)
-      "$devcontainer" exec --workspace-folder . zsh -l "$@"
+      "$devcontainer" exec --workspace-folder . zsh -l
       ;;
     bash)
       # A login bash reads writable ~/.bash_profile before ~/.bashrc. Start
       # from the root-owned managed rc directly so a prior unrestricted session
       # cannot plant persistence for the next shell.
-      "$devcontainer" exec --workspace-folder . bash --noprofile --rcfile /etc/aic/shell/bashrc -i "$@"
+      "$devcontainer" exec --workspace-folder . bash --noprofile --rcfile /etc/aic/shell/bashrc -i
       ;;
     fish)
       "$devcontainer" exec --workspace-folder . fish --no-config \
-        -C 'source /etc/fish/conf.d/aic.fish' "$@"
+        -C 'source /etc/fish/conf.d/aic.fish'
       ;;
   esac
 }
 
+# aic run [--] CMD [ARGS...]. devcontainer exec reads its own options up to
+# the first argument that is not an option, so CMD must not start with '-':
+# else `aic run --container-id X ...` or `aic run --remote-env ...` would set
+# devcontainer exec options. Every argument from CMD on goes to the command.
 cmd_run () {
+  [ "${1:-}" != "--" ] || shift
+  [ "$#" -gt 0 ] || usage_die "usage: aic run [--] CMD [ARGS...]"
+  case "$1" in
+    -*) usage_die "aic run: the command must come first, not an option: $1" ;;
+  esac
   require_in_project
   pin_compose_project_name
   write_runtime_environment_file
@@ -223,6 +278,7 @@ cmd_run () {
 }
 
 cmd_down () {
+  require_no_args down "$@"
   require_in_project
   local project template
   if ! compose_has_project_name; then
@@ -239,19 +295,21 @@ cmd_down () {
   # host-side code; --remove-orphans still removes every project-labelled
   # override service without evaluating that untrusted file.
   stop_owned_legacy_stack
-  trusted_template_compose -p "$project" -f "$template" down --remove-orphans
+  trusted_template_compose -p "$project" -f "$template" down --remove-orphans \
+    || die "docker compose down failed (exit $?)"
 }
 
 cmd_destroy () {
-  require_in_project
   local project template assume_yes=0
+  # Parse first: a bad call exits 2 before aic reads or changes anything.
   while [ $# -gt 0 ]; do
     case "$1" in
       -y|--yes) assume_yes=1 ;;
-      *) die "unknown destroy flag: $1 (try --yes)" ;;
+      *) usage_die "unknown destroy flag: $1 (try --yes)" ;;
     esac
     shift
   done
+  require_in_project
   compose_has_project_name || \
     die "refusing to destroy a basename-scoped legacy project; run 'aic sync' first"
   project="$(project_name)"
@@ -270,9 +328,10 @@ cmd_destroy () {
   echo "aic: this is irreversible. To stop the container but KEEP history, use 'aic down' instead."
 
   # Destructive non-interactive calls must be explicit. A closed stdin / CI
-  # pipeline is never implicit consent to delete persistent transcripts.
+  # pipeline is never implicit consent to delete persistent transcripts. This
+  # is a refused confirmation, not a bad call: exit 1, not 2.
   if [ "$assume_yes" -ne 1 ] && [ ! -t 0 ]; then
-    die "refusing non-interactive destroy without --yes"
+    die "refusing non-interactive destroy without --yes: stdin is not a terminal, so nothing was removed; pass --yes to confirm"
   fi
   if [ "$assume_yes" -ne 1 ]; then
     local reply
@@ -285,7 +344,8 @@ cmd_destroy () {
   fi
 
   stop_owned_legacy_stack
-  trusted_template_compose -p "$project" -f "$template" down --volumes --remove-orphans
+  trusted_template_compose -p "$project" -f "$template" down --volumes --remove-orphans \
+    || die "docker compose down failed (exit $?)"
   docker volume rm "$vol" 2>/dev/null || true
   docker volume rm "$seed_vol" 2>/dev/null || true
   echo "aic: destroyed '$project' (container + per-project volumes removed)."
@@ -299,7 +359,7 @@ cmd_validate () {
   elif [ "$#" -eq 1 ] && [ "$1" = --json ]; then
     json_run validate findings cmd_validate_run
   else
-    die "usage: aic validate [--json]"
+    usage_die "usage: aic validate [--json]"
   fi
 }
 
@@ -327,10 +387,11 @@ cmd_validate_run () {
 }
 
 cmd_upgrade () {
+  require_no_args upgrade "$@"
   check_for_update
   if [ -d "$AIC_HOME/.git" ]; then
     echo "aic: pulling latest aicontainer from $AIC_HOME"
-    git -C "$AIC_HOME" pull --ff-only
+    git -C "$AIC_HOME" pull --ff-only || die "git pull failed (exit $?)"
   else
     echo "aic: installed via npm. Upgrade with:"
     echo "    npm update -g aicontainer"
@@ -346,7 +407,7 @@ cmd_version () {
   elif [ "$#" -eq 1 ] && [ "$1" = --json ]; then
     json_run version "" cmd_version_json
   else
-    die "usage: aic version [--json]"
+    usage_die "usage: aic version [--json]"
   fi
 }
 

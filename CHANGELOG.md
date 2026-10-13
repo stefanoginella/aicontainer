@@ -30,10 +30,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.devcontainer/firewall-presets`; the hosts are fixed in the image, and the
   default allowlist does not change. (aic-firewall, validate.mjs)
 
+- **A stability contract tells tools what stays the same across releases.**
+  It lists the stable commands, flags, exit codes, JSON ids, control files,
+  and in-container paths, and the 0.x release and breaking-change policy. A
+  test keeps it equal to the code. (docs)
+
 - **A stack reference lists the project-owned files for each stack.** It gives
   copy-ready snippets for Node.js, Python, Go, Rust, Ruby, PHP, Java, and C and
   C++, in a fixed structure that tools can read. The `/aicontainer:setup`
   plugin now reads it. (docs, Claude Code plugin)
+
+### Changed
+
+- **Breaking: a usage error now exits 2, not 1.** An unknown command, flag, or
+  argument, or a missing or bad value, gives exit code 2; a refusal or a
+  blocker still gives 1. If a script reads exit code 1 as "bad call", read 2
+  instead. (aic)
+
+- **Breaking: every command refuses arguments that it does not take.** Before,
+  `down`, `upgrade`, `preflight`, `help`, and `shell` ignored them, and
+  `aic shell` gave them to the shell; use `aic run CMD ...` to run a command.
+  The command of `aic run` must come first and must not start with `-`. (aic)
+
+- **Breaking: `aic up` and `aic rebuild` pass options to `devcontainer up` only
+  after `--`, and only the log options.** Other options, such as `--mount`,
+  `--remote-env`, or `--override-config`, could weaken the sandbox and are now
+  refused. Write `aic up -- --log-level debug` instead of
+  `aic up --log-level debug`. (aic)
+
+- **`aic destroy` without `--yes` and a terminal says how to confirm.** It
+  still removes nothing and exits 1; the message now says to pass `--yes`.
+  (aic)
 
 ### Fixed
 

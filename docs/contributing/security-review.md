@@ -20,9 +20,11 @@ The host CLI makes every decision before Docker starts a container. The layout i
 - `aic` sets the bind-source cache of `export_runtime_environment()` at the top. Keep that assignment above the module load list, so that a value from the environment never seeds the cache.
 - `lib/aic/validation.sh` holds the pre-Docker gate (`validate_project_security()`), the exact-trust store, and Docker consent. The rules are in [Validation](validation.md).
 - The commands in `lifecycle.sh` and `signing.sh` call the gate before they give the project configuration to Dev Containers. The list of commands is in [Validation](validation.md). Do not remove a gate call, and do not move it after a Docker call.
+- Exit 1 (`die`) is a refusal, a blocker, or a failure. Exit 2 (`usage_die`) is only a bad call while a command parses its arguments, before it reads or changes any state. Never use `usage_die` for a security refusal. The codes are a public contract: see [Stability contract](../user/stability.md#exit-codes).
+- `aic up` and `aic rebuild` give `devcontainer up` only the options after `--` that `AIC_UP_PASSTHROUGH` (`lib/aic/lifecycle.sh`) and `passthrough` (`lib/cli-spec.mjs`) list: the log options. Other `devcontainer up` options can add mounts, environment, features, or another configuration, change the container or the Docker binary, or skip post-create. Do not widen the list. `aic run` refuses a command that starts with `-`, because `devcontainer exec` reads options up to the first argument that is not an option.
 - The other modules hold boundary checks too: the control-path and `.git` checks and the Compose name (`identity.sh`, see [Project identity](project-identity.md)), the socket and the status relay marker (`runtime.sh`, see [Host state](host-state.md)), the volume checks and ownership proofs (`volumes.sh`, see [Project identity](project-identity.md)), the Docker consent reset in `aic sync` (`init-sync.sh`), and the `is_semver()` gate on registry output (`versions.sh`, see [Version drift](version-drift.md)).
 
-Guarded by the broken-install cases in `tests/test-aic-host-security.sh` and the load-list checks in `tests/test-aic-package.sh`.
+Guarded by the broken-install cases in `tests/test-aic-host-security.sh` and the load-list checks in `tests/test-aic-package.sh`. The argument rules are guarded by the usage-error and pass-through cases in `tests/test-aic-cli-spec.mjs` and the "Arguments of up, rebuild, run, and shell" cases in `tests/test-aic-host-security.sh`.
 
 ## `lib/trust-hash.mjs`
 

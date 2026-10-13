@@ -106,6 +106,11 @@ Versions and changelog:
   Changelog heading, in the same commit or PR as each user-facing change. Then
   a release only renames the heading, and CI blocks a release with no
   section. Style: [releasing.md](docs/contributing/releasing.md).
+- A change to a command, flag, exit code, `--json` member or id, control
+  file, in-container path, or public variable also updates
+  [docs/user/stability.md](docs/user/stability.md). A breaking change goes
+  under `### Changed` with a `Breaking:` headline and the migration step.
+  `tests/test-aic-stability-contract.mjs` checks the page against the code.
 - Bump `tools/claude-plugin/.claude-plugin/plugin.json` `version` when the
   plugin skill changes. Validate with `claude plugin validate .` and
   `claude plugin validate tools/claude-plugin`.

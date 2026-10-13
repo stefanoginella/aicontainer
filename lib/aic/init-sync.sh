@@ -10,22 +10,23 @@
 
 cmd_init () {
   local mode="pull" force="" tools="" shell="" docker="$DEFAULT_DOCKER"
-  validate_devcontainer_paths optional
+  # Parse first: a bad call exits 2 before aic reads or changes anything.
   while [ $# -gt 0 ]; do
     case "$1" in
       --build) mode="build" ;;
       --force) force="1" ;;
-      --with)  shift; tools="${1:-}" ;;
-      --with=*) tools="${1#--with=}" ;;
-      --shell) shift; shell="${1:-}" ;;
-      --shell=*) shell="${1#--shell=}" ;;
+      --with)  flag_value "$@"; shift; tools="$(validate_tools "$1")" || exit 2 ;;
+      --with=*) tools="$(validate_tools "${1#--with=}")" || exit 2 ;;
+      --shell) flag_value "$@"; shift; shell="$(validate_shell "$1")" || exit 2 ;;
+      --shell=*) shell="$(validate_shell "${1#--shell=}")" || exit 2 ;;
       --docker-read) docker="ro" ;;
       --docker) docker="rw" ;;
       --no-docker) docker="none" ;;
-      *) die "unknown init flag: $1 (try --build, --force, --docker-read, --docker, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
+      *) usage_die "unknown init flag: $1 (try --build, --force, --docker-read, --docker, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
     esac
     shift
   done
+  validate_devcontainer_paths optional
 
   if [ -e .devcontainer ] && [ -z "$force" ]; then
     die ".devcontainer/ already exists. Re-run with --force to overwrite."
@@ -131,10 +132,11 @@ check_dockerfile_project_base () {
 # set the locals of this function (bash dynamic scope), so call them only from
 # here. Each helper names the locals that it sets.
 cmd_sync () {
-  require_in_project
   local mode="" tools="" shell="" bump_base="" docker="" docker_explicit=0 was_legacy=0
-  sync_detect_legacy_identity
+  # Parse first: a bad call exits 2 before aic reads or changes anything.
   sync_parse_args "$@"
+  require_in_project
+  sync_detect_legacy_identity
   sync_resolve_docker_mode
   sync_resolve_selection
   sync_apply "$mode" "$tools" "$shell" "$docker" "$docker_explicit" "$was_legacy"
@@ -165,21 +167,21 @@ sync_detect_legacy_identity () {
 }
 
 # Parse the sync flags into mode, tools, shell, bump_base, docker, and
-# docker_explicit. Die on an unknown flag.
+# docker_explicit. Exit 2 on an unknown flag or a missing or bad value.
 sync_parse_args () {
   while [ $# -gt 0 ]; do
     case "$1" in
       --pull)  mode="pull" ;;
       --build) mode="build" ;;
-      --with)  shift; tools="${1:-}" ;;
-      --with=*) tools="${1#--with=}" ;;
-      --shell) shift; shell="${1:-}" ;;
-      --shell=*) shell="${1#--shell=}" ;;
+      --with)  flag_value "$@"; shift; tools="$(validate_tools "$1")" || exit 2 ;;
+      --with=*) tools="$(validate_tools "${1#--with=}")" || exit 2 ;;
+      --shell) flag_value "$@"; shift; shell="$(validate_shell "$1")" || exit 2 ;;
+      --shell=*) shell="$(validate_shell "${1#--shell=}")" || exit 2 ;;
       --bump-base) bump_base="1" ;;
       --docker-read) docker="ro"; docker_explicit=1 ;;
       --docker) docker="rw"; docker_explicit=1 ;;
       --no-docker) docker="none"; docker_explicit=1 ;;
-      *) die "unknown sync flag: $1 (try --pull, --build, --bump-base, --docker-read, --docker, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
+      *) usage_die "unknown sync flag: $1 (try --pull, --build, --bump-base, --docker-read, --docker, --with claude-code,codex,opencode, or --shell zsh|bash|fish)" ;;
     esac
     shift
   done

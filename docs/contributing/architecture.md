@@ -114,6 +114,9 @@ modules use only `node:` built-ins and have no dependencies.
   - `aic completion <shell>` runs `node lib/cli-spec.mjs completion <shell>`.
     The bash, zsh, and fish scripts come only from the table. To change a
     completion, change the table.
+  - `passthrough` lists the `devcontainer up` options that `aic up` and
+    `aic rebuild` pass after `--`. It must equal `AIC_UP_PASSTHROUGH` in
+    `lib/aic/lifecycle.sh`. See [Security review](security-review.md).
   - `aic help` is hand-written prose. `tests/test-aic-cli-spec.mjs` checks
     that the help, the `case "${1:-help}"` dispatcher at the end of `aic`,
     and the table name the same commands and flags. When you add a command

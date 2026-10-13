@@ -83,12 +83,16 @@ Usage:
                                 JSON object on stdout instead of the text, with
                                 the same checks and exit status. Messages go
                                 to stderr.
-  aic up [--allow-unsafe]
+  aic up [--allow-unsafe] [-- OPTIONS]
                        Pull/build and start the devcontainer for this project
                        (prints the trust boundary summary when it comes up)
                        Managed configuration and the fully resolved Compose
                        model are validated first. --allow-unsafe is a one-run
                        escape hatch for a reviewed host-access override.
+                       OPTIONS after -- go to 'devcontainer up'. Only
+                       --log-level, --log-format, --terminal-columns, and
+                       --terminal-rows pass; aic refuses every other option,
+                       because it can weaken the sandbox.
   aic trust [--revoke] Review and persist approval for this project's exact
                        host-access configuration and project code (post-create
                        hook, shell overlay, statusline, VS Code extensions and
@@ -114,9 +118,11 @@ Usage:
                        choice persists in the aic-auth-global volume and takes
                        effect on the next 'aic rebuild'.
   aic shell            Open the configured interactive shell (AIC_SHELL) inside the devcontainer
-  aic run CMD ...      Run CMD inside the devcontainer
-  aic rebuild [--allow-unsafe]
-                       Recreate the container from a fresh image
+  aic run [--] CMD ... Run CMD inside the devcontainer. CMD must not start
+                       with '-'. The exit code is the exit code of CMD.
+  aic rebuild [--allow-unsafe] [-- OPTIONS]
+                       Recreate the container from a fresh image. OPTIONS
+                       are the same as for 'aic up'.
   aic down             Stop the container (volumes preserved)
   aic destroy [--yes]  Stop + remove container + per-project volumes
                        (global auth + shell history are preserved). Shows the
@@ -130,6 +136,12 @@ Usage:
                          aic completion fish > ~/.config/fish/completions/aic.fish
   aic version [--json] Print this aic's version (also: --version, -v)
   aic help             Show this help (also: --help, -h)
+
+Exit codes:
+  0                    Success. 'aic doctor' warnings also give 0.
+  1                    A refusal, a blocker, or a failure.
+  2                    A usage error: an unknown command, flag, or argument,
+                       or a missing or bad value. --json prints no JSON.
 
 Env:
   AIC_HOME             Where the aicontainer files live (default: this script's dir)
@@ -150,11 +162,12 @@ EOF
 # it runs no update check and touches no project state.
 cmd_completion () {
   local shell="${1:-}"
+  [ "$#" -le 1 ] || usage_die "usage: aic completion <bash|zsh|fish>"
   case "$shell" in
     bash|zsh|fish) ;;
-    "")   die "usage: aic completion <bash|zsh|fish>" ;;
-    *)    die "unsupported shell: $shell (supported: bash, zsh, fish)" ;;
+    "")   usage_die "usage: aic completion <bash|zsh|fish>" ;;
+    *)    usage_die "unsupported shell: $shell (supported: bash, zsh, fish)" ;;
   esac
   command -v node >/dev/null 2>&1 || die "Node.js 18+ is required for shell completion"
-  node "$AIC_HOME/lib/cli-spec.mjs" completion "$shell"
+  node "$AIC_HOME/lib/cli-spec.mjs" completion "$shell" || die "could not generate the completion script"
 }

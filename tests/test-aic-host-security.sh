@@ -2168,11 +2168,13 @@ out=$(cd "$TMP/project-build" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
 echo "$out" | grep -q 'service app: build executes a project-owned Dockerfile as root' \
   || fail "added service build was not trust-gated"
 
-# Destructive automation must spell out --yes.
+# Destructive automation must spell out --yes. A refused confirmation exits 1
+# (not 2, the usage-error code) and names the fix.
 new_project "$TMP/destroy"
-if (cd "$TMP/destroy" && AIC_HOME="$ROOT" "$ROOT/aic" destroy </dev/null >/dev/null 2>&1); then
-  fail "non-interactive destroy proceeded without --yes"
-fi
+rc=0
+out=$(cd "$TMP/destroy" && AIC_HOME="$ROOT" "$ROOT/aic" destroy </dev/null 2>&1) || rc=$?
+[ "$rc" = 1 ] || fail "non-interactive destroy without --yes exited $rc, not 1: $out"
+echo "$out" | grep -Fq 'pass --yes to confirm' || fail "destroy without --yes did not name --yes: $out"
 
 # Cleanup parses only the installed trusted template, while shell entry points
 # use root-owned managed startup files rather than writable login profiles.
@@ -2310,6 +2312,11 @@ if [ "$tool" = devcontainer ] && [ "${AIC_FAKE_FIREWALL_FAIL:-}" = 1 ] \
 fi
 if [ "$tool" = devcontainer ] && [ -n "${AIC_TEST_ONCE_LOG:-}" ]; then
   printf '%s\n' "${AIC_UNSAFE_ONCE_HASH-<unset>}" >> "$AIC_TEST_ONCE_LOG"
+fi
+# A devcontainer up that fails with a chosen exit code.
+if [ "$tool" = devcontainer ] && [ "${1:-}" = up ] && [ -n "${AIC_FAKE_UP_EXIT:-}" ]; then
+  log_call "$@"
+  exit "$AIC_FAKE_UP_EXIT"
 fi
 log_call "$@"
 SH
@@ -2829,18 +2836,20 @@ grep -q 'aic-firewall' "$log" && fail "aic shell ran aic-firewall without .devco
 # `aic-firewall auto`, and they stop when it fails: no session with open egress.
 fw_auto='^devcontainer <exec> <--workspace-folder> <\.> </usr/bin/sudo> <-n> </usr/local/bin/aic-firewall> <auto>$'
 : > "$TMP/cleanup/.devcontainer/firewall-enable"
-for cmd in shell run; do
+# aic shell takes no arguments; aic run takes the command.
+# shellcheck disable=SC2086
+for cmd in shell "run true"; do
   : > "$log"
   (cd "$TMP/cleanup" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
     AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
-    AIC_HOME="$ROOT" "$ROOT/aic" "$cmd" true >/dev/null) \
+    AIC_HOME="$ROOT" "$ROOT/aic" $cmd >/dev/null) \
     || fail "aic $cmd failed with a working declared firewall"
   [ "$(grep -c '^devcontainer <exec>' "$log")" = 2 ] && head -n 1 "$log" | grep -q "$fw_auto" \
     || { cat "$log" >&2; fail "aic $cmd did not wait for the declared firewall before the session"; }
   : > "$log"
   if out=$(cd "$TMP/cleanup" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
       AIC_FAKE_FIREWALL_FAIL=1 AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
-      AIC_HOME="$ROOT" "$ROOT/aic" "$cmd" true 2>&1); then
+      AIC_HOME="$ROOT" "$ROOT/aic" $cmd 2>&1); then
     fail "aic $cmd started a session although the declared firewall is not on"
   fi
   echo "$out" | grep -q 'firewall-enable is set, but the firewall is not on' \
@@ -3370,5 +3379,44 @@ done
 grep -qE '^[[:space:]]*CONTAINERS:[[:space:]]*0[[:space:]]*$' \
   "$TMP/sync-phases/.devcontainer/docker-compose.yml" \
   || fail "sync kept an inconsistent Docker toggle"
+
+# Arguments of up, rebuild, run, and shell. aic gives devcontainer up only the
+# log options after `--`; every other option is a refusal (exit 1) and starts
+# nothing. A bad call exits 2 and starts nothing. devcontainer exec never gets
+# an option from the arguments of aic run.
+gate_project "$TMP/args"
+args_rc() { local rc=0; gate_run "$TMP/args" "$ROOT/aic" "$@" </dev/null >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+: > "$log"
+[ "$(args_rc up -- --log-level debug --log-format=json --terminal-columns 120 --terminal-rows=40)" = 0 ] \
+  || fail "up refused the allowed devcontainer up options"
+grep -Fq 'devcontainer <up> <--workspace-folder> <.> <--log-level> <debug> <--log-format> <json> <--terminal-columns> <120> <--terminal-rows> <40>' "$log" \
+  || fail "up did not pass the allowed options to devcontainer up: $(cat "$log")"
+: > "$log"
+[ "$(args_rc rebuild --allow-unsafe -- --log-level=trace)" = 0 ] || fail "rebuild refused --log-level=trace"
+grep -Fq '<--remove-existing-container> <--build-no-cache> <--log-level> <trace>' "$log" \
+  || fail "rebuild did not pass --log-level to devcontainer up: $(cat "$log")"
+for option in --mount --remote-env --override-config --config --workspace-folder --docker-path \
+    --additional-features --id-label --skip-post-create --dotfiles-repository --secrets-file; do
+  for cmd in up rebuild; do
+    : > "$log"
+    [ "$(args_rc "$cmd" -- "$option" x)" = 1 ] || fail "$cmd did not refuse '$option' after -- with exit 1"
+    [ ! -s "$log" ] || fail "$cmd ran a program after it refused '$option': $(cat "$log")"
+  done
+done
+for args in "up --bogus" "up --log-level debug" "rebuild extra" "up -- --log-level=loud" "shell extra" \
+    "run --container-id x ls" "run -- --remote-env A=b ls" "run" "down extra" "destroy --no"; do
+  : > "$log"
+  # shellcheck disable=SC2086
+  [ "$(args_rc $args)" = 2 ] || fail "aic $args did not exit 2"
+  [ ! -s "$log" ] || fail "aic $args ran a program after a usage error: $(cat "$log")"
+done
+: > "$log"
+[ "$(args_rc run -- ls -la)" = 0 ] || fail "run -- ls -la failed"
+grep -Fq 'devcontainer <exec> <--workspace-folder> <.> <ls> <-la>' "$log" \
+  || fail "run did not give the command right after --workspace-folder: $(cat "$log")"
+# A failed devcontainer up is a failure (1), never the usage-error code.
+rc=0
+gate_run "$TMP/args" env AIC_FAKE_UP_EXIT=2 "$ROOT/aic" up </dev/null >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "up gave exit $rc when devcontainer up exited 2"
 
 echo "OK: host CLI symlink, merge, provenance, naming, and fail-closed checks passed"

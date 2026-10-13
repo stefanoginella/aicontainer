@@ -568,15 +568,16 @@ validation_prompt_trust () {
 }
 
 cmd_trust () {
-  require_in_project
   local revoke=0
+  # Parse first: a bad call exits 2 before aic reads or changes anything.
   while [ $# -gt 0 ]; do
     case "$1" in
       --revoke) revoke=1 ;;
-      *) die "unknown trust flag: $1 (try --revoke)" ;;
+      *) usage_die "unknown trust flag: $1 (try --revoke)" ;;
     esac
     shift
   done
+  require_in_project
   if [ "$revoke" = "1" ]; then
     rm -f "$(trust_state_file)"
     echo "aic: revoked this project's host-access trust."

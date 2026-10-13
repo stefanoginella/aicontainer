@@ -423,7 +423,7 @@ test('unknown flags and extra arguments are refused with no JSON', () => {
   for (const command of COMMANDS) {
     for (const args of [['--jsonx'], ['--json', '--json'], ['--json', 'extra'], ['-j'], ['']]) {
       const res = run(project, [command, ...args]);
-      assert.equal(res.status, 1, `${command} ${args.join(' ')}`);
+      assert.equal(res.status, 2, `${command} ${args.join(' ')}`);
       assert.equal(res.stdout, '');
       assert.equal(res.stderr, `aic: usage: aic ${command} [--json]\n`);
     }

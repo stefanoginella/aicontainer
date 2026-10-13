@@ -169,7 +169,7 @@ cmd_status () {
   elif [ "$#" -eq 1 ] && [ "$1" = --json ]; then
     json_run status "" cmd_status_run
   else
-    die "usage: aic status [--json]"
+    usage_die "usage: aic status [--json]"
   fi
 }
 

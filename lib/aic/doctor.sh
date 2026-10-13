@@ -43,7 +43,7 @@ cmd_doctor () {
   elif [ "$#" -eq 1 ] && [ "$1" = --json ]; then
     json_run doctor checks cmd_doctor_run
   else
-    die "usage: aic doctor [--json]"
+    usage_die "usage: aic doctor [--json]"
   fi
 }
 

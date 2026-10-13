@@ -86,6 +86,10 @@ gates fail it.
   structure of the `.devcontainer/` files so that `aic sync` breaks for
   existing projects.
 
+While the version is 0.x, a breaking change takes a **minor** bump, as the
+earlier releases did. The [Stability contract](../user/stability.md) states
+this policy for tools. Keep the page and this section aligned.
+
 ## The changelog and its lifecycle scripts
 
 `CHANGELOG.md` is **maintained by hand**, in
@@ -234,6 +238,13 @@ Write `[Unreleased]` bullets so that a reader can scan them quickly:
   parenthetical at the end, for example `(aic, post-create.py)`.
 - Released `## [X.Y.Z]` sections are immutable. Do not rewrite a shipped
   section, because the GitHub Release renders from it.
+- A breaking change to an item of the
+  [Stability contract](../user/stability.md) goes under `### Changed` (or
+  `### Security` for a security fix). Start its bold headline with
+  `Breaking:`, and give the step that the user does, for example "Run
+  `aic sync` one time and commit the result." Update the stability page in
+  the same commit. `tests/test-aic-stability-contract.mjs` checks its lists
+  against the code.
 
 ## Fix a bad release
 

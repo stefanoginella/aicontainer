@@ -51,7 +51,10 @@ into `.devcontainer/`: the `Dockerfile`, `post-create.py` and its
 ### Other commands
 
 - `aic run CMD ...` runs one command inside the container. It does not open a
-  shell.
+  shell. The command must not start with `-`. You can write `--` before it.
+- `aic up -- --log-level debug` gives a log option to `devcontainer up`. Only
+  `--log-level`, `--log-format`, `--terminal-columns`, and `--terminal-rows`
+  pass. aic refuses every other option, because it can weaken the sandbox.
 - `aic down` stops the container. It does not remove the volumes. To continue,
   run `aic up`.
 
@@ -195,8 +198,8 @@ aic validate --json
   go to stderr. The JSON has no color codes.
 - `aic version --json` does the same update check as `aic version`. It uses
   the same 24-hour cache, and `AIC_NO_UPDATE_CHECK` and `CI` stop it.
-- A usage error gives no JSON. An unknown flag gives exit code 1 and a message
-  on stderr.
+- A usage error gives no JSON. An unknown flag gives exit code 2 and a message
+  on stderr. The exit codes are in [Stability contract](stability.md#exit-codes).
 
 Each JSON object has these members:
 
@@ -240,6 +243,9 @@ Example:
 
 > **Note:** In a program, use the exit code, `ok`, `id`, and `level`. The
 > text of `message` and `error` can change in a new version.
+
+The [Stability contract](stability.md) lists the stable members and ids, and
+the rules for a new `schema` value.
 
 ### The project name and teammates
 

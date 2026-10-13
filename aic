@@ -50,7 +50,23 @@ if [ -n "${AIC_PROJECT_NAME+set}" ]; then aic_inherited_project_name_set=1; else
 aic_inherited_project_name="${AIC_PROJECT_NAME-}"
 
 err()  { echo "aic: $*" >&2; }
+# die: a refusal, a blocker, or a failure. Exit 1.
 die()  { err "$*"; exit 1; }
+# usage_die: a bad call (an unknown command, flag, or argument, or a missing or
+# bad value). Exit 2, so a program can tell it from a refusal. Call it only
+# while a command parses its arguments, before it reads or changes any state.
+# Never use it for a security refusal: that is die.
+usage_die() { err "$*"; exit 2; }
+# flag_value <flag> [rest...]: refuse a flag that has no value after it.
+flag_value() {
+  [ "$#" -ge 2 ] || usage_die "$1 needs a value"
+}
+# require_no_args <command> [args...]: refuse any argument.
+require_no_args() {
+  local command="$1"
+  shift
+  [ "$#" -eq 0 ] || usage_die "aic $command takes no arguments (got: $1)"
+}
 
 # Run a lib/cli.mjs subcommand. lib/ is part of the install: when cli.mjs or a
 # module it imports is missing, say so plainly instead of Node's stack trace.
@@ -102,7 +118,7 @@ case "${1:-help}" in
   trust)   shift; cmd_trust "$@" ;;
   preflight) shift; cmd_preflight "$@" ;;
   check-drift) cmd_check_drift ;;   # internal: VS Code initializeCommand hook
-  initialize) cmd_initialize ;;     # internal: trusted host initialize hook
+  initialize) shift; cmd_initialize "$@" ;;  # internal: trusted host initialize hook
   __supports) shift; cmd_supports "$@" ;;  # internal: initializer capability probe
   signing) shift; cmd_signing "$@" ;;
   shell)   shift; cmd_shell "$@" ;;
@@ -113,6 +129,6 @@ case "${1:-help}" in
   upgrade) shift; cmd_upgrade "$@" ;;
   completion) shift; cmd_completion "$@" ;;
   version|-v|--version) shift; cmd_version "$@" ;;
-  help|-h|--help) cmd_help ;;
-  *) err "unknown command: $1"; cmd_help; exit 1 ;;
+  help|-h|--help) [ "$#" -eq 0 ] || shift; require_no_args help "$@"; cmd_help ;;
+  *) cmd_help >&2; usage_die "unknown command: $1" ;;
 esac

@@ -119,6 +119,8 @@ contributor guide. Common pages:
 - [Security](docs/user/security.md) — what crosses the boundary and the threat
   model.
 - [Troubleshooting](docs/user/troubleshooting.md) — FAQ and known problems.
+- [Stability contract](docs/user/stability.md) — what tools that build on
+  aicontainer can rely on across releases.
 
 ## Contributing and security
 

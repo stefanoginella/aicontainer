@@ -161,6 +161,6 @@ Keep help, completions, and tests in sync. Do not turn diagnostics into implicit
 - `json_string()` encodes every string. It escapes quotes, backslashes, and control characters. A value that is not valid UTF-8 gets `?` for each byte above 0x7f. Never build JSON from a raw value.
 - The encoder is pure bash, so `doctor --json` works on a host with no Node.js.
 - `aic` sets `aic_json_dir` to `""` before it loads the modules. Thus a value in the environment never selects JSON mode.
-- The doctor `id`, the validate finding types, and the member names are an interface. Keep them stable. A change that is not compatible increments `AIC_JSON_SCHEMA`.
+- The doctor `id`, the validate finding types, and the member names are an interface. Keep them stable. A change that is not compatible increments `AIC_JSON_SCHEMA`. The [Stability contract](../user/stability.md) lists them, and `tests/test-aic-stability-contract.mjs` checks that list against the code. A new id or member also goes on that page.
 
 Guarded by `tests/test-aic-json-output.mjs`. It compares the text mode and the JSON mode of each command: the exit status, the doctor checks, and the validate findings.

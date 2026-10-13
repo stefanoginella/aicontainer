@@ -24,6 +24,7 @@ Start here if you run aicontainer in your projects.
 | [Security](user/security.md) | What crosses the boundary, the threat model, host daemon hardening |
 | [Network allowlist](user/network-allowlist.md) | The opt-in outbound firewall |
 | [Troubleshooting](user/troubleshooting.md) | FAQ and known problems |
+| [Stability contract](user/stability.md) | For tools: the stable commands, exit codes, JSON ids, files, and paths, and the release policy |
 
 ## Contributor guide
 
