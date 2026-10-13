@@ -261,17 +261,16 @@ atomic_copy_hooks () {
   fi
 }
 
-# Replace the literal template placeholder with the deterministic per-path
-# Compose project name. This keeps devcontainer CLI, direct Compose commands,
-# and per-project volume names aligned.
-apply_project_name () {
-  local file="$1" name tmp
-  name="$(expected_project_name)"
-  grep -qE '^name:[[:space:]]*aic-project[[:space:]]*$' "$file" \
-    || die "managed compose template is missing top-level 'name: aic-project'"
-  tmp="$(mktemp "${file}.XXXXXX")"
-  sed -E "s/^name:[[:space:]]*aic-project[[:space:]]*\$/name: ${name}/" "$file" > "$tmp" \
-    && mv "$tmp" "$file"
+# Verify the managed Compose name line. The template holds the exact line
+# AIC_COMPOSE_NAME_LINE, and aic copies it unchanged: the path-unique value is
+# in the gitignored .devcontainer/.env, not in this tracked file. So a
+# teammate's sync at another path does not change the committed file. A
+# template with any other name line is an incomplete or modified install.
+check_project_name_line () {
+  local file="$1"
+  [ "$(grep -cE '^name[[:space:]]*:' "$file")" = "1" ] \
+    && grep -Fqx -- "$AIC_COMPOSE_NAME_LINE" "$file" \
+    || die "managed compose template is missing the top-level line '$AIC_COMPOSE_NAME_LINE'"
 }
 
 # Verify the managed Compose identity anchor. Its value is interpolated from
@@ -338,13 +337,14 @@ apply_template () {
       ;;
     *) die "internal error: unknown mode '$mode'" ;;
   esac
-  apply_project_name "$dst/docker-compose.yml"
+  check_project_name_line "$dst/docker-compose.yml"
   apply_runtime_user "$dst/docker-compose.yml"
   # Apply the project's Docker daemon exposure mode to the copied compose file.
   apply_docker_mode "$dst/docker-compose.yml" "$docker"
   # Direct VS Code starts do not inherit exports from the host initialize hook,
   # so leave Compose a tiny gitignored file containing the selected local
-  # Docker context's socket path. `aic initialize` refreshes it on every start.
+  # Docker context's socket path and the project name. `aic initialize`
+  # refreshes it on every start.
   write_runtime_environment_file
 }
 

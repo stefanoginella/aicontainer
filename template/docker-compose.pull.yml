@@ -11,9 +11,12 @@
 # that does `FROM ghcr.io/stefanoginella/aicontainer:latest`).
 # =============================================================================
 
-# Managed placeholder: `aic init` / `aic sync` replace this with a stable name
-# derived from the absolute project path. Keep the literal value sed-friendly.
-name: aic-project
+# Managed project name. The value is path-unique (aic-<label>-<hash of the
+# absolute project path), but it is not in this committed file: aic writes
+# AIC_PROJECT_NAME into the gitignored .devcontainer/.env. Thus a clone at
+# another path does not change this line. Do not edit it: aic refuses any
+# other form of it.
+name: ${AIC_PROJECT_NAME:?run aic up or aic sync}
 
 # `.devcontainer/.env` is generated and gitignored by `aic initialize`; it
 # supplies the UID:GID Dev Containers will use (Linux host uid, or 1000 on

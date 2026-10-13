@@ -61,7 +61,7 @@ signing_container_running () {
   local project template cid
   project="$(project_name)"
   template="$(trusted_compose_template)"
-  cid="$(docker compose -p "$project" -f "$template" ps -q devcontainer 2>/dev/null)" || return 1
+  cid="$(trusted_template_compose -p "$project" -f "$template" ps -q devcontainer 2>/dev/null)" || return 1
   [ -n "$cid" ] || return 1
   [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ]
 }

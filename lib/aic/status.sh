@@ -18,11 +18,11 @@ firewall_live_state () {
   local project template cid devcontainer out
   project="$(project_name)"
   template="$(trusted_compose_template)"
-  cid="$(docker compose -p "$project" -f "$template" ps -q devcontainer 2>/dev/null)" || { echo unknown; return; }
+  cid="$(trusted_template_compose -p "$project" -f "$template" ps -q devcontainer 2>/dev/null)" || { echo unknown; return; }
   [ -n "$cid" ] || { echo unknown; return; }
   [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] || { echo unknown; return; }
   devcontainer="$(resolve_devcontainer 2>/dev/null)" || { echo unknown; return; }
-  out="$(COMPOSE_PROJECT_NAME="$project" "$devcontainer" exec --workspace-folder . sudo aic-firewall status 2>/dev/null)" || { echo unknown; return; }
+  out="$(COMPOSE_PROJECT_NAME="$project" AIC_PROJECT_NAME="$(expected_project_name)" "$devcontainer" exec --workspace-folder . sudo aic-firewall status 2>/dev/null)" || { echo unknown; return; }
   if grep -q 'policy DROP' <<<"$out"; then echo on; else echo off; fi
 }
 

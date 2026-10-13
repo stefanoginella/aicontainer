@@ -157,15 +157,42 @@ credential bridge. It also works when the daemon is stopped.
 
 ### `aic validate`
 
-You can use `validate` in CI. It never shows a prompt and never records trust.
-It accepts an exact approval that already exists. It gives an exit code that is
-not zero for these problems:
+You can use `validate` in CI. It never shows a prompt, never records trust, and
+never writes `.devcontainer/.env`. It accepts an exact approval that already
+exists. It works in every clone of the repository, at any path, with no
+`aic sync` first: the committed files hold no path-specific value. It gives an
+exit code that is not zero for these problems:
 
-- managed drift
+- managed drift (this includes a changed top-level `name:` line in
+  `docker-compose.yml`)
 - an unsafe `.git` control path
+- a `.devcontainer/.env` that Git tracks (in any letter case)
+- a top-level `name:` in `docker-compose.override.yml` (the project name is
+  managed)
 - a boundary expansion that you did not trust
 - a `COMPOSE_PROJECT_NAME` (in the root `.env` or in the environment) that a
   direct start would use instead of the managed name
+- an `AIC_PROJECT_NAME`, `COMPOSE_ENV_FILES`, or `COMPOSE_DISABLE_ENV_FILE` in
+  the environment (each one can replace the project name in
+  `.devcontainer/.env`)
+
+### The project name and teammates
+
+Each checkout gets a path-unique Compose project name. Thus two checkouts never
+share containers or session volumes. aic writes the name as `AIC_PROJECT_NAME`
+into `.devcontainer/.env`. That file is host state, and Git ignores it. The
+committed `docker-compose.yml` has only this fixed line:
+
+```yaml
+name: ${AIC_PROJECT_NAME:?run aic up or aic sync}
+```
+
+Thus a teammate's `aic sync` in a clone at another path does not change a
+committed file. Do not edit that line, and do not commit `.devcontainer/.env`.
+
+A project from an earlier aic version has the path-specific name in that line.
+Run `aic sync` one time and commit the result. Until then, `aic up`, the editor
+start, and `aic validate` refuse the project.
 
 ## Select the tools for a project
 
@@ -261,7 +288,9 @@ that start. Do one of these:
   Containers.
 
 The initializer also refuses a `COMPOSE_PROJECT_NAME` that the environment of
-the editor exports.
+the editor exports. For the same reason, it refuses these variables in the
+environment of the editor: an `AIC_PROJECT_NAME` that is not the managed name,
+`COMPOSE_ENV_FILES`, and `COMPOSE_DISABLE_ENV_FILE`.
 
 ### Use `aic` and VS Code together
 

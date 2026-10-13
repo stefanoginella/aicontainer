@@ -269,7 +269,7 @@ doctor_check_project () {
 
 # Check that .devcontainer/.env matches the Docker context and the relay mode.
 doctor_check_runtime_environment () {
-  local relay_error
+  local relay_error tracked=0
   if export_runtime_environment >/dev/null 2>&1; then
     if [ ! -e .devcontainer/.env ]; then
       doctor_warn ".devcontainer/.env is absent; aic initialize will generate it before startup"
@@ -277,6 +277,17 @@ doctor_check_runtime_environment () {
       doctor_ok "managed host runtime environment matches the Docker context and relay mode"
     else
       doctor_fail ".devcontainer/.env is stale or modified — run 'aic sync' or 'aic initialize'"
+    fi
+    # Host Git runs only on safe control paths (a planted .git/commondir would
+    # make it read the config of another directory). The Git check of doctor
+    # already reports a problem there.
+    if [ -z "$(git_control_path_problems)" ]; then
+      runtime_environment_file_tracked || tracked=$?
+      case "$tracked" in
+        0) doctor_fail ".devcontainer/.env is tracked by Git, but it is host state — run 'git rm --cached .devcontainer/.env'" ;;
+        1) ;;
+        *) doctor_fail "could not check with Git whether .devcontainer/.env is tracked — fix the Git checkout" ;;
+      esac
     fi
   else
     # A refused status-relay marker blocks init/sync/up/initialize but has
@@ -296,14 +307,19 @@ doctor_check_runtime_environment () {
 # Check the managed Compose project name, and the name that a direct Dev
 # Containers start would use.
 doctor_check_project_identity () {
-  local identity_error name_error
+  local identity_error name_error line_problem
   if ! compose_has_project_name; then
     doctor_fail "legacy project identity blocks verified startup — run 'aic sync', then review the diff"
   elif command -v node >/dev/null 2>&1; then
     identity_error="$( (project_name >/dev/null) 2>&1)" || true
+    line_problem="$(compose_name_line_problem)"
     if [ -n "$identity_error" ]; then
       identity_error="${identity_error#aic: }"
       doctor_fail "managed project identity is invalid: $identity_error"
+    elif [ -n "$line_problem" ]; then
+      # The earlier path-specific literal still resolves this checkout, but
+      # every start refuses it until sync writes the managed line.
+      doctor_fail "managed project identity blocks verified startup: $line_problem"
     else
       doctor_ok "managed project identity matches this canonical path"
       name_error="$( (check_devcontainer_project_name) 2>&1)" || true

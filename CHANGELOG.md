@@ -13,6 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The committed Compose file no longer holds a path hash.** Its top-level
+  name is now a fixed line that reads `AIC_PROJECT_NAME` from the gitignored
+  `.devcontainer/.env`, so a teammate's `aic sync` does not change it. Run
+  `aic sync` one time and commit the result; until then, every start refuses
+  the old line. (aic, docker-compose.yml)
+
+- **A direct start refuses `AIC_PROJECT_NAME`, `COMPOSE_ENV_FILES`, and
+  `COMPOSE_DISABLE_ENV_FILE` in the environment.** Each one could replace the
+  project name that `.devcontainer/.env` holds. A Git-tracked
+  `.devcontainer/.env` is now a finding too. (aic)
+
+- **`docker-compose.override.yml` can no longer set the Compose project
+  name.** The project name is managed; validation refuses a top-level `name:`
+  in the override in any spelling. (aic, validate.mjs)
+
 ### Fixed
 
 - **`git push` over HTTPS to GitHub now works with your container `gh` login.**
@@ -24,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The default Node of fnm (`node`, `npm`, `npx`) is now the last entry on the
   image `PATH`. A shell in the container still uses the `.nvmrc` version
   first. (Dockerfile)
+
+- **`aic validate` passes in CI and in clones at other paths.** It no longer
+  needs a sync first, and it does not write `.devcontainer/.env`. (aic)
 
 ## [0.10.0] - 2026-10-12
 

@@ -200,6 +200,34 @@ jobs:
           sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
           ' "$GITHUB_WORKSPACE/aic" trust
           devcontainer up --workspace-folder .
+      - name: Smoke test - the running stack has the path-unique name of the generated .env
+        working-directory: /tmp/proj
+        run: |
+          # The committed Compose file holds one fixed name line and no path
+          # hash. The path-unique value is only in the gitignored, host-written
+          # .devcontainer/.env, and the direct start above must have used it.
+          line='name: ${AIC_PROJECT_NAME:?run aic up or aic sync}'
+          [ "$(grep -cE '^name[[:space:]]*:' .devcontainer/docker-compose.yml)" = 1 ] \
+            && grep -Fqx "$line" .devcontainer/docker-compose.yml \
+            || { echo "FAIL: committed Compose file does not hold exactly the managed name line"; exit 1; }
+          root=$(/bin/pwd -P)
+          label=$(basename "$root" | tr '[:upper:]' '[:lower:]' | tr -dc 'a-z0-9_-' | cut -c1-32)
+          expected="aic-${label}-$(printf '%s' "$root" | sha256sum | cut -c1-12)"
+          [ "$(sed -n 's/^AIC_PROJECT_NAME=//p' .devcontainer/.env)" = "$expected" ] \
+            || { echo "FAIL: .devcontainer/.env does not hold the path-unique name $expected"; exit 1; }
+          if grep -Fq "$expected" .devcontainer/docker-compose.yml; then
+            echo "FAIL: committed Compose file holds the path-specific name"; exit 1
+          fi
+          git check-ignore -q .devcontainer/.env \
+            || { echo "FAIL: .devcontainer/.env is not ignored by Git"; exit 1; }
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer \
+            --filter "label=devcontainer.local_folder=$root")
+          [ "$(printf '%s\n' "$cid" | grep -c .)" = 1 ] \
+            || { echo "FAIL: expected one running devcontainer for $root"; exit 1; }
+          actual=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$cid")
+          [ "$actual" = "$expected" ] \
+            || { echo "FAIL: running stack project is $actual, expected $expected"; exit 1; }
+          echo "OK: running stack uses the path-unique name from .env; committed name line is fixed"
       - name: Smoke test - personal shell overlay installs root-locked and is sourced
         working-directory: /tmp/proj
         run: |
@@ -233,8 +261,8 @@ jobs:
           # The sanitized volume outlives the container. When the human deletes
           # ~/.config/aicontainer/rc.zsh, the next sanitizer run must remove the
           # old copy, or it stays installed and sourced on every rebuild.
-          project_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
-            .devcontainer/docker-compose.yml)
+          project_name=$(sed -n 's/^AIC_PROJECT_NAME=//p' .devcontainer/.env)
+          [ -n "$project_name" ] || { echo "FAIL: generated .env has no project name"; exit 1; }
           sanitizer_id=$(docker ps -aq \
             --filter "label=com.docker.compose.project=$project_name" \
             --filter "label=com.docker.compose.service=aic-seed-sanitizer")
@@ -1017,8 +1045,8 @@ jobs:
             || { echo "FAIL: direct start did not explain the root .env refusal"; echo "$out"; exit 1; }
           (cd /tmp/proj-b && AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" up)
           rm /tmp/proj-b/.env
-          proj_b_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
-            /tmp/proj-b/.devcontainer/docker-compose.yml)
+          proj_b_name=$(sed -n 's/^AIC_PROJECT_NAME=//p' /tmp/proj-b/.devcontainer/.env)
+          [ -n "$proj_b_name" ] || { echo "FAIL: proj-b .env has no project name"; exit 1; }
           [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$proj_b_name" \
               --filter label=com.docker.compose.service=devcontainer)" ] \
             || { echo "FAIL: aic up did not start proj-b under its managed Compose name"; exit 1; }
@@ -1155,8 +1183,8 @@ jobs:
           '
 
           for workspace in /tmp/proj /tmp/proj-b; do
-            project_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
-              "$workspace/.devcontainer/docker-compose.yml")
+            project_name=$(sed -n 's/^AIC_PROJECT_NAME=//p' "$workspace/.devcontainer/.env")
+            [ -n "$project_name" ] || { echo "FAIL: generated .env has no project name for $workspace"; exit 1; }
             expected_user=$(sed -nE 's/^AIC_RUNTIME_USER=([0-9]+:[0-9]+)$/\1/p' \
               "$workspace/.devcontainer/.env")
             [ -n "$expected_user" ] \

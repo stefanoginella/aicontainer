@@ -8,11 +8,80 @@ This page covers the first part of the host-side rules. The pre-Docker gate is i
 
 Each generated Compose project has a path-unique name:
 `aic-<sanitized-basename>-<12-char-sha256(canonical-path)>`.
+`expected_project_name()` computes it.
 
-- `aic` writes the name as the top-level Compose `name:`.
-- The name must exactly match `expected_project_name()`.
+The committed Compose file does not hold the name. It holds one fixed line,
+`AIC_COMPOSE_NAME_LINE` in `lib/aic/identity.sh`:
 
-> **Warning:** Do not accept a project name from the repository. When a top-level name is present but malformed, do not fall back to the old basename. Otherwise `down`/`destroy` can target the resources of another checkout.
+```yaml
+name: ${AIC_PROJECT_NAME:?run aic up or aic sync}
+```
+
+- Both Compose templates contain this exact line. `aic` copies it unchanged.
+  `check_project_name_line()` refuses a template without it.
+- `aic` writes `AIC_PROJECT_NAME=<expected_project_name()>` into the
+  gitignored `.devcontainer/.env` (see [Generated host state](host-state.md)).
+  Compose reads that `.env` from the project directory, `.devcontainer/`. Thus
+  a clone at another path does not change a committed file.
+- `aic` also exports `AIC_PROJECT_NAME` itself, in
+  `export_runtime_environment()` and in `pin_compose_project_name()`. The
+  environment beats `.env` in Compose, so an inherited value never wins for an
+  `aic` command.
+- `-p` sets the project of a Compose call, but Compose still interpolates the
+  name line, and `:?` fails when the variable is missing. So every call on the
+  installed template (`down`, `destroy`, the status and signing probes, the
+  sanitizer cleanup, the earlier-stack cleanup) goes through
+  `trusted_template_compose()`, which sets the variable from
+  `expected_project_name()`.
+
+### The accepted forms of the name line
+
+`project_name()` never parses a name from the repository. It returns
+`expected_project_name()` only for one of these forms:
+
+- exactly one top-level `name:` line, equal to `AIC_COMPOSE_NAME_LINE` byte for
+  byte;
+- exactly one top-level line `name: <expected_project_name()>`. Earlier
+  versions wrote this literal. `aic sync` replaces it with the fixed line.
+
+A file without a top-level `name:` keeps the legacy name (see below). Every
+other form fails.
+
+The gate (`validate_project_security()`) and `doctor` require more, through
+`compose_name_line_problem()`. These are line checks, not a YAML parser:
+
+1. The first line that is not blank or a comment is a plain key at column 0.
+   Thus the root mapping starts at column 0, and every top-level key is at
+   column 0.
+2. Exactly one line at column 0 starts with `name` and a colon, and it is the
+   fixed line. The earlier literal is a finding.
+3. Every other line at column 0 is blank, a comment, or a plain key.
+
+Rule 1 stops an indented root mapping. There, the real name key is indented,
+and a copy of the fixed line hides in a multi-line quoted scalar at column 0.
+With the root at column 0, the real name key is at column 0 too, so a hidden
+copy makes rule 2 fail. Rule 3 refuses the YAML spellings that a line check
+cannot read as the name: a quoted or escaped key, an explicit `?` key, a merge
+key, a flow mapping, a tag, and a second document (`---`). A line inside a
+multi-line scalar can also match a rule. That refuses more, never less.
+
+The project-owned `docker-compose.override.yml` must not set a top-level name
+in any spelling. `overrideNameProblem()` in `lib/validate.mjs` applies the same
+three line rules to its text, with no `name` line allowed. The comparison of
+the uninterpolated names is only a second check: Compose normalizes that name
+(lowercase, other characters removed), so two different spellings can give the
+same string.
+
+> **Warning:** Do not trust the resolved name alone. `aic` sets
+> `AIC_PROJECT_NAME`, so `${AIC_PROJECT_NAME:-other}` resolves to the expected
+> name in validation and to `other` where the variable is missing. The
+> structural validator compares `base.name` and `final.name` with the expected
+> name. The line checks cover the spelling.
+
+> **Warning:** Do not accept a project name from the repository. When a
+> top-level name is present but malformed, do not fall back to the old
+> basename. Otherwise `down`/`destroy` can target the resources of another
+> checkout.
 
 ## The `COMPOSE_PROJECT_NAME` lookup of Dev Containers
 
@@ -21,10 +90,17 @@ The Dev Containers CLI reads the top-level `name:` last. Before that, it looks i
 1. `COMPOSE_PROJECT_NAME` in its own environment.
 2. The first `COMPOSE_PROJECT_NAME=` line of `<workspace>/.env`. This is the repository-root `.env` that app stacks commit.
 
-Each of these silently moves the checkout into another stack and into the `_aic-sessions` volume of that stack. Two rules close this gap:
+The CLI reads the `name:` from `docker compose config`, so it gets the value of `AIC_PROJECT_NAME`. Compose takes that value from the environment first, then from `.devcontainer/.env`. Three more variables can change it:
+
+3. `AIC_PROJECT_NAME` in the environment, when it is not exactly the expected name.
+4. `COMPOSE_ENV_FILES`, which replaces `.devcontainer/.env` with other files.
+5. `COMPOSE_DISABLE_ENV_FILE`, which turns `.devcontainer/.env` off.
+
+Each of these silently moves the checkout into another stack and into the `_aic-sessions` volume of that stack, or stops the start. Two rules close this gap:
 
 - Every aic command that runs the CLI calls `pin_compose_project_name()` **before** validation. These commands are `up`, `rebuild`, `shell`, `run`, the mutating `signing` actions, and the firewall-status exec. Thus validation and the CLI see the same name, and the `initialize` child inherits it.
-- The generated initializer cannot set the environment of its parent. So `check_devcontainer_project_name()` mirrors the lookup and normalization of the CLI. It refuses before any Docker state changes.
+- The generated initializer cannot set the environment of its parent. So `check_devcontainer_project_name()` mirrors the lookup and normalization of the CLI (`composeNameConflict()` in `lib/project-identity.mjs`). It refuses before any Docker state changes. It refuses sources 3 to 5 when they are set, an empty value included.
+  - `aic` exports its own `AIC_PROJECT_NAME` before some checks run. So the `aic` entry script saves the inherited value at startup, and the check judges that value.
   - `validate` and `doctor` fail on it.
   - `preflight` and the legacy `check-drift` warn.
 
@@ -48,7 +124,7 @@ The Node code of the validator uses `fs.realpathSync.native` for the same reason
 
 ## Migration from an earlier identity
 
-A project that `aic` hashed from a wrong-case path still has the old name in its Compose file.
+Earlier versions wrote the name into the Compose file. A project that `aic` hashed from a wrong-case path still has that old name there. `sync_detect_legacy_identity()` reads it before `aic sync` writes the fixed line. After that, only container labels can name an earlier identity.
 
 - `previous_project_names()` finds earlier names of this workspace only from containers with all of these:
   - the exact canonical workspace label,
@@ -60,9 +136,14 @@ A project that `aic` hashed from a wrong-case path still has the old name in its
 - These actions use the same ownership proof as the legacy basename migration.
 - If no such container exists, `aic` preserves the old volume and does not import it.
 
-Do not pin the name in `validate`, `initialize`, or `trust`. Without the pin, these commands still see the top-level `name:` of a repository override. A direct start would use that name.
+Do not pin `COMPOSE_PROJECT_NAME` in `validate`, `initialize`, or `trust`. Without the pin, these commands still see the top-level `name:` of a repository override. A direct start would use that name. These commands export `AIC_PROJECT_NAME`, because the managed name line cannot resolve without it, and `.devcontainer/.env` gives a direct start the same value.
 
-Guarded by the root-`.env` cases and the identity cases in `tests/test-aic-host-security.sh`, and by the proj-b smoke in `smoke.yml`. The identity cases are:
+Guarded by the root-`.env` cases and the identity cases in `tests/test-aic-host-security.sh`, by the `composeNameConflict` cases in `tests/test-aic-host-helpers.mjs`, and by the proj-b smoke and the "running stack has the path-unique name" smoke in `smoke.yml`. The identity cases are:
+
+- the fixed name line, the same committed file at two paths, and the clone at another path that passes `aic validate` with no sync,
+- the refused forms of the name line, and the migration of the earlier literal,
+- the environment variables that a direct start refuses,
+- the tracked `.devcontainer/.env`,
 
 - the static builtin-`pwd -P` check,
 - the earlier-identity migration,
