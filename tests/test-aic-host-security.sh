@@ -2703,6 +2703,13 @@ if grep -hv '^[[:space:]]*#' "$ROOT/aic" "$ROOT"/lib/aic/*.sh | grep 'pwd -P' \
     | grep -vF '/bin/pwd -P; else pwd -P'; then
   fail "aic uses the builtin pwd -P, which keeps the typed letter case"
 fi
+# A `grep ... | head` pipe makes grep print "write error: Broken pipe" when
+# SIGPIPE is ignored (GitHub runners do this), and the check-drift smoke then
+# sees output. Stop at the first match with sed, awk, or grep -m instead.
+if grep -hv '^[[:space:]]*#' "$ROOT/aic" "$ROOT"/lib/aic/*.sh \
+    | grep -E 'grep .*\|[[:space:]]*head'; then
+  fail "aic pipes grep into head; this prints a broken-pipe error where SIGPIPE is ignored"
+fi
 mkdir -p "$TMP/CaseProbe/Repo"
 if [ -d "$TMP/caseprobe/repo" ]; then
   new_project "$TMP/CaseProbe/Repo"
