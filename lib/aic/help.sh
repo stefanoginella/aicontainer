@@ -70,13 +70,18 @@ Usage:
                                 sync warns about the drift and offers to bump;
                                 non-interactive syncs just warn. :latest floats
                                 and ARG-templated bases are left alone.)
-  aic doctor           Check host prerequisites and project wiring without
+  aic doctor [--json]  Check host prerequisites and project wiring without
                        creating containers, volumes, trust, or other state.
-  aic status           Show this project's identity, selected tools/shell,
+  aic status [--json]  Show this project's identity, selected tools/shell,
                        Docker exposure, image drift, runtime, and volume state.
-  aic validate         Non-interactively validate managed files and the fully
+  aic validate [--json]
+                       Non-interactively validate managed files and the fully
                        resolved Compose model. Existing exact trust is honored;
                        this command never prompts or records trust.
+                       --json (doctor, status, validate, version): print one
+                                JSON object on stdout instead of the text, with
+                                the same checks and exit status. Messages go
+                                to stderr.
   aic up [--allow-unsafe]
                        Pull/build and start the devcontainer for this project
                        (prints the trust boundary summary when it comes up)
@@ -122,7 +127,7 @@ Usage:
                          echo 'eval "$(aic completion zsh)"'  >> ~/.zshrc
                          echo 'eval "$(aic completion bash)"' >> ~/.bashrc
                          aic completion fish > ~/.config/fish/completions/aic.fish
-  aic version          Print this aic's version (also: --version, -v)
+  aic version [--json] Print this aic's version (also: --version, -v)
   aic help             Show this help (also: --help, -h)
 
 Env:

@@ -359,6 +359,9 @@ validate_project_security () {
     printf 'aic: managed devcontainer validation failed:\n' >&2
     printf '%s\n%s\n' "$compose_problem" "$managed" | sed -e '/^$/d' \
       -e 's/^COMPOSE[[:space:]]*/  ! /' -e 's/^MANAGED[[:space:]]*/  ! /' >&2
+    # aic validate --json only: the same findings as items (lib/aic/json.sh).
+    json_findings fail "$compose_problem"
+    json_findings fail "$managed"
     rm -f "$findings"
     [ "$mode" = "warn" ] && return 1
     validation_refuse_managed "$mode" "$compose_problem"
@@ -375,6 +378,8 @@ validate_project_security () {
   printf 'aic: resolved project configuration requests extra host access or runs project code:\n' >&2
   printf '%s\n%s\n' "$unsafe" "$volatile" | sed -e '/^$/d' -e 's/^UNSAFE[[:space:]]*/  ! /' \
     -e 's/^DOCKER[[:space:]]*/  ! /' -e 's/^VOLATILE[[:space:]]*/  ! /' >&2
+  json_findings warn "$unsafe"
+  json_findings warn "$volatile"
   rm -f "$findings"
 
   if [ "$mode" = "warn" ]; then

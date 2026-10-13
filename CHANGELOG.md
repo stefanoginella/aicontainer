@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`doctor`, `status`, `validate`, and `version` take `--json`.** Each prints
+  one JSON object with a `schema` version on stdout; checks, findings, and
+  exit codes stay the same. `aic version` now refuses arguments other than
+  `--json`. (aic)
+
 ## [0.11.0] - 2026-10-13
 
 ### Changed

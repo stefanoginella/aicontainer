@@ -119,6 +119,9 @@ aic status     # identity, modes, runtime, credential bridge, and volumes
 aic validate   # managed provenance + fully resolved Compose security model
 ```
 
+Each one also has a JSON form for programs. See
+[JSON output](#json-output---json).
+
 ### `aic doctor`
 
 You can run `doctor` before `init`. It examines these items:
@@ -175,6 +178,68 @@ exit code that is not zero for these problems:
 - an `AIC_PROJECT_NAME`, `COMPOSE_ENV_FILES`, or `COMPOSE_DISABLE_ENV_FILE` in
   the environment (each one can replace the project name in
   `.devcontainer/.env`)
+
+### JSON output (`--json`)
+
+To get output that a program can read, add `--json` to `aic doctor`,
+`aic status`, `aic validate`, or `aic version`:
+
+```bash
+aic doctor --json
+aic validate --json
+```
+
+- The command does the same checks as without `--json`. The exit code does
+  not change.
+- stdout holds only one JSON object, on one line. The messages and warnings
+  go to stderr. The JSON has no color codes.
+- `aic version --json` does the same update check as `aic version`. It uses
+  the same 24-hour cache, and `AIC_NO_UPDATE_CHECK` and `CI` stop it.
+- A usage error gives no JSON. An unknown flag gives exit code 1 and a message
+  on stderr.
+
+Each JSON object has these members:
+
+| Member | Value |
+|---|---|
+| `schema` | The version of the JSON shape. The value is `1`. Only a change that is not compatible increments it. |
+| `command` | `doctor`, `status`, `validate`, or `version`. |
+| `ok` | `true` when the exit code is 0, else `false`. |
+| `error` | The message that stopped the command, or `null`. A failed check is not an error: a `doctor` blocker gives `"error": null`. In some failures `error` is `null` and only stderr has the message. |
+
+Each command adds these members:
+
+| Command | Members |
+|---|---|
+| `doctor` | `result` (`ready`, `warnings`, or `blocked`), `warnings` and `failures` (counts), and `checks` (a list of items). |
+| `validate` | `findings` (a list of items). |
+| `status` | `project`, `mode` (`pull` or `build`), `tools` (a list), `shell`, `docker` (`none`, `ro`, `rw`, or `invalid`), `docker_consent` (`present`, `missing`, or `null`), `relay` (`enabled`, `disabled`, or `invalid`), `relay_applied`, `socket`, `runtime_kind`, `bind_source`, `runtime_uid_gid`, `cli_version`, `image` (`match`, `drift`, `build`, or `unrecognized`), `image_pinned`, `docker_available`, `container`, `container_image`, `auth_bridge`, `auth_volume`, and `sessions_volume`. |
+| `version` | `version`, `latest` (the newest version that the update check knows, or `null`), and `update_available`. |
+
+In `status`, a value that aic cannot find is `null`. The Docker states are
+lower case. `not-created` and `unavailable` (Docker is not available) replace
+the text forms.
+
+An item in `checks` or `findings` has three members: `id`, `level`, and
+`message`.
+
+- In `doctor`, `id` is the name of the check, for example `node`,
+  `compose-version`, or `git-control-paths`. One check can give more than one
+  item. `level` is `ok`, `warn`, or `fail`.
+- In `validate`, `id` is the type of the finding. `managed`, `compose`, and
+  `name` (a direct-start project name problem) have the level `fail`.
+  `unsafe`, `docker`, and `volatile` (a host-access expansion that needs
+  trust) have the level `warn`. With an exact approval, `validate` gives exit
+  code 0 and still lists the `warn` items.
+
+Example:
+
+```json
+{"schema":1,"command":"validate","ok":false,"findings":[{"id":"compose","level":"fail","message":"Docker Compose 2.29.7 is too old; aic needs Compose 2.35+ (run aic doctor)"}],"error":"configuration cannot be validated: upgrade Docker Compose to 2.35+ (see 'aic doctor')"}
+```
+
+> **Note:** In a program, use the exit code, `ok`, `id`, and `level`. The
+> text of `message` and `error` can change in a new version.
 
 ### The project name and teammates
 

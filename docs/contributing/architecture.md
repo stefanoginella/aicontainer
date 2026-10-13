@@ -24,7 +24,8 @@ code of the commands is in the bash modules in `lib/aic/`.
 - The `aic` file keeps only these items:
   - `set -euo pipefail` and the `$AIC_HOME` resolution,
   - the globals that must overwrite a value from the environment (the
-    bind-source cache of `export_runtime_environment()`),
+    bind-source cache of `export_runtime_environment()`, the JSON mode
+    `aic_json_dir`, and `aic_update_latest`),
   - `err()`, `die()`, and `aic_helper()`,
   - the module load list,
   - the `case "${1:-help}"` dispatcher at the end. `tests/test-aic-cli-spec.mjs`
@@ -52,6 +53,7 @@ The modules, in load order:
 
 | Module | Contents |
 |---|---|
+| `json.sh` | The `--json` output of `doctor`, `status`, `validate`, and `version`: the bash JSON string encoder and `json_run()`. See [Validation](validation.md#json-output). |
 | `runtime.sh` | The Dev Containers CLI lookup, the Docker context socket, the runtime kind and bind source, the runtime user, the status relay marker, and the managed `.devcontainer/.env`. See [Host state](host-state.md). |
 | `identity.sh` | The path-unique Compose project name, `canonical_root()`, the `.devcontainer/` control-path checks, and the `.git` control paths. See [Project identity](project-identity.md). |
 | `selection.sh` | The tool and shell selection: the known values, the checks, the prompts, and the reads from `devcontainer.json`. |

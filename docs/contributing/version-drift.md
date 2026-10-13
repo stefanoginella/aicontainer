@@ -106,3 +106,5 @@ The check runs only on `aic version` and `aic upgrade`.
   `$XDG_CACHE_HOME/aicontainer/update-check`.
 - The check is skipped when `CI` is set. That guard keeps the workflow CLI
   tests offline. Do not remove it.
+- `aic version --json` runs the same check. `check_for_update()` sets
+  `aic_update_latest` only to a value that passed `is_semver()`.
