@@ -291,7 +291,7 @@ sync_report () {
       ;;
   esac
   echo "aic: review with 'git diff -- .devcontainer/', then 'aic rebuild'"
-  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, chown-paths, post-create.project.sh, docker-compose.override.yml, vscode-extensions, vscode-settings.json, shell-rc.zsh, p10k.zsh, statusline.*) are untouched"
+  echo "aic: project-owned files (Dockerfile.project, firewall-allowlist, firewall-enable, firewall-presets, chown-paths, post-create.project.sh, docker-compose.override.yml, vscode-extensions, vscode-settings.json, shell-rc.zsh, p10k.zsh, statusline.*) are untouched"
   if [ -f .devcontainer/docker-compose.override.yml ]; then
     echo "aic: wired docker-compose.override.yml into dockerComposeFile"
   fi

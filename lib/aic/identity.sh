@@ -229,7 +229,7 @@ AIC_POST_CREATE_MODULES="post_create_common.py post_create_claude_reset.py post_
 # tests/test-aic-hook-files.py checks this. template.sh and validation.sh read it.
 # shellcheck disable=SC2034
 AIC_HOOK_FILES="agent-status.py claude-settings.json opencode-guardrail.js pre-tool-use.sh"
-AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py $AIC_POST_CREATE_MODULES aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh statusline.sh statusline.mjs statusline.js statusline.py"
+AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py $AIC_POST_CREATE_MODULES aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist firewall-enable firewall-presets chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh statusline.sh statusline.mjs statusline.js statusline.py"
 
 validate_devcontainer_paths () {
   local require_dir="${1:-optional}" path name linked

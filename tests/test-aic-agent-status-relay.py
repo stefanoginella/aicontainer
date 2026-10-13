@@ -277,7 +277,7 @@ class ManagedWiringTests(unittest.TestCase):
             'resolve_domain_into_set "$status_set" "$STATUS_RELAY_HOST"', FIREWALL
         )
         self.assertIn(
-            '-m set --match-set "$status_set" dst --dport "$STATUS_RELAY_PORT" -j ACCEPT',
+            'accept_set_members_v4 "$out_chain" "$status_set" -p tcp --dport "$STATUS_RELAY_PORT"',
             FIREWALL,
         )
         # Pin the constants too: the rule assertions above only prove the

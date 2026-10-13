@@ -66,6 +66,57 @@ Follow these rules:
 A sibling container with write access has a different netns. The block does
 not cover it.
 
+## Declarative enable and presets
+
+Three project-owned files in `.devcontainer/` control the full allowlist:
+`firewall-allowlist`, `firewall-enable`, and `firewall-presets`. The helper
+reads them from the read-only `/workspace/.devcontainer` mount.
+
+`firewall-enable` is a marker. Only its presence counts. The rules do not
+survive a restart, so the marker acts on every start, in three places:
+
+1. The managed Compose `command` of the devcontainer runs
+   `/usr/bin/sudo -n /usr/local/bin/aic-firewall auto` when the marker
+   exists, then `exec sleep infinity`. If `auto` fails, the command exits and
+   the container stops. This also covers a plain `docker start`.
+2. `apply_declared_firewall()`, the first post-create step, runs `auto` again.
+   Dev Containers can start post-create while step 1 still resolves DNS. If it
+   fails, `main()` skips `refresh_ai_tools` and `run_project_hook`.
+3. `postStartCommand` runs `auto` again when the marker exists, and `waitFor`
+   is `postStartCommand`. Thus `devcontainer up` returns, and VS Code opens a
+   terminal, only after step 1. Without the marker it runs nothing, so an
+   older build-mode image without `auto` still starts.
+4. `aic shell` and `aic run` use `devcontainer exec`, which skips
+   `postStartCommand`. `ensure_declared_firewall()` in `lifecycle.sh` runs
+   `auto` first and stops the command when it fails.
+
+`auto` takes the lock (a `flock`, which the kernel releases when the holder
+exits, so a crash never blocks the next start). With an active generation it
+does nothing. Otherwise it runs the same path as `enable`.
+
+`firewall-presets` selects names from the fixed `preset_domains()` table in
+`template/aic-firewall`. The hosts come only from that root-owned table.
+An unknown name aborts the change, and the active policy stays the same.
+`FIREWALL_PRESETS` in `lib/validate.mjs` holds the same names, so the host
+gate refuses an unknown name as a MANAGED finding before Docker starts.
+
+Follow these rules:
+
+- Keep each preset at the minimum hosts that the default client needs, from
+  the documentation or the source of the registry. Never add a preset host to
+  `DEFAULT_ALLOWLIST`.
+- Never let a preset file or the marker name a host, a port, or an option.
+- `auto` must never remove a rule. Without the marker, it does nothing.
+- These files are not trust findings. The allowlist can only restrict the open
+  default, so a repository cannot get more egress with them than without
+  them. If the allowlist ever becomes a default, make a preset selection a
+  trust finding first.
+
+Guarded by `tests/test-aic-firewall-presets.sh`, the firewall-presets cases in
+`tests/test-aic-validate.mjs` and `tests/test-aic-host-security.sh`, the
+declared-firewall cases in `tests/test-aic-post-create-reset.py`, and the
+"declared firewall is on at every start" smoke.
+
 ## Runaway limit
 
 Both Compose templates set `pids_limit: 4096` on the devcontainer. This is a

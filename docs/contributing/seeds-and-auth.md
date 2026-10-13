@@ -153,7 +153,7 @@ Workspace `.mcp.json` servers are repository content. In the managed bypass mode
 1. In each `setup_*`, `_reset_managed_files()` tries every reset, also when one reset fails. So a blocked config file cannot skip the memory reset.
 2. The `setup_*` resets run before `refresh_ai_tools()`. The updaters start the tools, and the tools must not load the settings, memory, rules, or MCP servers of a previous session. `lock_config()` also runs before `refresh_ai_tools()`, so a slow network cannot delay the Git identity and the root-locked config. See "AI-tool refresh on every create" in [Shell startup and overlays](shell-and-overlays.md).
 3. `main()` runs every step through `_run_step()`. So one failure cannot skip the lock step or the project-hook step. Any failure still makes the exit status nonzero.
-4. The template sets `"waitFor": "postCreateCommand"`, so VS Code opens no terminal before the reset.
+4. The template sets `"waitFor": "postStartCommand"`, so VS Code opens no terminal before the reset. `postStartCommand` runs after `postCreateCommand`, and it waits for a declared firewall (see [Runtime policy](runtime-policy.md#declarative-enable-and-presets)).
 
 Guarded by `tests/test-aic-post-create-reset.py`, the `waitFor` case in `tests/test-aic-host-security.sh`, and the "prompt/code persistence is project-isolated" smoke.
 

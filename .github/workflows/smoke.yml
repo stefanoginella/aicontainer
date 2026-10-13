@@ -532,7 +532,9 @@ jobs:
           socketserver.ThreadingTCPServer.allow_reuse_address = True
           socketserver.ThreadingTCPServer(("0.0.0.0", 9000), H).serve_forever()
           ' >/dev/null
-          docker run --rm --network "$net" --cap-add NET_ADMIN --user root \
+          # The same capability set as the devcontainer: no NET_RAW, which
+          # iptables `-m set` would need.
+          docker run --rm --network "$net" --cap-drop ALL --cap-add NET_ADMIN --user root \
             --entrypoint /bin/bash "$img" -c '
             for _ in $(seq 40); do
               (: </dev/tcp/aic-fw-smoke-srv/9000) 2>/dev/null && break
@@ -550,6 +552,89 @@ jobs:
             fi
             echo "OK: enable cut the earlier session and blocks new off-list connections"
           '
+      - name: Smoke test - declared firewall is on at every start; presets are opt-in
+        run: |
+          # A second project commits .devcontainer/firewall-enable and selects
+          # the crates preset. The files need no trust. Every start (also a
+          # plain `docker restart`, outside Dev Containers) must enable the
+          # firewall. The selected preset host passes; the host of a preset
+          # that is not selected, and any other host, stay blocked. The agent
+          # cannot remove the marker or turn the firewall off.
+          set -euo pipefail
+          mkdir -p /tmp/proj-fw && cd /tmp/proj-fw && git init -q
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build --force
+          : > .devcontainer/firewall-enable
+          printf '# registries\ncrates\n' > .devcontainer/firewall-presets
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" validate </dev/null \
+            || { echo "FAIL: the declarative firewall files needed trust"; exit 1; }
+          name=$(sed -n 's/^AIC_PROJECT_NAME=//p' .devcontainer/.env)
+          cleanup() {
+            docker compose -p "$name" -f .devcontainer/docker-compose.yml down >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          devcontainer up --workspace-folder .
+          check_firewall() {
+            devcontainer exec --workspace-folder . bash -lc '
+              set -u
+              sudo -n /usr/local/bin/aic-firewall status | grep -q "policy DROP" \
+                || { echo "FAIL: the declared firewall is off after start"; exit 1; }
+              curl -fsS --max-time 20 -o /dev/null https://index.crates.io/config.json \
+                || { echo "FAIL: the selected preset host index.crates.io is blocked"; exit 1; }
+              if curl -sS --max-time 8 -o /dev/null https://proxy.golang.org/ 2>/dev/null; then
+                echo "FAIL: proxy.golang.org passes, but the go preset is not selected"; exit 1
+              fi
+              if curl -sS --max-time 8 -o /dev/null http://1.1.1.1/ 2>/dev/null; then
+                echo "FAIL: a host off the allowlist passes"; exit 1
+              fi
+              if rm -f /workspace/.devcontainer/firewall-enable 2>/dev/null \
+                  || [ ! -e /workspace/.devcontainer/firewall-enable ]; then
+                echo "FAIL: the agent could remove the firewall-enable marker"; exit 1
+              fi
+              if { printf "go\n" >> /workspace/.devcontainer/firewall-presets; } 2>/dev/null; then
+                echo "FAIL: the agent could change the presets"; exit 1
+              fi
+              if sudo -n /usr/local/bin/aic-firewall disable >/dev/null 2>&1; then
+                echo "FAIL: aic-firewall has a disable command"; exit 1
+              fi
+            '
+          }
+          check_firewall
+          echo "OK: devcontainer up enabled the declared firewall with the selected preset only"
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer \
+            --filter "label=com.docker.compose.project=$name")
+          [ "$(printf '%s\n' "$cid" | grep -c .)" = 1 ] || { echo "FAIL: no single firewalled devcontainer"; exit 1; }
+          docker restart "$cid" >/dev/null
+          on=0
+          for _ in $(seq 60); do
+            if docker exec -u vscode "$cid" sudo -n /usr/local/bin/aic-firewall status 2>/dev/null \
+                | grep -q "policy DROP"; then
+              on=1; break
+            fi
+            sleep 1
+          done
+          [ "$on" = 1 ] || { echo "FAIL: a plain docker restart left the declared firewall off"; docker logs "$cid" | tail -20; exit 1; }
+          check_firewall
+          echo "OK: a restart enabled the declared firewall again"
+          # Fail closed: when `auto` fails at start (here an unknown preset that
+          # bypasses the host gate through a plain docker restart), the
+          # container must stop instead of running with open egress.
+          printf 'crates\nnot-a-preset\n' > .devcontainer/firewall-presets
+          docker restart "$cid" >/dev/null || true
+          state=""
+          for _ in $(seq 60); do
+            state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$cid")
+            [ "${state%% *}" = exited ] && break
+            sleep 1
+          done
+          [ "${state%% *}" = exited ] && [ "${state##* }" != 0 ] \
+            || { echo "FAIL: a failed declared firewall left the container running ($state)"; exit 1; }
+          docker logs "$cid" 2>&1 | grep -q 'firewall-enable is set, but the firewall could not be enabled' \
+            || { echo "FAIL: the stopped container did not log the firewall failure"; exit 1; }
+          if devcontainer up --workspace-folder . >/dev/null 2>&1; then
+            echo "FAIL: devcontainer up started a project whose declared firewall fails"; exit 1
+          fi
+          echo "OK: a failed declared firewall stops the container"
+
       - name: Smoke test - npm quarantine window is sane (npx-based MCPs installable)
         working-directory: /tmp/proj
         run: |

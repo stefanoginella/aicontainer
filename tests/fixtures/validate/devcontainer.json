@@ -79,7 +79,15 @@
 
   "postCreateCommand": "/usr/bin/python3 -I /opt/post-create.py",
 
-  // VS Code opens terminals only after post-create, so no agent starts before
-  // the managed memory/config reset and the root-owned config lock are done.
-  "waitFor": "postCreateCommand"
+  // With .devcontainer/firewall-enable, the Compose start command enables the
+  // firewall on every start. This waits for that run (and enables the firewall
+  // if it is not active yet), so `devcontainer up` returns and VS Code opens
+  // terminals only with the firewall on. A failure fails the start. Without
+  // the marker it runs nothing, so an older image without `auto` still starts.
+  "postStartCommand": "if [ -e /workspace/.devcontainer/firewall-enable ] || [ -L /workspace/.devcontainer/firewall-enable ]; then /usr/bin/sudo -n /usr/local/bin/aic-firewall auto; fi",
+
+  // VS Code opens terminals only after post-create and post-start, so no agent
+  // starts before the managed memory/config reset, the root-owned config lock,
+  // and a declared firewall are done.
+  "waitFor": "postStartCommand"
 }

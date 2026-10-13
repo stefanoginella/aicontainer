@@ -69,6 +69,14 @@ The trust hash covers the whole `.devcontainer/` tree. So any edit asks for trus
 
 Keep the file list aligned with `AIC_CONTROL_FILES` and with the post-create and lock-helper tables.
 
+### Firewall files
+
+`firewall-allowlist`, `firewall-enable`, and `firewall-presets` are not trust
+findings: they can only restrict the open default egress. The validator checks
+each line of `firewall-presets` against `FIREWALL_PRESETS`. An unknown name is
+a MANAGED finding, so trust cannot approve it. The rules are in
+[Runtime policy](runtime-policy.md#declarative-enable-and-presets).
+
 Guarded by the project-code cases in `tests/test-aic-host-security.sh` and the "Bring up the devcontainer" step in `smoke.yml` (a direct start is refused, then trusted).
 
 ## Rules that keep the validated model equal to the started model

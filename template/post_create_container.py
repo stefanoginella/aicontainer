@@ -1,5 +1,5 @@
-"""Container steps: volume ownership, the metadata block, the socket-proxy
-check, and the project hook (post-create.project.sh).
+"""Container steps: a declared firewall, volume ownership, the metadata block,
+the socket-proxy check, and the project hook (post-create.project.sh).
 
 See docs/contributing/project-overrides.md and docs/contributing/runtime-policy.md.
 """
@@ -22,6 +22,11 @@ CHOWN_ALLOWED_PREFIXES = ("/workspace/", "/home/vscode/.cache/")
 # (e.g. `lefthook install`). See run_project_hook().
 PROJECT_POST_CREATE = Path("/workspace/.devcontainer/post-create.project.sh")
 
+# Optional project-owned marker: the project declares that the outbound
+# allowlist is on. The Compose start command already enables it on every start;
+# apply_declared_firewall() makes post-create wait for that run.
+FIREWALL_ENABLE_MARKER = Path("/workspace/.devcontainer/firewall-enable")
+
 
 def _project_chown_paths() -> list[Path]:
     """Parse .devcontainer/chown-paths (project-owned, RO-mounted) into the
@@ -40,6 +45,25 @@ def _project_chown_paths() -> list[Path]:
             continue
         paths.append(Path(entry))
     return paths
+
+
+def apply_declared_firewall() -> None:
+    """With .devcontainer/firewall-enable, make sure that the allowlist is on
+    before any post-create step uses the network.
+
+    The managed Compose command runs `aic-firewall auto` when the container
+    starts, but Dev Containers can start post-create while that run still
+    resolves DNS. `auto` waits for it, and enables the firewall itself when no
+    generation is active. A failure raises: main() then skips the steps that
+    use open egress (the AI-tool refresh and the project hook).
+    """
+    if not (FIREWALL_ENABLE_MARKER.exists() or FIREWALL_ENABLE_MARKER.is_symlink()):
+        return
+    subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/local/bin/aic-firewall", "auto"],
+        check=True,
+    )
+    log("outbound firewall is on (.devcontainer/firewall-enable)")
 
 
 def fix_volume_ownership() -> None:

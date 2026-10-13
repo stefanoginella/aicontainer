@@ -91,14 +91,18 @@ This file sets the outbound allowlist and the unconditional metadata chains. The
 - A zero-IP result also aborts the change, and the active policy stays the same.
 - Never flush a live chain or a metadata chain.
 - Never set the policy to ACCEPT.
+- Never use `-m set` in a rule. It needs `CAP_NET_RAW`, which the devcontainer drops, so `enable` fails there. `accept_set_members_v4()` writes one exact `-d` rule for each member of the inactive set.
 - Never silently ignore configured IPv6 that cannot be filtered.
 - The host status relay uses its own ipset and an exact TCP-8787 rule. Never put `host.docker.internal` in the general all-port allowlist.
+- A preset host comes only from the fixed `preset_domains()` table. A project file selects names, never hosts. Keep the names equal to `FIREWALL_PRESETS` in `lib/validate.mjs`.
+- `auto` only enables, and only when `.devcontainer/firewall-enable` exists. Keep the fail-closed start command in both Compose templates. See "Declarative enable and presets" in [Runtime policy](runtime-policy.md#declarative-enable-and-presets).
+- There is no `disable` or `flush` subcommand.
 
 The OUTPUT chains accept `ESTABLISHED,RELATED` only with `--ctdir REPLY`. This matches replies to sessions that started from outside.
 
 > **Warning:** Do not use a blanket `ESTABLISHED,RELATED` accept. It keeps an outbound session alive that the container opened before `enable`, to a host that is not on the list.
 
-Guarded by the static check in `tests/test-aic-host-security.sh` and the "allowlist enable cuts a connection opened before it" smoke. The smoke uses throwaway containers, because you cannot undo `enable` in a running container.
+Guarded by the static check in `tests/test-aic-host-security.sh`, `tests/test-aic-firewall-presets.sh`, the "allowlist enable cuts a connection opened before it" smoke, and the "declared firewall is on at every start" smoke. The smoke uses throwaway containers, because you cannot undo `enable` in a running container.
 
 ## `template/hooks/pre-tool-use.sh`
 

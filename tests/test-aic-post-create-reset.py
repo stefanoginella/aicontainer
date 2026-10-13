@@ -35,6 +35,7 @@ COMMON = importlib.import_module("aic_post_create.post_create_common")
 CLAUDE_RESET = importlib.import_module("aic_post_create.post_create_claude_reset")
 TOOLS = importlib.import_module("aic_post_create.post_create_tools")
 MAIN = importlib.import_module("aic_post_create.post_create_main")
+CONTAINER = importlib.import_module("aic_post_create.post_create_container")
 
 PLANTED = "AIC_PLANTED_INSTRUCTIONS"
 
@@ -574,7 +575,7 @@ class MainStepIsolationTests(unittest.TestCase):
         # The resets run before the updaters start the tools, and the lock
         # runs before the updaters can wait on a slow network.
         names = [
-            "fix_volume_ownership", "block_metadata",
+            "apply_declared_firewall", "fix_volume_ownership", "block_metadata",
             "setup_claude", "setup_codex", "setup_opencode",
             "setup_cli_homes", "setup_gitconfig", "setup_personal_shell",
             "setup_statusline", "lock_config", "apply_statusline",
@@ -607,7 +608,7 @@ class MainStepIsolationTests(unittest.TestCase):
 
     def test_clean_run_returns_zero(self) -> None:
         names = [
-            "fix_volume_ownership", "block_metadata",
+            "apply_declared_firewall", "fix_volume_ownership", "block_metadata",
             "setup_cli_homes", "setup_gitconfig", "setup_personal_shell",
             "setup_statusline", "lock_config", "apply_statusline",
             "verify_socket_proxy", "refresh_ai_tools", "run_project_hook",
@@ -625,10 +626,101 @@ class MainStepIsolationTests(unittest.TestCase):
                 patch.stop()
 
 
+class DeclaredFirewallTests(unittest.TestCase):
+    """.devcontainer/firewall-enable: post-create waits for the start-time
+    enable, and a declared firewall that is not on keeps the open-egress steps
+    from running."""
+
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.marker = Path(self._temp.name) / "firewall-enable"
+        patch = mock.patch.object(CONTAINER, "FIREWALL_ENABLE_MARKER", self.marker)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_no_marker_runs_nothing(self) -> None:
+        with mock.patch.object(CONTAINER.subprocess, "run") as run:
+            CONTAINER.apply_declared_firewall()
+        run.assert_not_called()
+
+    def test_marker_runs_the_fixed_helper(self) -> None:
+        self.marker.write_text("")
+        with mock.patch.object(CONTAINER.subprocess, "run") as run, \
+                redirect_stderr(io.StringIO()):
+            CONTAINER.apply_declared_firewall()
+        run.assert_called_once_with(
+            ["/usr/bin/sudo", "-n", "/usr/local/bin/aic-firewall", "auto"], check=True,
+        )
+
+    def test_dangling_marker_link_still_enables(self) -> None:
+        self.marker.symlink_to(Path(self._temp.name) / "missing")
+        with mock.patch.object(CONTAINER.subprocess, "run") as run, \
+                redirect_stderr(io.StringIO()):
+            CONTAINER.apply_declared_firewall()
+        run.assert_called_once()
+
+    def test_helper_failure_raises(self) -> None:
+        self.marker.write_text("")
+        error = CONTAINER.subprocess.CalledProcessError(1, "aic-firewall")
+        with mock.patch.object(CONTAINER.subprocess, "run", side_effect=error):
+            with self.assertRaises(CONTAINER.subprocess.CalledProcessError):
+                CONTAINER.apply_declared_firewall()
+
+    def test_failed_firewall_skips_open_egress_steps(self) -> None:
+        ran: list[str] = []
+
+        def make(name: str, fail: bool = False):
+            def step() -> None:
+                ran.append(name)
+                if fail:
+                    raise OSError("no firewall")
+            step.__name__ = name
+            return step
+
+        names = [
+            "apply_declared_firewall", "fix_volume_ownership", "block_metadata",
+            "setup_cli_homes", "setup_gitconfig", "setup_personal_shell",
+            "setup_statusline", "lock_config", "apply_statusline",
+            "verify_socket_proxy", "refresh_ai_tools", "run_project_hook",
+            "verify_git_identity",
+        ]
+        patches: list = [
+            mock.patch.object(MAIN, name, make(name, fail=name == "apply_declared_firewall"))
+            for name in names
+        ]
+        patches.append(mock.patch.object(MAIN, "ENABLED_TOOLS", frozenset()))
+        captured = io.StringIO()
+        for patch in patches:
+            patch.start()
+        try:
+            with redirect_stderr(captured):
+                status = MAIN.main()
+        finally:
+            for patch in reversed(patches):
+                patch.stop()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(ran[0], "apply_declared_firewall")
+        self.assertEqual(
+            ran, [n for n in names if n not in ("refresh_ai_tools", "run_project_hook")]
+        )
+        self.assertIn("skipping run_project_hook: the declared firewall is not on",
+                      captured.getvalue())
+
+
 class TemplateTests(unittest.TestCase):
     def test_vscode_waits_for_post_create(self) -> None:
+        # postStartCommand runs after postCreateCommand, so waiting for it also
+        # waits for the post-create reset and lock.
         text = (ROOT / "template" / "devcontainer.json").read_text()
-        self.assertRegex(text, r'"waitFor":\s*"postCreateCommand"')
+        self.assertRegex(text, r'"waitFor":\s*"postStartCommand"')
+        self.assertIn(
+            '"postStartCommand": "if [ -e /workspace/.devcontainer/firewall-enable ] '
+            '|| [ -L /workspace/.devcontainer/firewall-enable ]; '
+            'then /usr/bin/sudo -n /usr/local/bin/aic-firewall auto; fi",',
+            text,
+        )
 
 
 if __name__ == "__main__":

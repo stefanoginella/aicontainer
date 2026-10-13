@@ -14,7 +14,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  activeInterpolations, analyzeResolvedConfig, formatFindings, parseJsonc, safeDiagnostic,
+  activeInterpolations, analyzeResolvedConfig, FIREWALL_PRESETS, firewallPresetsProblems,
+  formatFindings, parseJsonc, safeDiagnostic,
 } from '../lib/validate.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -95,6 +96,7 @@ const toInput = ctx => ({
   statusProject: ctx.statusProject,
   statusProjectId: ctx.statusProjectId,
   overrideText: ctx.hasOverride ? ctx.overrideText : undefined,
+  firewallPresetsText: ctx.firewallPresetsText,
 });
 
 const analyze = edit => analyzeResolvedConfig(toInput(scenario(edit)));
@@ -477,6 +479,9 @@ function runCli(ctx, extra = []) {
   if (ctx.hasOverride) {
     fs.writeFileSync(path.join(ctx.root, '.devcontainer', 'docker-compose.override.yml'), ctx.overrideText);
   }
+  if (ctx.firewallPresetsText !== undefined) {
+    fs.writeFileSync(path.join(ctx.root, '.devcontainer', 'firewall-presets'), ctx.firewallPresetsText);
+  }
   const args = [
     file('dev'), file('template'), file('base'), file('expected'), file('final'), file('noenv'),
     file('rawBase'), file('rawFinal'), ctx.root, NAME, ctx.hasOverride ? '1' : '0',
@@ -485,6 +490,36 @@ function runCli(ctx, extra = []) {
   runCli.lastArgs = args;
   return spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8' });
 }
+
+test('firewall-presets: known preset names have no findings and need no trust', () => {
+  // A preset only adds fixed hosts to the opt-in allowlist, exactly like
+  // firewall-allowlist, so a selection is not a trust finding.
+  expectNone(analyze(ctx => {
+    ctx.firewallPresetsText = '# registries\ncrates\n  go  # module proxy\r\n\n' + FIREWALL_PRESETS.join('\n');
+  }));
+  expectNone(analyze(ctx => { ctx.firewallPresetsText = ''; }));
+});
+
+test('firewall-presets: an unknown name or a host is refused and cannot be trusted', () => {
+  for (const line of ['evil.example.com', 'Go', 'crates io', 'go,crates', '../crates', 'x'.repeat(40)]) {
+    expectOnly(analyze(ctx => { ctx.firewallPresetsText = `crates\n${line}\n`; }),
+      'MANAGED', /^\.devcontainer\/firewall-presets line 2 is not a known firewall preset; use one of: crates, go, /);
+  }
+  // The diagnostic never echoes the raw line, so it cannot carry terminal controls.
+  const [finding] = analyze(ctx => { ctx.firewallPresetsText = '\u001b]8;;http://x\u0007go\n'; });
+  assert.equal(finding.kind, 'MANAGED');
+  assert.doesNotMatch(finding.message, /http|\u001b|\\u001b/);
+  assert.deepEqual(firewallPresetsProblems(undefined), ['.devcontainer/firewall-presets could not be read']);
+});
+
+test('firewall-presets: the CLI reads the project file', () => {
+  const ok = runCli(scenario(ctx => { ctx.firewallPresetsText = 'crates\nnodejs\n'; }));
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(ok.stdout, '');
+  const bad = runCli(scenario(ctx => { ctx.firewallPresetsText = 'pypi-mirror.example\n'; }));
+  assert.equal(bad.status, 0, bad.stderr);
+  assert.match(bad.stdout, /^MANAGED\t\.devcontainer\/firewall-presets line 1 is not a known firewall preset/m);
+});
 
 test('the CLI prints one TAB-separated finding per line and exits 0', () => {
   const clean = runCli(scenario());

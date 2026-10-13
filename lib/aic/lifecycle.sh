@@ -166,6 +166,18 @@ cmd_rebuild () {
   fi
 }
 
+# With .devcontainer/firewall-enable, no agent session may start before the
+# firewall is on. `devcontainer exec` does not run postStartCommand, so after a
+# plain `docker start` the start-time `aic-firewall auto` can still resolve DNS.
+# `auto` waits for that run (or enables the firewall itself). A failure stops
+# the command, so the session never starts with open egress.
+ensure_declared_firewall () {
+  local devcontainer="$1"
+  [ -e .devcontainer/firewall-enable ] || [ -L .devcontainer/firewall-enable ] || return 0
+  "$devcontainer" exec --workspace-folder . /usr/bin/sudo -n /usr/local/bin/aic-firewall auto >/dev/null \
+    || die ".devcontainer/firewall-enable is set, but the firewall is not on in the container; run 'aic up' (or 'aic rebuild') and read 'docker logs' for the cause"
+}
+
 cmd_shell () {
   require_in_project
   pin_compose_project_name
@@ -176,6 +188,7 @@ cmd_shell () {
   warn_compose_drift
   local devcontainer shell
   devcontainer="$(resolve_devcontainer)"
+  ensure_declared_firewall "$devcontainer"
   # Honor the per-project shell choice (AIC_SHELL in devcontainer.json).
   # Older projects without the field fall back to zsh — that's what they had
   # baked in pre-flag.
@@ -205,6 +218,7 @@ cmd_run () {
   write_runtime_environment_file
   validate_project_security gate 0
   local devcontainer; devcontainer="$(resolve_devcontainer)"
+  ensure_declared_firewall "$devcontainer"
   "$devcontainer" exec --workspace-folder . "$@"
 }
 

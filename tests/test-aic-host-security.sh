@@ -1324,11 +1324,12 @@ if (cd "$TMP/profiles" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
   fail "validate accepted an untrusted profile-gated service"
 fi
 # waitFor is managed: VS Code must not open a terminal (and start an agent)
-# before post-create has reset the managed memory files and locked config.
+# before post-create has reset the managed memory files and locked config, and
+# before post-start has waited for a declared firewall.
 sed -e 's|^  "customizations": {|  "runServices": ["devcontainer", "hidden"],\
   "shutdownAction": "none",\
   "customizations": {|' \
-  -e 's|^  "waitFor": "postCreateCommand"|  "waitFor": "onCreateCommand"|' \
+  -e 's|^  "waitFor": "postStartCommand"|  "waitFor": "onCreateCommand"|' \
   "$TMP/profiles/.devcontainer/devcontainer.json" \
   > "$TMP/profiles/.devcontainer/devcontainer.json.tmp"
 mv "$TMP/profiles/.devcontainer/devcontainer.json.tmp" \
@@ -1993,6 +1994,39 @@ if (cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
 fi
 rm "$TMP/project-code/.devcontainer/post-create.project.sh"
 
+# The declarative firewall files only restrict egress, or add fixed preset
+# hosts to the opt-in allowlist, like firewall-allowlist. They need no trust.
+# A preset name outside the fixed table is refused, and trust cannot approve it.
+# A symlink in their place is refused like every other control file.
+printf '' > "$TMP/project-code/.devcontainer/firewall-enable"
+printf '# registries\ncrates\ngo\n' > "$TMP/project-code/.devcontainer/firewall-presets"
+(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null >/dev/null 2>&1) \
+  || fail "validate refused the declarative firewall files of a clean project"
+printf 'crates\nevil.example.com\n' > "$TMP/project-code/.devcontainer/firewall-presets"
+if out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+    "$ROOT/aic" validate </dev/null 2>&1); then
+  fail "validate accepted a host in firewall-presets"
+fi
+echo "$out" | grep -qF '.devcontainer/firewall-presets line 2 is not a known firewall preset' \
+  || { printf '%s\n' "$out" >&2; fail "an unknown firewall preset was not named"; }
+if (cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+    "$ROOT/aic" up --allow-unsafe </dev/null >/dev/null 2>&1); then
+  fail "--allow-unsafe started a project with an unknown firewall preset"
+fi
+rm "$TMP/project-code/.devcontainer/firewall-presets"
+for name in firewall-enable firewall-presets; do
+  rm -f "$TMP/project-code/.devcontainer/$name"
+  ln -s /etc/hostname "$TMP/project-code/.devcontainer/$name"
+  if out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+      "$ROOT/aic" validate </dev/null 2>&1); then
+    fail "validate accepted a symlinked .devcontainer/$name"
+  fi
+  echo "$out" | grep -qF ".devcontainer/$name must be a regular file, not a symlink" \
+    || { printf '%s\n' "$out" >&2; fail "a symlinked .devcontainer/$name was not refused"; }
+  rm "$TMP/project-code/.devcontainer/$name"
+done
+
 printf 'ms-python.python\n' > "$TMP/project-code/.devcontainer/vscode-extensions"
 (cd "$TMP/project-code" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1)
 out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
@@ -2267,6 +2301,12 @@ fi
 # The trusted template's name line needs AIC_PROJECT_NAME even with -p.
 if [ "$tool" = docker ] && [ "${1:-}" = compose ] && [ -n "${AIC_TEST_COMPOSE_ENV_LOG:-}" ]; then
   printf '%s %s\n' "${3:-}" "${AIC_PROJECT_NAME-<unset>}" >> "$AIC_TEST_COMPOSE_ENV_LOG"
+fi
+# A declared firewall that cannot be enabled in the container.
+if [ "$tool" = devcontainer ] && [ "${AIC_FAKE_FIREWALL_FAIL:-}" = 1 ] \
+    && [ "${4:-}" = /usr/bin/sudo ] && [ "${6:-}" = /usr/local/bin/aic-firewall ]; then
+  log_call "$@"
+  exit 1
 fi
 if [ "$tool" = devcontainer ] && [ -n "${AIC_TEST_ONCE_LOG:-}" ]; then
   printf '%s\n' "${AIC_UNSAFE_ONCE_HASH-<unset>}" >> "$AIC_TEST_ONCE_LOG"
@@ -2782,6 +2822,33 @@ grep -q '<bash> <--noprofile> <--rcfile> </etc/aic/shell/bashrc> <-i>' "$log" \
   AIC_HOME="$ROOT" "$ROOT/aic" shell)
 grep -q "<fish> <--no-config> <-C> <source /etc/fish/conf.d/aic.fish>" "$log" \
   || fail "fish shell did not use the managed root-owned config"
+grep -q 'aic-firewall' "$log" && fail "aic shell ran aic-firewall without .devcontainer/firewall-enable"
+
+# devcontainer exec does not run postStartCommand. With the firewall-enable
+# marker, aic shell and aic run first wait for the start-time enable through
+# `aic-firewall auto`, and they stop when it fails: no session with open egress.
+fw_auto='^devcontainer <exec> <--workspace-folder> <\.> </usr/bin/sudo> <-n> </usr/local/bin/aic-firewall> <auto>$'
+: > "$TMP/cleanup/.devcontainer/firewall-enable"
+for cmd in shell run; do
+  : > "$log"
+  (cd "$TMP/cleanup" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
+    AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+    AIC_HOME="$ROOT" "$ROOT/aic" "$cmd" true >/dev/null) \
+    || fail "aic $cmd failed with a working declared firewall"
+  [ "$(grep -c '^devcontainer <exec>' "$log")" = 2 ] && head -n 1 "$log" | grep -q "$fw_auto" \
+    || { cat "$log" >&2; fail "aic $cmd did not wait for the declared firewall before the session"; }
+  : > "$log"
+  if out=$(cd "$TMP/cleanup" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
+      AIC_FAKE_FIREWALL_FAIL=1 AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+      AIC_HOME="$ROOT" "$ROOT/aic" "$cmd" true 2>&1); then
+    fail "aic $cmd started a session although the declared firewall is not on"
+  fi
+  echo "$out" | grep -q 'firewall-enable is set, but the firewall is not on' \
+    || fail "aic $cmd did not explain the failed declared firewall"
+  [ "$(grep -c '^devcontainer <exec>' "$log")" = 1 ] \
+    || { cat "$log" >&2; fail "aic $cmd ran the session after a failed declared firewall"; }
+done
+rm "$TMP/cleanup/.devcontainer/firewall-enable"
 
 new_project "$TMP/initialize"
 seed_home="$TMP/seed-home"; mkdir "$seed_home"

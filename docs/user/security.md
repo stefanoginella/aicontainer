@@ -23,7 +23,7 @@ in a project. `aic up` also shows it automatically at the end of every run.
 | `.env*` files | **Best-effort only.** The `.env` file of your project is physically in `/workspace`. The [PreToolUse hook](whats-in-the-box.md) refuses the obvious reads. But the hook matches file names in the tool call, so it is not a boundary. Keep secrets that you cannot lose out of the project directory. |
 | Session transcripts, prompt history, auto memory, user-level skills/plugins | They persist in a **path-unique per-project volume**. aic never writes them back to your host home or shares them with another checkout. aic resets user-level instructions, settings, Claude rules, and Claude MCP servers on each create. See [Multi-project model](multi-project.md). |
 | Host Docker daemon | **Object APIs are off by default.** Only proxy ping/version stay available. `--docker-read` opts into sensitive object/inspect/log/file APIs. `--docker` opts into read-write control of the host daemon for testcontainers / in-container Compose. See [Threat model](#threat-model). |
-| **Outbound network** | **Mostly open by default.** The container can reach the internet, your LAN, and services on your host machine. This includes services bound to `127.0.0.1`, through `host.docker.internal` on Docker Desktop and OrbStack. aic blocks IPv4/IPv6 link-local and common cloud-provider metadata endpoints on every create. To restrict the rest, opt in to the [network allowlist](network-allowlist.md). |
+| **Outbound network** | **Mostly open by default.** The container can reach the internet, your LAN, and services on your host machine. This includes services bound to `127.0.0.1`, through `host.docker.internal` on Docker Desktop and OrbStack. aic blocks IPv4/IPv6 link-local and common cloud-provider metadata endpoints on every create. To restrict the rest, opt in to the [network allowlist](network-allowlist.md). A committed `.devcontainer/firewall-enable` turns it on at every start. |
 
 The full reasons are in [Threat model](#threat-model). Give the most attention
 to the network row.
@@ -190,6 +190,13 @@ to the network row.
     [iptables allowlist](network-allowlist.md). When the allowlist is on, the
     container can reach the host only on TCP 8787, and only when the
     [status relay](status-relay.md) is enabled.
+  - To keep the allowlist on, commit `.devcontainer/firewall-enable`. Then
+    every start enables it before post-create and before a shell opens, or
+    the container stops. Registry presets
+    (`.devcontainer/firewall-presets`) add fixed hosts from the image, never
+    hosts from the repository. The agent cannot change these files, because
+    `.devcontainer/` is read-only in the container. They need no `aic trust`:
+    with them, egress is never wider than the open default.
 - **Git identity.** aic copies safe identity/workflow preferences from the
   host. Thus the agent can commit as that identity. aic does not forward
   host credential helpers and signing keys. For a sandbox-only key, use

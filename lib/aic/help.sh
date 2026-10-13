@@ -51,7 +51,8 @@ Usage:
                        also require matching consent stored outside the repo, so
                        repository edits cannot grant Docker access themselves.
                        Project-owned files (Dockerfile.project, firewall-
-                       allowlist, chown-paths, post-create.project.sh,
+                       allowlist, firewall-enable, firewall-presets,
+                       chown-paths, post-create.project.sh,
                        docker-compose.override.yml, vscode-extensions,
                        vscode-settings.json, shell-rc.zsh, p10k.zsh,
                        statusline.{sh,mjs,js,py}) are

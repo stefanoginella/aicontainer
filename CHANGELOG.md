@@ -20,6 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exit codes stay the same. `aic version` now refuses arguments other than
   `--json`. (aic)
 
+- **A committed `.devcontainer/firewall-enable` turns the firewall on at every
+  start.** You no longer run `sudo aic-firewall enable` after each start. If
+  the firewall cannot be enabled, the container stops. (aic-firewall,
+  docker-compose.yml, devcontainer.json, post-create.py)
+
+- **Opt-in allowlist presets for crates.io, Go, RubyGems, Packagist, Maven
+  Central, Node.js, and Semgrep.** List preset names in
+  `.devcontainer/firewall-presets`; the hosts are fixed in the image, and the
+  default allowlist does not change. (aic-firewall, validate.mjs)
+
+### Fixed
+
+- **`sudo aic-firewall enable` works in the devcontainer again.** It failed
+  with "Can't open socket to ipset", because its rules needed `NET_RAW`, which
+  the container drops. The rules no longer need it. (aic-firewall)
+
 ## [0.11.0] - 2026-10-13
 
 ### Changed

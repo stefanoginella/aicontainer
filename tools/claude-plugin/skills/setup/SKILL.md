@@ -40,8 +40,8 @@ that silently gets wiped or breaks `aic sync`.
 - **All customization lives in project-owned files** that `aic sync` never
   touches: `Dockerfile.project`, `docker-compose.override.yml`, `chown-paths`,
   `post-create.project.sh`, `vscode-extensions`, `vscode-settings.json`,
-  `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`, `statusline.{sh,mjs,js,py}`.
-  These are opt-in by presence.
+  `firewall-allowlist`, `firewall-enable`, `firewall-presets`, `shell-rc.zsh`,
+  `p10k.zsh`, `statusline.{sh,mjs,js,py}`. These are opt-in by presence.
 - **`aic rebuild` is the verb that builds — `aic up` is not.** `aic up` runs a
   plain `devcontainer up`, and the managed pull-mode Compose sets
   `pull_policy: missing`: when the resolved image tag is already cached, Compose
@@ -133,8 +133,8 @@ stack profile (Steps 2–3) first, then:
 1. **Inventory what's already there.** List which project-owned files exist and
    **read their contents**: `Dockerfile.project`, `docker-compose.override.yml`,
    `chown-paths`, `post-create.project.sh`, `vscode-extensions`,
-   `vscode-settings.json`, `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`,
-   `statusline.{sh,mjs,js,py}`. Also
+   `vscode-settings.json`, `firewall-allowlist`, `firewall-enable`,
+   `firewall-presets`, `shell-rc.zsh`, `p10k.zsh`, `statusline.{sh,mjs,js,py}`. Also
    note the current `AIC_TOOLS` / `AIC_SHELL` in `devcontainer.json` (the only
    managed values that survive `aic sync`), and which host-global overlays
    already exist at `~/.config/aicontainer/` (`rc.zsh`, `p10k.zsh`,
@@ -327,9 +327,13 @@ Step 1; rationale and the LSP-by-language table: `references/stack-and-suitabili
     binary into `~/.local/bin` instead. (Pure-JS LSP servers like `pyright` ship
     their code and are unaffected; add `--no-audit` to real `npm i -g` calls to
     quiet a cosmetic global+audit warning.)
-- **`firewall-allowlist`** — only if the user wants the stricter opt-in network
-  allowlist (reviewing untrusted code, corporate LAN). Off by default; mention it,
-  don't impose it.
+- **`firewall-enable` / `firewall-presets` / `firewall-allowlist`** — only if
+  the user wants the stricter opt-in network allowlist (reviewing untrusted
+  code, corporate LAN). Off by default; mention it, don't impose it. An empty
+  `firewall-enable` turns it on at every start. Map the stack's registries to
+  `firewall-presets` names (`crates`, `go`, `maven`, `nodejs`, `packagist`,
+  `rubygems`, `semgrep`; npm and PyPI are already allowed). Put only other
+  hosts in `firewall-allowlist`.
 - **Personal overlays (`shell-rc.zsh`, `p10k.zsh`, `statusline.*`)** — the user's
   own prompt, aliases, and Claude statusline inside the sandbox. These are
   *personalization*, not stack mapping, and they're the piece users most often

@@ -10,8 +10,9 @@
 
 # Best-effort detection of whether the opt-in outbound firewall is currently
 # active inside the running container. Echoes on|off|unknown and never fails.
-# The firewall is enable-only, never auto-applied, and does not survive
-# container recreation, so "off"/"unknown" is the safe (network-open) default.
+# The firewall is enable-only and does not survive a restart. Only a project
+# with .devcontainer/firewall-enable gets it on every start, so "off"/"unknown"
+# is the safe (network-open) default.
 # `sudo aic-firewall status` is one of the three scoped-sudo scripts, so this
 # read is allowed; when enabled the OUTPUT chain shows `policy DROP`.
 firewall_live_state () {
@@ -27,15 +28,17 @@ firewall_live_state () {
 }
 
 # Print the trust boundary for the current project: what the agent can read,
-# write, and reach. Folded into `aic up` (mode=up always reports network OPEN,
-# since a freshly (re)created container never has the opt-in firewall applied)
-# and exposed standalone as `aic preflight` (live-detects the firewall state).
+# write, and reach. Folded into `aic up` (mode=up reports network OPEN without
+# .devcontainer/firewall-enable, since a freshly (re)created container then
+# never has the opt-in firewall applied; with the marker it live-detects) and
+# exposed standalone as `aic preflight` (live-detects the firewall state).
 # The protections are real but otherwise invisible — this makes them auditable.
 # See docs/user/security.md "What crosses the boundary" for the canonical table.
 print_boundary_summary () {
-  local mode="${1:-preflight}" project net
+  local mode="${1:-preflight}" project net declared=0
   project="$(project_name)"
-  if [ "$mode" = "up" ]; then net="open"; else net="$(firewall_live_state)"; fi
+  [ -f .devcontainer/firewall-enable ] && declared=1
+  if [ "$mode" = "up" ] && [ "$declared" -eq 0 ]; then net="open"; else net="$(firewall_live_state)"; fi
 
   local b r y dim rst
   if [ -t 1 ]; then
@@ -107,6 +110,9 @@ print_boundary_summary () {
 
   printf "\n  %sNetwork%s\n" "$b" "$rst"
   printf "    %scloud metadata / link-local (169.254.0.0/16) blocked by default on every create%s\n" "$dim" "$rst"
+  if [ "$declared" -eq 1 ]; then
+    printf "    firewall declared by .devcontainer/firewall-enable: enabled on every container start\n"
+  fi
   case "$net" in
     on)
       printf "    %s* firewall ENABLED%s  (default DROP + curated allowlist active)\n" "$b" "$rst"
@@ -119,10 +125,12 @@ print_boundary_summary () {
     *)
       printf "    %s! FULL OUTBOUND%s: reaches the internet and your LAN (metadata excepted, see above)\n" "$r" "$rst"
       printf "    lock down per-project:  aic shell  ->  sudo aic-firewall enable\n"
+      printf "    or on every start:      touch .devcontainer/firewall-enable && aic rebuild\n"
       ;;
   esac
 
-  if [ -f .devcontainer/docker-compose.override.yml ] || [ -f .devcontainer/firewall-allowlist ]; then
+  if [ -f .devcontainer/docker-compose.override.yml ] || [ -f .devcontainer/firewall-allowlist ] \
+      || [ -f .devcontainer/firewall-presets ]; then
     printf "\n  %sProject overrides%s\n" "$b" "$rst"
     if [ -f .devcontainer/docker-compose.override.yml ]; then
       printf "    %s! docker-compose.override.yml present%s: may add mounts/env/hosts; review it.\n" "$y" "$rst"
@@ -130,6 +138,12 @@ print_boundary_summary () {
     if [ -f .devcontainer/firewall-allowlist ]; then
       local fwcount; fwcount="$(grep -cvE '^[[:space:]]*(#|$)' .devcontainer/firewall-allowlist 2>/dev/null)" || fwcount=0
       printf "    firewall-allowlist present (%s domains): applied when you enable the firewall.\n" "$fwcount"
+    fi
+    if [ -f .devcontainer/firewall-presets ]; then
+      local presets
+      presets="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' .devcontainer/firewall-presets 2>/dev/null \
+        | LC_ALL=C tr -cd 'a-z0-9-\n' | paste -sd ' ' -)" || presets=""
+      printf "    firewall-presets present (%s): applied when the firewall is enabled.\n" "${presets:-none}"
     fi
   fi
 

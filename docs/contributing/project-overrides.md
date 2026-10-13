@@ -16,6 +16,8 @@ project-owned files. `apply_template()` never touches these files:
 
 - `Dockerfile.project`
 - `firewall-allowlist`
+- `firewall-enable`
+- `firewall-presets`
 - `chown-paths`
 - `post-create.project.sh`
 - `docker-compose.override.yml`
