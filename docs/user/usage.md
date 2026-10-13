@@ -182,6 +182,9 @@ exit code that is not zero for these problems:
   the environment (each one can replace the project name in
   `.devcontainer/.env`)
 
+Because managed drift gives an exit code that is not zero, you can also use
+`aic validate` to find out if `aic sync` would change a managed file.
+
 ### JSON output (`--json`)
 
 To get output that a program can read, add `--json` to `aic doctor`,

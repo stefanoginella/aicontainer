@@ -69,6 +69,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still removes nothing and exits 1; the message now says to pass `--yes`.
   (aic)
 
+- **Git in the container now shows shared `.claude/` and `.codex/` files.**
+  The global ignore list of the image ignored both directories, so
+  `.claude/settings.json`, `.claude/skills/`, `.codex/config.toml`, and the
+  agent's changes to them did not show in `git status`. Of the agent files, it
+  now ignores only `.claude/settings.local.json`,
+  `.claude/agent-memory-local/`, `.claude/worktrees/`, and `CLAUDE.local.md`.
+  Review these files before you commit them, or before you run an AI tool on
+  the host: they can hold hooks.
+  (Dockerfile)
+
 ### Fixed
 
 - **`sudo aic-firewall enable` works in the devcontainer again.** It failed

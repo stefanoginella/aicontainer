@@ -98,9 +98,18 @@ For the preference allowlist, see
 
 ### Container global gitignore
 
-The global gitignore of the container covers `.env*`, `.claude/`, `.codex/`,
-`node_modules/`, `.venv/`, `__pycache__/`, and `.DS_Store`. Thus it is more
-difficult to commit a secret by accident.
+The global gitignore of the container covers `.env*`, `node_modules/`,
+`.venv/`, `__pycache__/`, and `.DS_Store`. Thus it is more difficult to commit
+a secret by accident.
+
+It also covers the agent files that Claude Code documents as personal or
+local: `.claude/settings.local.json`, `.claude/agent-memory-local/`,
+`.claude/worktrees/`, and `CLAUDE.local.md`. It does not cover the other
+`.claude/` and `.codex/` files, for example `.claude/settings.json`,
+`.claude/skills/`, `.claude/agents/`, and `.codex/config.toml`. You can commit
+them, and `git status` shows each change that the agent makes to them. These
+files can hold hooks that a host AI tool runs. See
+[Threat model](security.md#not-sandboxed-unless-you-opt-in).
 
 ### No host credential forwarding
 

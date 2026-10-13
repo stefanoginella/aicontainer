@@ -1430,6 +1430,26 @@ jobs:
             echo "OK: exact gh credential helper for GitHub only; managed gitconfig still root-locked"
           '
 
+      - name: Smoke test - global Git excludes show shared agent config
+        working-directory: /tmp/proj
+        run: |
+          # An agent can put hooks in .claude/settings.json or .codex/config.toml,
+          # and a host AI tool runs them. The global excludes of the container
+          # must not hide them from `git status`, but must keep local files out.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            repo=$(mktemp -d)
+            git init -q "$repo"
+            for p in .claude/settings.json .codex/config.toml; do
+              if git -C "$repo" check-ignore -q --no-index -- "$p"; then
+                echo "FAIL: global Git excludes hide $p"; exit 1
+              fi
+            done
+            git -C "$repo" check-ignore -q --no-index -- .claude/settings.local.json \
+              || { echo "FAIL: global Git excludes do not ignore .claude/settings.local.json"; exit 1; }
+            echo "OK: shared agent config is visible to Git; settings.local.json is ignored"
+          '
+
       - name: CLI test - aic sync warns on / bumps a stale Dockerfile.project base
         run: |
           # Host-only (no container). A project-owned Dockerfile.project that

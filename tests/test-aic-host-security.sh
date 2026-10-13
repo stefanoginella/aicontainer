@@ -504,6 +504,28 @@ grep -Fqx -- "$fnm_path_line" "$dockerfile" \
 if grep -Ev '^[[:space:]]*#' "$dockerfile" | grep -Eq '(^|[^[:alnum:]_-])ln[[:space:]].*(\.fnm|/node([[:space:]]|$))'; then
   fail "Dockerfile links the vscode-owned Node into another directory"
 fi
+# The global Git excludes must not hide shared agent config. An agent can put
+# hooks in .claude/settings.json or .codex/config.toml, and a host AI tool runs
+# them, so `git status` must show each change. Only the files that Claude Code
+# documents as personal or machine-local stay ignored.
+sed -n "/^RUN cat > \/etc\/aic\/gitignore <<'GITIGNORE_EOF'\$/,/^GITIGNORE_EOF\$/p" "$dockerfile" \
+  | sed '1d;$d' > "$TMP/aic-gitignore"
+[ -s "$TMP/aic-gitignore" ] || fail "Dockerfile no longer writes /etc/aic/gitignore; update this test"
+git init -q "$TMP/excludes-repo"
+excluded() { git -C "$TMP/excludes-repo" -c core.excludesFile="$TMP/aic-gitignore" check-ignore -q --no-index -- "$1"; }
+for path in .claude/settings.json .claude/skills/s/SKILL.md .claude/agents/a.md \
+  .claude/commands/c.md .claude/hooks/h.sh .codex/config.toml .codex/hooks.json \
+  .codex/rules/default.rules .mcp.json CLAUDE.md AGENTS.md; do
+  ! excluded "$path" || fail "container global gitignore hides shared agent config: $path"
+done
+for path in .claude/settings.local.json sub/.claude/settings.local.json \
+  .claude/agent-memory-local/a/MEMORY.md .claude/worktrees/w/file CLAUDE.local.md \
+  .env node_modules/x __pycache__/x.pyc; do
+  excluded "$path" || fail "container global gitignore no longer ignores local file: $path"
+done
+if grep -Eq '^/?(\*\*/)?\.(claude|codex)/?(\*\*?)?$' "$TMP/aic-gitignore"; then
+  fail "container global gitignore ignores a whole .claude/ or .codex/ directory"
+fi
 # Image download integrity (docs/contributing/image-integrity.md). `sh -c "$(curl …)"` exits 0 when curl
 # fails, and a pipe into a shell or an unpacker runs whatever arrived. Every
 # curl or git fetch must start with `set -eu`, use no `||` or `set +e`, and be

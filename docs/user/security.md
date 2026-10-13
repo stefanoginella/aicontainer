@@ -145,6 +145,13 @@ to the network row.
     write `.git/config.worktree`. If an agent in a checkout possibly was
     compromised, review `.git/config` and `.git/config.worktree` on the host
     one time.
+- **Project agent config that a host AI tool reads.** The agent can write
+  `.claude/settings.json`, `.claude/settings.local.json`, and
+  `.codex/config.toml` in the project. These files can hold hooks. Claude Code
+  or Codex on the host reads them and runs those hooks. So review these files
+  before you run an AI tool on the host in this project. `git status` shows
+  changes to the shared files. `.claude/settings.local.json` stays ignored, so
+  read it directly.
 - **Planted text in project tool state.** Each create resets the parts of the
   tool homes that load before your first prompt:
   - user-level `CLAUDE.md`/`AGENTS.md`
