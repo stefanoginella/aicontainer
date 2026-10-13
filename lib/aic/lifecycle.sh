@@ -277,12 +277,37 @@ cmd_destroy () {
   echo "aic: destroyed '$project' (container + per-project volumes removed)."
 }
 
+# aic validate [--json]. --json runs the same gate and adds its findings to
+# one JSON object (lib/aic/json.sh).
 cmd_validate () {
-  [ "$#" -eq 0 ] || die "usage: aic validate"
+  if [ "$#" -eq 0 ]; then
+    cmd_validate_run
+  elif [ "$#" -eq 1 ] && [ "$1" = --json ]; then
+    json_run validate findings cmd_validate_run
+  else
+    die "usage: aic validate [--json]"
+  fi
+}
+
+cmd_validate_run () {
+  local name_error line
   require_in_project
   # Same refusal as the VS Code initializer, so CI predicts a direct start.
-  check_devcontainer_project_name \
-    || die "configuration is invalid for a direct Dev Containers start"
+  if json_mode; then
+    # The same check. Its messages also go to stderr, and each one is a
+    # finding with the id "name".
+    if ! name_error="$( (check_devcontainer_project_name) 2>&1)"; then
+      [ -z "$name_error" ] || printf '%s\n' "$name_error" >&2
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        json_item name fail "${line#aic: }"
+      done <<< "$name_error"
+      die "configuration is invalid for a direct Dev Containers start"
+    fi
+  else
+    check_devcontainer_project_name \
+      || die "configuration is invalid for a direct Dev Containers start"
+  fi
   validate_project_security validate 0
   echo "aic: configuration valid — managed files and resolved Compose model are accepted."
 }
@@ -301,6 +326,28 @@ cmd_upgrade () {
 }
 
 cmd_version () {
-  echo "aic v$(read_aic_version)"
+  if [ "$#" -eq 0 ]; then
+    echo "aic v$(read_aic_version)"
+    check_for_update
+  elif [ "$#" -eq 1 ] && [ "$1" = --json ]; then
+    json_run version "" cmd_version_json
+  else
+    die "usage: aic version [--json]"
+  fi
+}
+
+# The --json body of cmd_version. Like the text mode, a version that cannot be
+# read does not change the exit status; "version" is then null. The update
+# check is the same call, so its network and cache behavior do not change.
+cmd_version_json () {
+  local version
+  version="$(read_aic_version)" || version=""
   check_for_update
+  json_field_string version "$version"
+  json_field_string latest "$aic_update_latest"
+  if [ -n "$version" ] && [ -n "$aic_update_latest" ] && version_gt "$aic_update_latest" "$version"; then
+    json_field update_available true
+  else
+    json_field update_available false
+  fi
 }

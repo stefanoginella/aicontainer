@@ -29,6 +29,7 @@ SCRIPTS=(
   aic
   install.sh
   .githooks/pre-push
+  lib/aic/json.sh
   lib/aic/runtime.sh
   lib/aic/identity.sh
   lib/aic/selection.sh

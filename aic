@@ -34,6 +34,13 @@ TEMPLATE_DIR="$AIC_HOME/template"
 aic_bind_source=""
 # shellcheck disable=SC2034
 aic_bind_source_for=""
+# The --json mode of lib/aic/json.sh, and the latest version that the update
+# check of lib/aic/versions.sh found. Set here so a value in the environment
+# can never select JSON mode or seed the version.
+# shellcheck disable=SC2034
+aic_json_dir=""
+# shellcheck disable=SC2034
+aic_update_latest=""
 # The AIC_PROJECT_NAME that this process inherited. aic exports its own value
 # before Compose runs, so check_devcontainer_project_name() reads this copy to
 # judge the environment that a direct Dev Containers start has.
@@ -70,7 +77,7 @@ aic_helper () {
 # lib/aic/. The modules only define functions and constants, so the order of
 # the list does not change behavior. A missing or unreadable module fails
 # closed and names the file, as aic_helper() does for lib/*.mjs.
-for aic_module in runtime identity selection versions template init-sync \
+for aic_module in json runtime identity selection versions template init-sync \
     validation status signing volumes lifecycle doctor help; do
   if [ ! -f "$AIC_HOME/lib/aic/$aic_module.sh" ]; then
     die "incomplete aicontainer install: lib/aic/$aic_module.sh is missing in $AIC_HOME — reinstall aicontainer"
@@ -105,7 +112,7 @@ case "${1:-help}" in
   destroy) shift; cmd_destroy "$@" ;;
   upgrade) shift; cmd_upgrade "$@" ;;
   completion) shift; cmd_completion "$@" ;;
-  version|-v|--version) cmd_version ;;
+  version|-v|--version) shift; cmd_version "$@" ;;
   help|-h|--help) cmd_help ;;
   *) err "unknown command: $1"; cmd_help; exit 1 ;;
 esac

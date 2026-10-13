@@ -236,7 +236,10 @@ test('bash completion offers the right words', () => {
   assert.deepEqual(complete('aic signing '), ['--register', 'auto', 'byok', 'disable', 'status']);
   assert.deepEqual(complete('aic signing --register '), ['--register', 'auto', 'byok', 'disable', 'status']);
   assert.deepEqual(complete('aic signing auto '), ['--register']);
-  assert.deepEqual(complete('aic doctor '), []);
+  assert.deepEqual(complete('aic doctor '), ['--json']);
+  assert.deepEqual(complete('aic status --'), ['--json']);
+  assert.deepEqual(complete('aic validate --'), ['--json']);
+  assert.deepEqual(complete('aic version --'), ['--json']);
   assert.deepEqual(complete('aic __'), []);
   assert.deepEqual(complete('aic va'), ['validate']);
 });
