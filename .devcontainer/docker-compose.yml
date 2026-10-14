@@ -32,7 +32,22 @@ x-aic-build: &aic-build
 services:
   devcontainer:
     build: *aic-build
-    command: sleep infinity
+    # Opt-in declarative firewall. When the project has
+    # .devcontainer/firewall-enable (on the read-only mount below), every start
+    # enables the allowlist, and a failure stops the container (fail closed).
+    # The rules do not survive a restart, so this is the start command, not a
+    # create step. Without the marker, this is a plain `sleep infinity`.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        if [ -e /workspace/.devcontainer/firewall-enable ] || [ -L /workspace/.devcontainer/firewall-enable ]; then
+          /usr/bin/sudo -n /usr/local/bin/aic-firewall auto || {
+            echo "aic: .devcontainer/firewall-enable is set, but the firewall could not be enabled. The container stops." >&2
+            exit 1
+          }
+        fi
+        exec sleep infinity
     # Bound a runaway agent (fork bomb / accidental infinite spawn) so it can't
     # exhaust host PIDs. Generous enough for normal dev (parallel builds, browser
     # automation); raise it in docker-compose.override.yml if a workload needs

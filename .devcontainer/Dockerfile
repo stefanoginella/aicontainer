@@ -721,10 +721,16 @@ run_node() {
 exit 0
 STATUSLINE_EOF
 
+# Ignore only the agent files that Claude Code documents as personal or
+# machine-local. Shared agent config (.claude/settings.json, .claude/skills/,
+# .codex/config.toml, ...) stays visible in `git status`: it can hold hooks
+# that a host AI tool runs, so a human must see and review each change to it.
 RUN cat > /etc/aic/gitignore <<'GITIGNORE_EOF'
 # aicontainer global excludes
-.claude/
-.codex/
+**/.claude/settings.local.json
+**/.claude/agent-memory-local/
+**/.claude/worktrees/
+CLAUDE.local.md
 node_modules/
 .venv/
 __pycache__/
