@@ -44,6 +44,10 @@ from typing import Callable, NoReturn, Optional
 
 
 MAX_FILE_BYTES = 1024 * 1024
+# The PATH of this root helper, as in aic-firewall and aic-chown-volumes. sudo
+# gives it secure_path, but main() sets it again so that a bare command name
+# never resolves in an agent-writable directory (~/.local/bin).
+SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Keep this fixed-key contract aligned with post-create's GIT_SEED_KEYS
 # (post_create_seeds.py) and setup_gitconfig() (post_create_git.py). None of
@@ -467,6 +471,7 @@ def install_target(target: Target, vscode_uid: int) -> None:
 
 
 def main() -> None:
+    os.environ["PATH"] = SYSTEM_PATH
     if os.geteuid() != 0:
         fail("must run via sudo")
     try:

@@ -169,9 +169,18 @@ pin_compose_project_name () {
 # The helper sees the AIC_PROJECT_NAME that this process inherited (saved at
 # the top of aic), not the value that aic exports itself, because a direct
 # start has only the inherited one.
-# shellcheck disable=SC2154 # aic_inherited_project_name{,_set} are set in aic
+# The other keys of .devcontainer/.env (AIC_DOCKER_SOCKET, AIC_RUNTIME_USER,
+# AIC_STATUS_*) are host values: an inherited one would replace the socket,
+# the sidecar user, or the status relay consent. Any inherited value is
+# refused, an empty one too. `aic up` never passes them on
+# (without_runtime_environment()).
+# shellcheck disable=SC2154 # aic_inherited_* are set in aic
 check_devcontainer_project_name () {
-  local expected managed conflict
+  local expected managed conflict key
+  for key in $aic_inherited_runtime_keys; do
+    err "$key in the environment would replace the host value in .devcontainer/.env — unset it, or start with 'aic up'"
+    return 1
+  done
   expected="$(project_name)" || return 1
   managed="$(expected_project_name)" || return 1
   if ! conflict="$(
@@ -331,6 +340,112 @@ git_control_path_problems () {
       printf '%s\n' ".git/commondir must contain only '.' — Git takes this checkout's config and hooks from the directory it names; inspect it before you run Git here, then remove it"
     fi
   fi
+}
+
+# Print the physical path of the absolute path $1. Follow every symlink, also
+# in a missing tail, and read nothing but link targets. Return 1 after 40
+# links or when a directory cannot be entered. $2 counts the links so far.
+git_hooks_resolve () {
+  local path="$1" links="${2:-0}" dir link
+  while :; do
+    if [ -d "$path" ]; then
+      (cd -P -- "$path" 2>/dev/null && canonical_root)
+      return
+    fi
+    if [ -L "$path" ]; then
+      links=$((links + 1))
+      [ "$links" -le 40 ] || return 1
+      link="$(readlink -- "$path")" || return 1
+      case "$link" in /*) path="$link" ;; *) path="$(dirname -- "$path")/$link" ;; esac
+      continue
+    fi
+    dir="$(git_hooks_resolve "$(dirname -- "$path")" "$((links + 1))")" || return 1
+    printf '%s/%s\n' "${dir%/}" "$(basename -- "$path")"
+    return 0
+  done
+}
+
+# The container mounts .git/hooks and .git/config read-only, but host Git also
+# runs hooks from core.hooksPath, through hook symlinks, and the programs that
+# core.fsmonitor and core.sshCommand name. When one of these lives in the
+# worktree, the agent can change it, and the next host commit or push runs
+# agent code. Print one problem per line. This checks only where these files
+# live, never what they do, and it never runs a hook. Call it only when
+# git_control_path_problems() is empty: a planted .git/commondir would make
+# Git read the config of another directory.
+git_hooks_problems () {
+  local root dir resolved="" hook target key value word rc
+  command -v git >/dev/null 2>&1 || return 0
+  root="$(canonical_root)"
+  rc=0
+  value="$(git --git-dir=.git config --type=path --get core.hooksPath 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0) case "$value" in /*) dir="$value" ;; *) dir="$root/$value" ;; esac ;;
+    1) dir="$root/.git/hooks" ;;
+    *) printf '%s\n' "could not read core.hooksPath with Git"; dir="" ;;
+  esac
+  if [ -n "$dir" ] && ! resolved="$(git_hooks_resolve "$dir")"; then
+    printf 'could not resolve the Git hooks directory %s\n' "$dir"
+  elif [ -n "$dir" ] && [ "$resolved" != "$root/.git/hooks" ] \
+      && case "$resolved/" in "$root/"*) true ;; *) false ;; esac; then
+    printf 'core.hooksPath is in the worktree (%s): the agent can change the hooks that host Git runs\n' "$value"
+  elif [ -d "$resolved" ] && { [ ! -r "$resolved" ] || [ ! -x "$resolved" ]; }; then
+    printf 'could not read the Git hooks directory %s\n' "$resolved"
+  elif [ -d "$resolved" ]; then
+    for hook in "$resolved"/*; do
+      [ -L "$hook" ] || continue
+      case "$hook" in *.sample) continue ;; esac
+      if ! target="$(git_hooks_resolve "$hook")"; then
+        printf 'could not resolve the Git hook symlink %s\n' "${hook#"$root/"}"
+      else
+        case "$target/" in
+          "$root/.git/hooks/"*) ;;
+          "$root/"*) printf 'the Git hook %s is a symlink into the worktree: the agent can change it\n' "${hook#"$root/"}" ;;
+        esac
+      fi
+    done
+  fi
+  for key in core.fsmonitor core.sshCommand; do
+    rc=0
+    value="$(git --git-dir=.git config --get "$key" 2>/dev/null)" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) continue ;;
+      *) printf 'could not read %s with Git\n' "$key"; continue ;;
+    esac
+    if [ "$key" = core.fsmonitor ]; then
+      case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+        true|false|yes|no|on|off|1|0|'') continue ;;
+      esac
+    fi
+    # Only the first word: aic checks where the program is, not what it does.
+    word="${value#"${value%%[![:space:]]*}"}"
+    word="${word%%[[:space:]]*}"
+    case "$word" in \~/*) word="$HOME/${word#\~/}" ;; esac
+    case "$word" in
+      /*) ;;
+      */*) printf '%s runs a relative path (%s): host Git runs it from the worktree\n' "$key" "$word"; continue ;;
+      *) continue ;;
+    esac
+    if ! target="$(git_hooks_resolve "$word")"; then
+      printf 'could not resolve the %s program %s\n' "$key" "$word"
+    else
+      case "$target/" in
+        "$root/"*) printf '%s runs a program in the worktree (%s): the agent can change it\n' "$key" "$word" ;;
+      esac
+    fi
+  done
+  return 0
+}
+
+# aic up and aic rebuild: print the git_hooks_problems() lines as one warning.
+# It never blocks a start.
+warn_git_hooks () {
+  local problems
+  problems="$(git_hooks_problems | tr '\n' '\t')"
+  problems="${problems%$'\t'}"
+  [ -z "$problems" ] \
+    || err "warning: host Git can run code that the agent changes: ${problems//$'\t'/; } — see 'Git hooks on the host' in docs/user/security.md"
 }
 
 # Create the control files that Git does not make for a main checkout, so the

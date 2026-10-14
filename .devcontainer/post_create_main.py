@@ -6,6 +6,7 @@ See "Post-create order" in docs/contributing/seeds-and-auth.md.
 
 from .post_create_common import ENABLED_TOOLS, log
 from .post_create_container import (
+    apply_declared_firewall,
     block_metadata,
     fix_volume_ownership,
     run_project_hook,
@@ -41,7 +42,8 @@ def _run_step(step, failed: list[str]) -> None:
 
 def main() -> int:
     log(f"starting (tools: {','.join(sorted(ENABLED_TOOLS)) or 'none'})")
-    steps = [fix_volume_ownership, block_metadata]
+    # First: a declared firewall must be on before a step uses the network.
+    steps = [apply_declared_firewall, fix_volume_ownership, block_metadata]
     for tool, step in (
         ("claude-code", setup_claude),
         ("codex", setup_codex),
@@ -78,6 +80,11 @@ def main() -> int:
     for step in steps:
         if step is apply_statusline and "setup_claude" in failed:
             log("skipping apply_statusline: setup_claude failed")
+            continue
+        # The project declared the firewall but it is not on: do not give
+        # these steps the open egress that the project asked to close.
+        if step in (refresh_ai_tools, run_project_hook) and "apply_declared_firewall" in failed:
+            log(f"skipping {step.__name__}: the declared firewall is not on")
             continue
         _run_step(step, failed)
     if failed:

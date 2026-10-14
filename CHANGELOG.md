@@ -13,7 +13,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-14
+
+### Fixed
+
+- **The agent-status relay works with the firewall on.** `aic-firewall` read
+  the relay mode from the environment of PID 1, which root cannot read without
+  `SYS_PTRACE`, so it never added the TCP-8787 rule. It now reads the mode from
+  the generated `.devcontainer/.env` on the read-only mount. (aic-firewall)
+
+- **A firewalled container no longer waits about 90 s for the AI-tool
+  refresh.** With `firewall-enable`, Claude Code and Codex keep the baked
+  version: their updates need `downloads.claude.ai` and `releases.openai.com`,
+  which the allowlist does not hold. OpenCode still upgrades. (post-create.py)
+
+- **The managed `.devcontainer/README.md` no longer suggests `lefthook
+  install` in the container.** The container mounts `.git/hooks` read-only; the
+  README now links to "Git hooks on the host". (template)
+
+### Security
+
+- **Root processes in the container no longer search agent-writable
+  directories.** The image `PATH` starts with `~/.local/bin`, and Docker gives
+  it to root processes too. A root login or interactive shell now gets a PATH
+  with only system directories, so its startup no longer runs an `id`,
+  `mesg`, or `dircolors` that an agent put there. (Dockerfile, .zshrc,
+  post-create.py, aic-lock-user-config)
+
+- **A root shell no longer writes its history to the shared history
+  volume.** That volume is vscode-owned, so an agent symlink there made root
+  write to any file. Root history now stays in `/root`. (Dockerfile, .zshrc)
+
+- **A direct start refuses `AIC_DOCKER_SOCKET`, `AIC_RUNTIME_USER`, and
+  `AIC_STATUS_*` in the environment.** Each one wins over the host value in
+  `.devcontainer/.env`, so an editor that inherits one could mount another
+  socket or change the relay consent. `aic up` and `aic rebuild` no longer
+  pass them to Dev Containers. (aic)
+
+- **`aic status` calls sudo and the firewall helper by absolute path.** An
+  agent could put a `sudo` in `~/.local/bin` that reported the firewall as on.
+  Post-create calls its sudo helpers by absolute path too. (aic,
+  post-create.py)
+
+## [0.12.0] - 2026-10-14
+
 ### Added
+
+- **`aic doctor`, `aic up`, and `aic rebuild` warn when host Git can run code
+  that the agent changes.** The new doctor check `git-hooks` warns when
+  `core.hooksPath`, a hook symlink, or the program of `core.fsmonitor` or
+  `core.sshCommand` is in the worktree. aic checks only where these files are,
+  never what they do, and it never runs a hook. The warning never stops a
+  start. See "Git hooks on the host" in the security guide. (aic)
 
 - **`doctor`, `status`, `validate`, and `version` take `--json`.** Each prints
   one JSON object with a `schema` version on stdout; checks, findings, and
@@ -61,6 +112,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`aic destroy` without `--yes` and a terminal says how to confirm.** It
   still removes nothing and exits 1; the message now says to pass `--yes`.
   (aic)
+
+- **Git in the container now shows shared `.claude/` and `.codex/` files.**
+  The global ignore list of the image ignored both directories, so
+  `.claude/settings.json`, `.claude/skills/`, `.codex/config.toml`, and the
+  agent's changes to them did not show in `git status`. Of the agent files, it
+  now ignores only `.claude/settings.local.json`,
+  `.claude/agent-memory-local/`, `.claude/worktrees/`, and `CLAUDE.local.md`.
+  Review these files before you commit them, or before you run an AI tool on
+  the host: they can hold hooks.
+  (Dockerfile)
 
 ### Fixed
 
@@ -988,7 +1049,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Initial release: a sandboxed devcontainer for Claude Code and Codex.** Runs
   them in bypass / auto-approve mode.
 
-[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/stefanoginella/aicontainer/compare/v0.12.0...v0.12.1
+[0.12.0]: https://github.com/stefanoginella/aicontainer/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/stefanoginella/aicontainer/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/stefanoginella/aicontainer/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/stefanoginella/aicontainer/compare/v0.9.0...v0.9.1

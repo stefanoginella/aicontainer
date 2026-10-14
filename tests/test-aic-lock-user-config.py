@@ -349,5 +349,19 @@ class TargetTableContractTests(unittest.TestCase):
                 LOCK.open_validated_source(required, vscode_uid)
 
 
+class RootPathTests(unittest.TestCase):
+    """The root helper never searches the agent-writable image PATH."""
+
+    def test_main_sets_a_system_only_path_first(self) -> None:
+        self.assertEqual(LOCK.SYSTEM_PATH, "/usr/sbin:/usr/bin:/sbin:/bin")
+        planted = "/home/vscode/.local/bin:/usr/bin:/bin"
+        with mock.patch.dict(os.environ, {"PATH": planted}), \
+                mock.patch.object(LOCK.os, "geteuid", return_value=1000), \
+                redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                LOCK.main()
+            self.assertEqual(os.environ["PATH"], LOCK.SYSTEM_PATH)
+
+
 if __name__ == "__main__":
     unittest.main()

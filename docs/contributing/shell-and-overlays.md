@@ -78,6 +78,57 @@ Guarded by the "a process without shell startup finds the fnm default Node"
 smoke in `smoke.yml` and the image PATH assertions in
 `tests/test-aic-host-security.sh`.
 
+### Root processes
+
+Docker gives the image `PATH` to every process in the container, root ones
+too. Its first entries are vscode-owned. So no root process may search it.
+
+Rules (do not change):
+
+1. **Each sudo helper sets a fixed PATH first.** sudo already uses
+   `secure_path` (this holds even when the Dev Containers CLI writes the
+   container `PATH` into `/etc/environment`). `aic-firewall` and
+   `aic-chown-volumes` set `readonly PATH=/usr/sbin:/usr/bin:/sbin:/bin`
+   before their first command. `aic-lock-user-config` sets the same PATH at
+   the start of `main()`.
+2. **The seed sanitizer sets a fixed PATH.** `post-create.py` calls
+   `_use_system_path_as_root()` before it loads the package. A run as another
+   user keeps its PATH.
+3. **Every sudo call is absolute.** Post-create, the Compose start command,
+   `postStartCommand`, and `aic status` call `/usr/bin/sudo -n` with the full
+   helper path. A bare `sudo` resolves in `~/.local/bin` first.
+4. **A root shell keeps a system-only PATH.**
+   - A login shell (`bash -l`, `sh -l`) runs `/etc/profile` first. The image
+     puts a root PATH reset at the top of that file. It decides root with
+     `/usr/bin/id`. The value goes through a variable, because the Dev
+     Containers CLI rewrites each `PATH=` line with no `$` in `/etc/profile`
+     to `PATH=${PATH:-...}`. The build fails if that rewrite changes the file.
+     Root's `~/.profile` calls `/usr/bin/mesg`.
+   - An interactive shell: `/etc/bash.bashrc`, the managed bashrc, the
+     `.zshrc`, and the fish config set the PATH when `EUID` is 0, after fnm
+     loads. Root's `~/.bashrc` runs `lesspipe` and `dircolors` after that.
+   - A non-login, non-interactive shell (`bash -c`, `sh -c`) reads no startup
+     file. It keeps the image PATH (see below).
+5. **A root shell keeps its history in `/root`.** The `.zshrc` and the managed
+   bashrc set `HISTFILE` to `/root/.zsh_history` or `/root/.bash_history` when
+   `EUID` is 0. The history volume is vscode-owned, and root would write
+   through a symlink that an agent put there. Fish keeps root history in
+   `/root` already.
+6. **No system directory is vscode-writable.** The root PATH is only safe while
+   this is true.
+
+The Dev Containers CLI also runs a root shell (`/etc/environment` and
+`/etc/profile` patches). It runs only on the first start of a container,
+before any agent runs, and only while its marker files in the root-owned
+`/var/devcontainer` are missing. A `docker exec -u root` without a managed
+shell, or with `bash -c`, still gets the image PATH. The user guide says to
+use an absolute path.
+
+Guarded by the root-PATH static checks in `tests/test-aic-host-security.sh`,
+the root-PATH cases in `tests/test-aic-post-create-package.py` and
+`tests/test-aic-lock-user-config.py`, and the "root processes never search
+the vscode-owned PATH" smoke in `smoke.yml`.
+
 ### Residual risk
 
 The [Threat model](../user/security.md) documents this residual risk:
@@ -196,6 +247,15 @@ The refresh has these properties:
 - It is fail-soft. An update that is offline or fails keeps the baked version.
   Do not make a failure fatal.
 - Set `AIC_FREEZE_TOOLS=1` to disable it and get a reproducible sandbox.
+- With `.devcontainer/firewall-enable`, Claude Code and Codex keep the baked
+  version and log one line. `claude update` needs `downloads.claude.ai`, and
+  `chatgpt.com/codex/install.sh` redirects to `releases.openai.com`. The
+  default allowlist does not hold these update-only hosts, so each updater
+  waited about 90 s and failed. Do not add them to the default allowlist for
+  an update. OpenCode still upgrades: it uses `opencode.ai` (which it needs to
+  run) and the GitHub hosts of the default allowlist. Guarded by the
+  "declared firewall keeps baked Claude and Codex" test in
+  `tests/test-aic-auth-sync.py`.
 
 Rules for each updater:
 

@@ -13,7 +13,8 @@ mkdir -p "$HOME"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # A developer's exported name would make every direct-start check below refuse.
-unset COMPOSE_PROJECT_NAME AIC_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
+unset COMPOSE_PROJECT_NAME AIC_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE \
+  AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID
 
 help=$(AIC_NO_UPDATE_CHECK=1 "$ROOT/aic" help)
 [ "$(printf '%s\n' "$help" | grep -c '^  AIC_NO_OVERRIDE_SCAN')" = "1" ] \
@@ -503,6 +504,74 @@ grep -Fqx -- "$fnm_path_line" "$dockerfile" \
   || fail "the fnm default Node is on the image PATH more than once"
 if grep -Ev '^[[:space:]]*#' "$dockerfile" | grep -Eq '(^|[^[:alnum:]_-])ln[[:space:]].*(\.fnm|/node([[:space:]]|$))'; then
   fail "Dockerfile links the vscode-owned Node into another directory"
+fi
+# Docker gives the image PATH, which starts with vscode-owned directories, to
+# root processes too. Each root helper sets a system-only PATH before its first
+# command, the seed sanitizer sets one in post-create.py (its Python test), the
+# managed shells keep one for root, and every sudo call names sudo and the
+# helper by absolute path. The runtime check is the "root processes never
+# search the vscode-owned PATH" smoke.
+for helper in aic-firewall aic-chown-volumes; do
+  [ "$(grep -Ev '^[[:space:]]*(#|$)' "$ROOT/template/$helper" | sed -n '1,2p')" = "set -euo pipefail
+readonly PATH=/usr/sbin:/usr/bin:/sbin:/bin" ] \
+    || fail "$helper runs a command before it sets a system-only PATH"
+done
+root_path='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+[ "$(grep -Fcx "[ \"\$EUID\" -ne 0 ] || PATH=$root_path" "$dockerfile")" = 2 ] \
+  || fail "/etc/bash.bashrc and the managed bashrc do not give a root bash a system-only PATH"
+n=$(grep -nFx "[ \"\$EUID\" -ne 0 ] || PATH=$root_path" "$dockerfile" | tail -n 1 | cut -d: -f1)
+f=$(grep -nFx 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell bash)"' "$dockerfile" | cut -d: -f1)
+[ -n "$f" ] && [ "$n" -gt "$f" ] \
+  || fail "the managed bashrc does not keep a root PATH system-only after fnm loads"
+grep -Fqx "test \"\$EUID\" != 0; or set -gx PATH ${root_path//:/ }" "$dockerfile" \
+  || fail "the managed fish config does not give a root fish a system-only PATH"
+n=$(zshrc_line "(( EUID )) || PATH=$root_path")
+f=$(zshrc_line 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell zsh)"')
+[ -n "$n" ] && [ -n "$f" ] && [ "$n" -gt "$f" ] \
+  || fail ".zshrc does not give a root zsh a system-only PATH after fnm loads"
+# A root login shell runs /etc/profile first; the reset there must survive the
+# Dev Containers CLI rewrite of `PATH=` lines (the image build checks that).
+for line in "        'if [ \"\$(/usr/bin/id -u)\" = 0 ]; then' \\" \
+  "        '  _aic_root_path=$root_path' \\" \
+  "        '  PATH=\$_aic_root_path' \\" \
+  "    && sed -i 's#^mesg n #/usr/bin/mesg n #' /root/.profile \\" \
+  "    && cmp -s /etc/profile /tmp/aic-profile-check \\"; do
+  grep -Fqx -- "$line" "$dockerfile" || fail "Dockerfile lost the root login-shell PATH reset: $line"
+done
+# A root shell keeps its history out of the vscode-owned history volume.
+grep -Fqx '[ "$EUID" -ne 0 ] || HISTFILE=/root/.bash_history' "$dockerfile" \
+  || fail "the managed bashrc writes root history to the vscode-owned volume"
+n=$(zshrc_line '(( EUID )) || HISTFILE=/root/.zsh_history')
+h=$(zshrc_line 'export HISTFILE=/home/vscode/.shell-history/.zsh_history')
+[ -n "$n" ] && [ -n "$h" ] && [ "$n" -gt "$h" ] \
+  || fail ".zshrc writes root history to the vscode-owned volume"
+if grep -n '"sudo"' "$ROOT"/template/*.py; then
+  fail "post-create runs sudo through PATH; use /usr/bin/sudo"
+fi
+if grep -nE 'exec --workspace-folder \. sudo' "$ROOT/aic" "$ROOT"/lib/aic/*.sh; then
+  fail "aic runs sudo through the container PATH; use /usr/bin/sudo and the helper's absolute path"
+fi
+# The global Git excludes must not hide shared agent config. An agent can put
+# hooks in .claude/settings.json or .codex/config.toml, and a host AI tool runs
+# them, so `git status` must show each change. Only the files that Claude Code
+# documents as personal or machine-local stay ignored.
+sed -n "/^RUN cat > \/etc\/aic\/gitignore <<'GITIGNORE_EOF'\$/,/^GITIGNORE_EOF\$/p" "$dockerfile" \
+  | sed '1d;$d' > "$TMP/aic-gitignore"
+[ -s "$TMP/aic-gitignore" ] || fail "Dockerfile no longer writes /etc/aic/gitignore; update this test"
+git init -q "$TMP/excludes-repo"
+excluded() { git -C "$TMP/excludes-repo" -c core.excludesFile="$TMP/aic-gitignore" check-ignore -q --no-index -- "$1"; }
+for path in .claude/settings.json .claude/skills/s/SKILL.md .claude/agents/a.md \
+  .claude/commands/c.md .claude/hooks/h.sh .codex/config.toml .codex/hooks.json \
+  .codex/rules/default.rules .mcp.json CLAUDE.md AGENTS.md; do
+  ! excluded "$path" || fail "container global gitignore hides shared agent config: $path"
+done
+for path in .claude/settings.local.json sub/.claude/settings.local.json \
+  .claude/agent-memory-local/a/MEMORY.md .claude/worktrees/w/file CLAUDE.local.md \
+  .env node_modules/x __pycache__/x.pyc; do
+  excluded "$path" || fail "container global gitignore no longer ignores local file: $path"
+done
+if grep -Eq '^/?(\*\*/)?\.(claude|codex)/?(\*\*?)?$' "$TMP/aic-gitignore"; then
+  fail "container global gitignore ignores a whole .claude/ or .codex/ directory"
 fi
 # Image download integrity (docs/contributing/image-integrity.md). `sh -c "$(curl …)"` exits 0 when curl
 # fails, and a pipe into a shell or an unpacker runs whatever arrived. Every
@@ -2299,6 +2368,13 @@ fi
 if [ "$tool" = devcontainer ] && [ -n "${AIC_TEST_ENV_LOG:-}" ]; then
   printf 'COMPOSE_PROJECT_NAME=%s\n' "${COMPOSE_PROJECT_NAME-<unset>}" >> "$AIC_TEST_ENV_LOG"
   printf 'AIC_PROJECT_NAME=%s\n' "${AIC_PROJECT_NAME-<unset>}" >> "$AIC_TEST_ENV_LOG"
+  # devcontainer up runs `aic initialize`, which refuses these host values
+  # from the environment; aic must not pass them on.
+  if [ "${1:-}" = up ]; then
+    for key in AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID; do
+      [ -z "${!key+set}" ] || printf '%s is set\n' "$key" >> "$AIC_TEST_ENV_LOG"
+    done
+  fi
 fi
 # The trusted template's name line needs AIC_PROJECT_NAME even with -p.
 if [ "$tool" = docker ] && [ "${1:-}" = compose ] && [ -n "${AIC_TEST_COMPOSE_ENV_LOG:-}" ]; then
@@ -2922,13 +2998,13 @@ for command in up rebuild shell run; do
   : > "$env_log"
   (cd "$TMP/root-env" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
     AIC_TEST_ENV_LOG="$env_log" COMPOSE_PROJECT_NAME=inherited-other \
-    AIC_PROJECT_NAME=inherited-other \
+    AIC_PROJECT_NAME=inherited-other AIC_DOCKER_SOCKET=/inherited.sock AIC_STATUS_RELAY=1 \
     AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
     AIC_HOME="$ROOT" "$ROOT/aic" "${args[@]}" >/dev/null 2>&1) \
     || fail "$command refused a project whose root .env sets COMPOSE_PROJECT_NAME"
   [ "$(cat "$env_log")" = "COMPOSE_PROJECT_NAME=$root_env_name
 AIC_PROJECT_NAME=$root_env_name" ] \
-    || fail "$command did not pin the managed Compose name for the Dev Containers CLI"
+    || fail "$command did not pin the managed Compose name for the Dev Containers CLI, or passed it a host value of .devcontainer/.env"
 done
 
 : > "$log"
@@ -3002,8 +3078,18 @@ echo "$out" | grep -q 'COMPOSE_PROJECT_NAME in the environment' \
 # .env. Each refusal names the variable, never its value, and comes before Docker.
 # doctor exports aic's own AIC_PROJECT_NAME before its identity check; it must
 # still judge the inherited one.
+# Every other key of the generated .devcontainer/.env is a host value that
+# Compose substitutes (the socket, the sidecar user, the status relay), and an
+# inherited value wins over the file. A direct start refuses each one, an
+# empty one too: a repository cannot set them, but a host shell can.
+runtime_keys=$(sed -n 's/^\(AIC_[A-Z_]*\)=.*/\1/p' "$TMP/root-env/.devcontainer/.env" | grep -vx AIC_PROJECT_NAME)
+[ "$(printf '%s\n' "$runtime_keys" | grep -c .)" = 5 ] \
+  || fail "the generated .devcontainer/.env does not hold the five expected host keys"
+runtime_cases=()
+for key in $runtime_keys; do runtime_cases+=("$key=Leaked-Value-$key"); done
 for case in "AIC_PROJECT_NAME=Leaked-Value-1" "AIC_PROJECT_NAME=" \
-    "COMPOSE_ENV_FILES=../Leaked-Value-2.env" "COMPOSE_DISABLE_ENV_FILE=Leaked-Value-3"; do
+    "COMPOSE_ENV_FILES=../Leaked-Value-2.env" "COMPOSE_DISABLE_ENV_FILE=Leaked-Value-3" \
+    "${runtime_cases[@]}" "AIC_STATUS_RELAY="; do
   variable=${case%%=*}
   set +e
   out=$(cd "$TMP/root-env" && env "$case" AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)
@@ -3174,6 +3260,104 @@ for target in /workspace/.git /workspace/.git/commondir; do
 done
 rm "$TMP/git-paths/.devcontainer/docker-compose.override.yml"
 git_paths_check "$TMP/git-paths" sync >/dev/null
+
+# Host Git runs hooks from core.hooksPath, through hook symlinks, and the
+# programs that core.fsmonitor and core.sshCommand name. doctor, up, and
+# rebuild warn when one of these is in the worktree. They check only paths,
+# and they never run a hook.
+new_project "$TMP/git-hooks"
+hooks_doctor() { git_paths_check "$TMP/git-hooks" doctor || true; }
+hooks_warns() {
+  local out; out=$(hooks_doctor)
+  echo "$out" | grep '^WARN  ' | grep -Fq "$1" || { printf '%s\n' "$out" >&2; fail "doctor did not warn: $1"; }
+}
+hooks_clean() {
+  local out; out=$(hooks_doctor)
+  echo "$out" | grep -q '^OK    host Git hooks and hook programs are outside the worktree$' \
+    || { printf '%s\n' "$out" >&2; fail "doctor warned about safe Git hooks ($1)"; }
+}
+marker="$TMP/git-hook-ran"
+hook_body="#!/bin/sh
+touch '$marker'
+"
+for hook in pre-commit post-checkout pre-push fsmonitor-watchman; do
+  printf '%s' "$hook_body" > "$TMP/git-hooks/.git/hooks/$hook.sample"
+done
+chmod +x "$TMP/git-hooks/.git/hooks/"*
+hooks_clean "default .git/hooks with only samples"
+mkdir -p "$TMP/host-hooks"
+printf '%s' "$hook_body" > "$TMP/host-hooks/pre-commit"; chmod +x "$TMP/host-hooks/pre-commit"
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/host-hooks"
+hooks_clean "core.hooksPath outside the worktree"
+git -C "$TMP/git-hooks" config core.hooksPath .git/hooks
+hooks_clean "core.hooksPath set to .git/hooks"
+mkdir -p "$TMP/git-hooks/.githooks"
+for hook in pre-commit post-checkout post-index-change reference-transaction; do
+  printf '%s' "$hook_body" > "$TMP/git-hooks/.githooks/$hook"
+done
+chmod +x "$TMP/git-hooks/.githooks/"*
+git -C "$TMP/git-hooks" config core.hooksPath .githooks
+hooks_warns 'core.hooksPath is in the worktree (.githooks)'
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/git-hooks/.git/../.githooks"
+hooks_warns 'core.hooksPath is in the worktree'
+ln -s "$TMP/git-hooks/.githooks" "$TMP/linked-hooks"
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/linked-hooks"
+hooks_warns 'core.hooksPath is in the worktree'
+git -C "$TMP/git-hooks" config --unset core.hooksPath
+ln -s ../../.githooks/pre-commit "$TMP/git-hooks/.git/hooks/pre-commit"
+hooks_warns 'the Git hook .git/hooks/pre-commit is a symlink into the worktree'
+rm "$TMP/git-hooks/.git/hooks/pre-commit"
+ln -s "$TMP/git-hooks/.githooks/pre-commit" "$TMP/host-hooks/pre-push"
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/host-hooks"
+hooks_warns 'host-hooks/pre-push is a symlink into the worktree'
+rm "$TMP/host-hooks/pre-push"
+chmod 000 "$TMP/host-hooks"
+if [ ! -r "$TMP/host-hooks" ]; then
+  hooks_warns 'the Git hooks directory'
+fi
+chmod 755 "$TMP/host-hooks"
+git -C "$TMP/git-hooks" config core.fsmonitor true
+git -C "$TMP/git-hooks" config core.sshCommand 'ssh -o BatchMode=yes'
+hooks_clean "core.fsmonitor true and an ssh on PATH"
+git -C "$TMP/git-hooks" config core.fsmonitor .githooks/pre-commit
+hooks_warns 'core.fsmonitor runs a relative path (.githooks/pre-commit)'
+git -C "$TMP/git-hooks" config core.fsmonitor "$TMP/git-hooks/.githooks/pre-commit"
+hooks_warns 'core.fsmonitor runs a program in the worktree'
+git -C "$TMP/git-hooks" config --unset core.fsmonitor
+git -C "$TMP/git-hooks" config core.sshCommand "$TMP/git-hooks/.githooks/pre-commit -v"
+hooks_warns 'core.sshCommand runs a program in the worktree'
+# up and rebuild print the same problems as one stderr line, and still start
+# with the same exit code.
+git -C "$TMP/git-hooks" config core.hooksPath .githooks
+ln -s ../../.githooks/pre-commit "$TMP/git-hooks/.git/hooks/pre-commit"
+for command in up rebuild; do
+  : > "$log"
+  out=$(git_paths_run "$TMP/git-hooks" "$command") || fail "$command failed when it only had to warn about Git hooks"
+  [ "$(echo "$out" | grep -c 'warning: host Git can run code that the agent changes')" = 1 ] \
+    || { printf '%s\n' "$out" >&2; fail "$command did not print one Git hooks warning line"; }
+  echo "$out" | grep 'warning: host Git can run' | grep -Fq 'core.hooksPath is in the worktree (.githooks)' \
+    || fail "$command did not name core.hooksPath"
+  echo "$out" | grep 'warning: host Git can run' | grep -Fq 'core.sshCommand runs a program in the worktree' \
+    || fail "$command did not join the problems into its one warning line"
+  grep -Fq 'devcontainer <up>' "$log" || fail "$command did not start after the Git hooks warning: $(cat "$log")"
+done
+git -C "$TMP/git-hooks" config --unset core.sshCommand
+git -C "$TMP/git-hooks" config --unset core.hooksPath
+rm "$TMP/git-hooks/.git/hooks/pre-commit"
+out=$(git_paths_run "$TMP/git-hooks" up) || fail "up failed with safe Git hooks"
+echo "$out" | grep -q 'Git can run code' && fail "up warned about safe Git hooks"
+# A core.hooksPath that Git cannot read (an unknown ~user exits 128) gives a
+# warning, and up still starts. Under bash 4+ an unset variable here once
+# stopped the start with exit 1.
+git -C "$TMP/git-hooks" config core.hooksPath '~aic-no-such-user/hooks'
+hooks_warns 'could not read core.hooksPath'
+: > "$log"
+out=$(git_paths_run "$TMP/git-hooks" up) || fail "up failed when Git could not read core.hooksPath"
+grep -Fq 'devcontainer <up>' "$log" || fail "up did not start when Git could not read core.hooksPath"
+# git -C cannot run with this value set, so edit the file directly.
+git config --file "$TMP/git-hooks/.git/config" --unset core.hooksPath
+[ ! -e "$marker" ] || fail "a Git hook check ran a hook"
+git_paths_check "$TMP/git-hooks" sync >/dev/null
 
 # `aic signing` creates the signing/ dir as vscode (0700, owned by the runtime
 # UID) inside the container. The host-side signing_state probe runs busybox as

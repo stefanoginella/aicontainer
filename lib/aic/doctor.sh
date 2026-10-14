@@ -265,7 +265,22 @@ doctor_check_git () {
       done <<< "$git_problems"
     else
       doctor_ok git-control-paths "Git control paths are real files and directories in this checkout"
+      if command -v git >/dev/null 2>&1; then doctor_check_git_hooks; fi
     fi
+  fi
+}
+
+# Check where host Git finds its hooks and hook programs (git_hooks_problems).
+# Only a path check: it never reads what a hook does and never runs one.
+doctor_check_git_hooks () {
+  local problems line
+  problems="$(git_hooks_problems)"
+  if [ -z "$problems" ]; then
+    doctor_ok git-hooks "host Git hooks and hook programs are outside the worktree"
+  else
+    while IFS= read -r line; do
+      doctor_warn git-hooks "$line"
+    done <<< "$problems"
   fi
 }
 

@@ -189,7 +189,7 @@ def lock_config() -> None:
     DAC_OVERRIDE, so the unprivileged owner removes its own staging files after
     the atomic install."""
     try:
-        subprocess.run(["sudo", "/usr/local/bin/aic-lock-user-config"], check=True)
+        subprocess.run(["/usr/bin/sudo", "-n", "/usr/local/bin/aic-lock-user-config"], check=True)
         log(f"installed root-owned user config under {GITCONFIG_MANAGED.parent}")
     except (OSError, subprocess.CalledProcessError) as e:
         log(f"warning: aic-lock-user-config failed: {e}")

@@ -139,12 +139,19 @@ to the network row.
   - *Hook scripts kept in the repository.* Some hooks run project files:
     husky's `.husky/`, `lefthook.yml`, `.pre-commit-config.yaml`, or a
     `core.hooksPath` inside the worktree. Such a hook runs what the agent
-    wrote on your next host commit. Review those files first, or commit with
-    `--no-verify`.
+    wrote on your next host commit. See
+    [Git hooks on the host](#git-hooks-on-the-host).
   - *Earlier versions.* Up to 0.9.1, the agent could replace `.git` fully and
     write `.git/config.worktree`. If an agent in a checkout possibly was
     compromised, review `.git/config` and `.git/config.worktree` on the host
     one time.
+- **Project agent config that a host AI tool reads.** The agent can write
+  `.claude/settings.json`, `.claude/settings.local.json`, and
+  `.codex/config.toml` in the project. These files can hold hooks. Claude Code
+  or Codex on the host reads them and runs those hooks. So review these files
+  before you run an AI tool on the host in this project. `git status` shows
+  changes to the shared files. `.claude/settings.local.json` stays ignored, so
+  read it directly.
 - **Planted text in project tool state.** Each create resets the parts of the
   tool homes that load before your first prompt:
   - user-level `CLAUDE.md`/`AGENTS.md`
@@ -173,6 +180,14 @@ to the network row.
   process that does not start from a shell can run that Node too. Think of a
   shell in the container as a shell with the authority of the agent. Do not
   type secrets there that the agent must not see.
+- **Root commands in the container.** Docker gives the image `PATH`, which
+  starts with `~/.local/bin`, to root processes too. The sudo helpers, the
+  seed sanitizer, and a root login or interactive bash, sh, zsh, or fish
+  shell use a `PATH` with only system directories, and a root shell keeps its
+  history in `/root`. A command that you start with `docker exec -u root`
+  without one of these shells (for example `bash -c`) still gets the image
+  `PATH`. Give it an absolute path, or add
+  `-e PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.
 - **Network.** All other outbound traffic is open by default. Anything inside
   the container can reach `api.openai.com`, `api.anthropic.com`, and your LAN
   (cloud metadata is blocked, see above).
@@ -237,6 +252,45 @@ to the network row.
 > **Warning:** Do not use aicontainer on a network where access to internal
 > services is a concern, or enable the
 > [network allowlist](network-allowlist.md) there.
+
+### Git hooks on the host
+
+The container mounts `.git/hooks` and `.git/config` read-only, so the agent
+cannot install a Git hook. But you run Git on the host. When a hook, or a
+program that Git runs, is in the worktree, the agent can change it. Your next
+host `git commit` or `git push` then runs that code on the host.
+
+Use this pattern:
+
+1. Keep the hooks in a host folder that no container mounts, for example
+   `~/.config/aic-hooks/<project>`.
+2. Set `core.hooksPath` to that folder on the host.
+3. Make each hook call only tools that you installed outside all projects.
+4. Run the checks of the repository in the container with `aic run -- <cmd>`.
+
+```bash
+mkdir -p ~/.config/aic-hooks/myapp
+cat > ~/.config/aic-hooks/myapp/pre-commit <<'SH'
+#!/bin/sh
+exec aic run -- npm test
+SH
+chmod +x ~/.config/aic-hooks/myapp/pre-commit
+git config core.hooksPath ~/.config/aic-hooks/myapp
+```
+
+`aic doctor` (check `git-hooks`), `aic up`, and `aic rebuild` warn when one of
+these is in the worktree:
+
+- the hooks folder (`core.hooksPath`, or `.git/hooks` when it is not set),
+  other than `.git/hooks`
+- a hook that is a symlink into the worktree
+- the program of `core.fsmonitor` or `core.sshCommand`, or a relative path
+  there
+
+The warning never stops a start. aic checks where hooks live, not what they
+do. A hook in a safe folder that runs a project file (for example
+`npx lefthook`) still runs code that the agent can change. Read each hook
+before you trust it, or commit with `--no-verify`.
 
 ## Hardening the host daemon
 

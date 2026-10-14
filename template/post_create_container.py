@@ -19,7 +19,7 @@ CHOWN_ALLOWED_PREFIXES = ("/workspace/", "/home/vscode/.cache/")
 
 # Optional project-owned post-create extension. Runs last, after all aic-managed
 # setup, as the sync-safe / pull-mode-compatible place for per-project steps
-# (e.g. `lefthook install`). See run_project_hook().
+# (e.g. `npm ci`). See run_project_hook().
 PROJECT_POST_CREATE = Path("/workspace/.devcontainer/post-create.project.sh")
 
 # Optional project-owned marker: the project declares that the outbound
@@ -93,7 +93,7 @@ def fix_volume_ownership() -> None:
             needs_chown = True
     if needs_chown:
         try:
-            subprocess.run(["sudo", "/usr/local/bin/aic-chown-volumes"], check=True)
+            subprocess.run(["/usr/bin/sudo", "-n", "/usr/local/bin/aic-chown-volumes"], check=True)
             log("re-owned persistent volumes")
         except subprocess.CalledProcessError as e:
             log(f"warning: aic-chown-volumes failed: {e}")
@@ -121,7 +121,7 @@ def block_metadata() -> None:
     enabled its default-DROP policy covers the same range, so the two compose."""
     try:
         subprocess.run(
-            ["sudo", "/usr/local/bin/aic-firewall", "block-metadata"],
+            ["/usr/bin/sudo", "-n", "/usr/local/bin/aic-firewall", "block-metadata"],
             check=True, capture_output=True, text=True,
         )
         log("blocked cloud metadata / link-local egress (169.254.0.0/16)")
@@ -151,7 +151,7 @@ def run_project_hook() -> None:
     """Run the project-owned post-create extension, if present.
 
     This is the sync-safe, pull-mode-compatible way for a project to add its
-    own setup steps (`lefthook install`, `pre-commit install`, `npm ci`, ...)
+    own setup steps (`npm ci`, ...; not Git hook installers: .git/hooks is RO)
     without editing the aic-managed devcontainer.json (clobbered every sync)
     or post-create.py (baked into the image and absent from the repo in pull
     mode). Opt-in by presence, mirroring chown-paths / firewall-allowlist /

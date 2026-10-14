@@ -190,6 +190,7 @@ An item in `checks` or `findings` has three members: `id`, `level`, and
 | `git` | Git is installed |
 | `git-root` | The current directory is the Git project root |
 | `git-control-paths` | The `.git` control paths are real files and directories |
+| `git-hooks` | Host Git hooks and hook programs are outside the worktree (`warn` only) |
 | `install` | The aic install is complete |
 | `project` | The directory has a `.devcontainer/` |
 | `control-paths` | The managed paths in `.devcontainer/` are safe and complete |

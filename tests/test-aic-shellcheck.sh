@@ -50,6 +50,7 @@ SCRIPTS=(
   tests/test-aic-chown-volume-validation.sh
   tests/test-aic-docker-runtime.sh
   tests/test-aic-firewall-presets.sh
+  tests/test-aic-firewall-relay.sh
   tests/test-aic-host-security.sh
   tests/test-aic-package.sh
   tests/test-aic-shellcheck.sh

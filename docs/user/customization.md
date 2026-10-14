@@ -213,13 +213,11 @@ fi
 
 > **Note:** Do not run a Git hook installer here, for example
 > `lefthook install`, `husky install`, or `pre-commit install`. The container
-> mounts `.git/hooks` read-only, so the installer fails. Install the hooks
-> **on the host**: run the installer in a host terminal one time for each
-> clone. The hooks then run on host commits. Commits in the container run
-> them too, if the hook tool is on `PATH` in the container. Do not set
-> `core.hooksPath` to a directory in the worktree: the agent can write there,
-> and the host runs the hooks. See the [threat model](security.md). For a
-> form that skips the install when `.git/hooks` is read-only, see
+> mounts `.git/hooks` read-only, so the installer fails. An installer on the
+> host writes hooks that run project files, and the agent can change those
+> files. To keep hooks safe on the host, follow
+> [Git hooks on the host](security.md#git-hooks-on-the-host). For a form that
+> skips the install when `.git/hooks` is read-only, see
 > [Start `post-create.project.sh`](stack-reference.md#start-post-createprojectsh).
 
 The base `post-create.py` runs this script last. At that time, the AI tools,

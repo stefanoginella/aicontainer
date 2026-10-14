@@ -18,6 +18,7 @@ image installs them root-owned and read-only in
 from __future__ import annotations
 
 import ast
+import importlib.util
 import os
 import re
 import shutil
@@ -26,9 +27,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
+# -I ignores PYTHONDONTWRITEBYTECODE. Never write bytecode into template/.
+sys.dont_write_bytecode = True
 TEMPLATE = ROOT / "template"
 ENTRY = TEMPLATE / "post-create.py"
 DOCKERFILE = (TEMPLATE / "Dockerfile").read_text()
@@ -244,6 +248,26 @@ class EntryTests(unittest.TestCase):
         self.assertIsInstance(body[0], ast.Expr)  # the docstring
         self.assertEqual(ast.unparse(body[1]), "import sys")
         self.assertEqual(ast.unparse(body[2]), "sys.dont_write_bytecode = True")
+
+    def test_root_run_sets_a_system_only_path_first(self) -> None:
+        # The image PATH starts with the vscode-owned ~/.local/bin. The seed
+        # sanitizer runs as root, so the entry replaces PATH before it loads
+        # the package; a run as another user keeps its PATH.
+        body = ast.parse(ENTRY.read_text()).body
+        main = next(node for node in body if isinstance(node, ast.If))
+        self.assertEqual(ast.unparse(main.test), "__name__ == '__main__'")
+        self.assertEqual(ast.unparse(main.body[0]), "_use_system_path_as_root()")
+        spec = importlib.util.spec_from_file_location("aic_post_create_entry", ENTRY)
+        assert spec is not None and spec.loader is not None
+        entry = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(entry)
+        self.assertEqual(entry.ROOT_PATH, "/usr/sbin:/usr/bin:/sbin:/bin")
+        planted = "/home/vscode/.local/bin:/usr/bin:/bin"
+        for uid, expected in ((1000, planted), (0, entry.ROOT_PATH)):
+            with mock.patch.dict(os.environ, {"PATH": planted}), \
+                    mock.patch.object(entry.os, "geteuid", return_value=uid):
+                entry._use_system_path_as_root()
+                self.assertEqual(os.environ["PATH"], expected, f"uid {uid}")
 
     def test_unknown_arguments_keep_their_message_and_exit_code(self) -> None:
         result = self.run_entry("bogus", "args")

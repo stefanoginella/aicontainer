@@ -103,6 +103,8 @@ Each of these silently moves the checkout into another stack and into the `_aic-
   - `aic` exports its own `AIC_PROJECT_NAME` before some checks run. So the `aic` entry script saves the inherited value at startup, and the check judges that value.
   - `validate` and `doctor` fail on it.
   - `preflight` and the legacy `check-drift` warn.
+  - The same check refuses the other inherited keys of `.devcontainer/.env`.
+    See "Host values in the environment" in [Host state](host-state.md).
 
 > **Warning:** Do not print a value that `aic` reads from the environment or from `.env`.
 
@@ -238,5 +240,7 @@ These items stay writable by the agent by design:
 - hook scripts in the worktree (husky, lefthook, pre-commit).
 
 A read-only `.git/modules` would break submodule work. It also would not stop the agent from adding a new nested repository to the index. The user guide documents these residual risks for host Git (see [Threat model](../user/security.md)).
+
+`git_hooks_problems()` (`identity.sh`) warns when `core.hooksPath`, a hook symlink, or the program of `core.fsmonitor` or `core.sshCommand` is in the worktree. `aic doctor` (`git-hooks`), `aic up`, and `aic rebuild` call it only after the control-path checks pass. It checks paths only: it never reads what a hook does, never runs a hook, and never blocks a start. Guarded by the `git-hooks` cases in `tests/test-aic-host-security.sh`.
 
 Guarded by the Git-control cases in `tests/test-aic-host-security.sh` and the "Git control paths" smoke in `smoke.yml`.

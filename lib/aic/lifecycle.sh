@@ -62,6 +62,7 @@ cmd_up () {
   require_in_project
   pin_compose_project_name
   ensure_git_control_paths strict
+  warn_git_hooks
   write_runtime_environment_file
   # Keep the readable raw warning, then enforce structural + resolved-Compose
   # validation. Ordinary generated projects produce no prompt or extra output.
@@ -75,9 +76,10 @@ cmd_up () {
   # A failure of devcontainer up is a failure of aic up: exit 1, never the
   # code of the Dev Container CLI, so 2 stays the code of a usage error.
   if [ "${#passthrough[@]}" -gt 0 ]; then
-    "$devcontainer" up --workspace-folder . "${passthrough[@]}" || die "devcontainer up failed (exit $?)"
+    without_runtime_environment "$devcontainer" up --workspace-folder . "${passthrough[@]}" \
+      || die "devcontainer up failed (exit $?)"
   else
-    "$devcontainer" up --workspace-folder . || die "devcontainer up failed (exit $?)"
+    without_runtime_environment "$devcontainer" up --workspace-folder . || die "devcontainer up failed (exit $?)"
   fi
   print_boundary_summary up
   warn_compose_drift
@@ -174,6 +176,7 @@ cmd_rebuild () {
   require_in_project
   pin_compose_project_name
   ensure_git_control_paths strict
+  warn_git_hooks
   write_runtime_environment_file
   scan_project_overrides warn
   validate_project_security gate "$allow_unsafe"
@@ -203,11 +206,11 @@ cmd_rebuild () {
   local devcontainer; devcontainer="$(resolve_devcontainer)"
   # Bash 3.2 treats expansion of an empty array as unbound (see cmd_up).
   if [ "${#passthrough[@]}" -gt 0 ]; then
-    "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache "${passthrough[@]}" \
-      || die "devcontainer up failed (exit $?)"
+    without_runtime_environment "$devcontainer" up --workspace-folder . --remove-existing-container \
+      --build-no-cache "${passthrough[@]}" || die "devcontainer up failed (exit $?)"
   else
-    "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache \
-      || die "devcontainer up failed (exit $?)"
+    without_runtime_environment "$devcontainer" up --workspace-folder . --remove-existing-container \
+      --build-no-cache || die "devcontainer up failed (exit $?)"
   fi
 }
 
