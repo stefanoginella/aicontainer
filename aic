@@ -48,6 +48,20 @@ aic_update_latest=""
 if [ -n "${AIC_PROJECT_NAME+set}" ]; then aic_inherited_project_name_set=1; else aic_inherited_project_name_set=0; fi
 # shellcheck disable=SC2034
 aic_inherited_project_name="${AIC_PROJECT_NAME-}"
+# The other keys of .devcontainer/.env, in the order of
+# write_runtime_environment_file(). Compose substitutes each one, and a value
+# in the environment wins over that file. aic exports its own values, so
+# record here which keys this process inherited: a direct Dev Containers start
+# would use them (check_devcontainer_project_name()).
+# shellcheck disable=SC2034
+aic_runtime_env_keys="AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID"
+aic_inherited_runtime_keys=""
+for aic_key in $aic_runtime_env_keys; do
+  if [ -n "${!aic_key+set}" ]; then
+    aic_inherited_runtime_keys="$aic_inherited_runtime_keys $aic_key"
+  fi
+done
+unset aic_key
 
 err()  { echo "aic: $*" >&2; }
 # die: a refusal, a blocker, or a failure. Exit 1.

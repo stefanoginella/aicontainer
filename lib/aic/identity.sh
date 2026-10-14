@@ -169,9 +169,18 @@ pin_compose_project_name () {
 # The helper sees the AIC_PROJECT_NAME that this process inherited (saved at
 # the top of aic), not the value that aic exports itself, because a direct
 # start has only the inherited one.
-# shellcheck disable=SC2154 # aic_inherited_project_name{,_set} are set in aic
+# The other keys of .devcontainer/.env (AIC_DOCKER_SOCKET, AIC_RUNTIME_USER,
+# AIC_STATUS_*) are host values: an inherited one would replace the socket,
+# the sidecar user, or the status relay consent. Any inherited value is
+# refused, an empty one too. `aic up` never passes them on
+# (without_runtime_environment()).
+# shellcheck disable=SC2154 # aic_inherited_* are set in aic
 check_devcontainer_project_name () {
-  local expected managed conflict
+  local expected managed conflict key
+  for key in $aic_inherited_runtime_keys; do
+    err "$key in the environment would replace the host value in .devcontainer/.env — unset it, or start with 'aic up'"
+    return 1
+  done
   expected="$(project_name)" || return 1
   managed="$(expected_project_name)" || return 1
   if ! conflict="$(

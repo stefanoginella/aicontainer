@@ -181,6 +181,9 @@ exit code that is not zero for these problems:
 - an `AIC_PROJECT_NAME`, `COMPOSE_ENV_FILES`, or `COMPOSE_DISABLE_ENV_FILE` in
   the environment (each one can replace the project name in
   `.devcontainer/.env`)
+- an `AIC_DOCKER_SOCKET`, `AIC_RUNTIME_USER`, `AIC_STATUS_RELAY`,
+  `AIC_STATUS_PROJECT`, or `AIC_STATUS_PROJECT_ID` in the environment (each
+  one can replace a host value in `.devcontainer/.env`)
 
 Because managed drift gives an exit code that is not zero, you can also use
 `aic validate` to find out if `aic sync` would change a managed file.
@@ -364,7 +367,10 @@ that start. Do one of these:
 The initializer also refuses a `COMPOSE_PROJECT_NAME` that the environment of
 the editor exports. For the same reason, it refuses these variables in the
 environment of the editor: an `AIC_PROJECT_NAME` that is not the managed name,
-`COMPOSE_ENV_FILES`, and `COMPOSE_DISABLE_ENV_FILE`.
+`COMPOSE_ENV_FILES`, and `COMPOSE_DISABLE_ENV_FILE`. It also refuses the host
+values that `.devcontainer/.env` holds: `AIC_DOCKER_SOCKET`,
+`AIC_RUNTIME_USER`, `AIC_STATUS_RELAY`, `AIC_STATUS_PROJECT`, and
+`AIC_STATUS_PROJECT_ID`. Unset them, or start with `aic up`.
 
 ### Use `aic` and VS Code together
 

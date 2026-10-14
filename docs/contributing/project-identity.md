@@ -103,6 +103,8 @@ Each of these silently moves the checkout into another stack and into the `_aic-
   - `aic` exports its own `AIC_PROJECT_NAME` before some checks run. So the `aic` entry script saves the inherited value at startup, and the check judges that value.
   - `validate` and `doctor` fail on it.
   - `preflight` and the legacy `check-drift` warn.
+  - The same check refuses the other inherited keys of `.devcontainer/.env`.
+    See "Host values in the environment" in [Host state](host-state.md).
 
 > **Warning:** Do not print a value that `aic` reads from the environment or from `.env`.
 
