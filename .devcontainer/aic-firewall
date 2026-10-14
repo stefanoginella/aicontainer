@@ -94,6 +94,7 @@ DEFAULT_ALLOWLIST=(
 EXTRA_FILE="/workspace/.devcontainer/firewall-allowlist"
 PRESETS_FILE="/workspace/.devcontainer/firewall-presets"
 ENABLE_MARKER="/workspace/.devcontainer/firewall-enable"
+RUNTIME_ENV_FILE="/workspace/.devcontainer/.env"
 LOCK_FILE="/run/aic-firewall.flock"
 HOSTS_FILE="/etc/hosts"
 HOSTS_BEGIN="# BEGIN aic-firewall: allowlist names pinned to the allowed addresses (managed)"
@@ -245,12 +246,19 @@ ipset_count() {
   ipset list "$1" | awk '/Number of entries:/ {print $4}'
 }
 
+# The relay mode comes from the generated .devcontainer/.env. The host writes
+# AIC_STATUS_RELAY there from its own marker, and the pre-Docker gate checks
+# that the file matches the host state before each start. The file is on the
+# read-only /workspace/.devcontainer mount, so the agent cannot change it. The
+# value only selects the fixed STATUS_RELAY_HOST:STATUS_RELAY_PORT rule; no
+# host or port comes from the file. Never read the mode from the environment:
+# sudo resets it, and /proc/1/environ (PID 1 runs as vscode) needs
+# CAP_SYS_PTRACE, which the container does not have.
 status_relay_enabled() {
-  # sudo intentionally does not trust a caller-supplied environment here. PID
-  # 1 inherited the managed Compose environment when the container was made.
   local value
-  [ -r /proc/1/environ ] || return 1
-  value="$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^AIC_STATUS_RELAY=//p' | tail -n1)"
+  project_file_present "$RUNTIME_ENV_FILE" || return 1
+  require_regular_project_file "$RUNTIME_ENV_FILE" "runtime environment" || return 1
+  value="$(sed -n 's/^AIC_STATUS_RELAY=//p' "$RUNTIME_ENV_FILE" | tail -n1)" || return 1
   [ "$value" = 1 ]
 }
 
