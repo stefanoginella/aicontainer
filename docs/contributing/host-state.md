@@ -87,6 +87,12 @@ Its label validation must continue to accept the full `expected_project_label()`
 
 Keep the strict firewall exception as an exact TCP-8787 status ipset rule. It must never give general reachability to the host gateway.
 
+`aic-firewall` reads the relay mode only from `/workspace/.devcontainer/.env`. The pre-Docker gate checks that file against the host state, and the agent cannot write the read-only mount. The value only turns the fixed host and port rule on or off.
+
+> **Warning:** Do not read the mode from the environment. sudo resets it, and `/proc/1/environ` needs `CAP_SYS_PTRACE`, because PID 1 runs as `vscode`. Without that capability the rule is never added.
+
+Guarded by `tests/test-aic-firewall-relay.sh` and the "firewall allows the opted-in status relay on its port only" smoke.
+
 The exception must also stay strengthen-only in the other direction. `host.docker.internal` sometimes does not resolve (plain Docker Engine, rootless Docker), or it resolves into a prohibited range. Then `enable` warns and omits that one rule.
 
 > **Warning:** Do not let `enable` abort and leave the project with no allowlist. Observability must not remove policy.

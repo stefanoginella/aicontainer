@@ -208,7 +208,7 @@ runtime smoke.
 - with the working directory `/workspace`
 - as `vscode`
 
-Thus a project `lefthook install` or `npm ci` sees a fully configured
+Thus a project `npm ci` sees a fully configured
 environment.
 
 This file is the only way to extend post-create in pull mode. In pull mode,

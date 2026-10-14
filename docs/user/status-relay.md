@@ -78,7 +78,8 @@ it does not exist.
 
 When the opt-in [network allowlist](network-allowlist.md) is active, aic
 allows only TCP 8787 to the resolved host-gateway address. It does not add
-the host to the general allowlist.
+the host to the general allowlist. The firewall reads the relay mode from the
+generated `.devcontainer/.env`, which the agent cannot change.
 
 When the name does not resolve, the firewall shows a warning and does not add
 that one rule. So a dashboard that you cannot reach never removes the

@@ -552,6 +552,75 @@ jobs:
             fi
             echo "OK: enable cut the earlier session and blocks new off-list connections"
           '
+      - name: Smoke test - firewall allows the opted-in status relay on its port only
+        working-directory: /tmp/proj
+        run: |
+          # The relay mode comes from the generated .devcontainer/.env on the
+          # read-only mount. It never comes from /proc/1/environ: PID 1 runs as
+          # vscode, and root needs CAP_SYS_PTRACE to read it. Throwaway
+          # containers as above, with PID 1 as vscode and the devcontainer
+          # capability set. A test server stands in for host.docker.internal.
+          # Relay on: TCP 8787 passes, TCP 9000 on the same host stays blocked.
+          # Relay off: both stay blocked, also with AIC_STATUS_RELAY=1 in the
+          # environment.
+          set -euo pipefail
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer | head -n1)
+          [ -n "$cid" ] || { echo "FAIL: no devcontainer to take the image from"; exit 1; }
+          img=$(docker inspect -f '{{.Config.Image}}' "$cid")
+          net=aic-relay-smoke
+          envdir=$(mktemp -d)
+          cleanup() {
+            docker rm -f aic-relay-smoke-srv >/dev/null 2>&1 || true
+            docker network rm "$net" >/dev/null 2>&1 || true
+            rm -rf "$envdir"
+          }
+          trap cleanup EXIT
+          docker network create "$net" >/dev/null
+          # The socket-proxy alias lets `enable` find a socket-proxy address.
+          docker run -d --rm --name aic-relay-smoke-srv --network "$net" \
+            --network-alias socket-proxy --entrypoint /usr/bin/python3 "$img" -I -c '
+          import socketserver, threading
+          class H(socketserver.StreamRequestHandler):
+              def handle(self):
+                  for _ in self.rfile:
+                      self.wfile.write(b"pong\n"); self.wfile.flush()
+          socketserver.ThreadingTCPServer.allow_reuse_address = True
+          for port in (8787, 9000):
+              server = socketserver.ThreadingTCPServer(("0.0.0.0", port), H)
+              threading.Thread(target=server.serve_forever).start()
+          ' >/dev/null
+          srv_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' aic-relay-smoke-srv)
+          [ -n "$srv_ip" ] || { echo "FAIL: no address for the test server"; exit 1; }
+          for relay in 1 0; do
+            mkdir -p "$envdir/$relay"
+            printf 'AIC_STATUS_RELAY=%s\n' "$relay" > "$envdir/$relay/.env"
+            # aic writes the file 0600 as the host user; root reads it.
+            chmod 600 "$envdir/$relay/.env"
+            docker run --rm --network "$net" --user vscode \
+              --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH --cap-add FOWNER \
+              --cap-add SETGID --cap-add SETUID --cap-add NET_ADMIN \
+              --add-host "host.docker.internal:$srv_ip" \
+              -v "$envdir/$relay:/workspace/.devcontainer:ro" \
+              -e AIC_STATUS_RELAY=1 -e RELAY="$relay" \
+              --entrypoint /bin/bash "$img" -c '
+              probe() {
+                timeout 6 bash -c "exec 3<>/dev/tcp/host.docker.internal/$1 && echo ping >&3 && read -r -t 4 x <&3 && [ \"\$x\" = pong ]" 2>/dev/null
+              }
+              for _ in $(seq 40); do probe 8787 && break; sleep 0.5; done
+              probe 8787 && probe 9000 || { echo "FAIL: cannot reach the test server"; exit 1; }
+              sudo -n /usr/local/bin/aic-firewall enable >/tmp/enable.log 2>&1 \
+                || { echo "FAIL: aic-firewall enable failed"; cat /tmp/enable.log; exit 1; }
+              if [ "$RELAY" = 1 ]; then
+                probe 8787 || { echo "FAIL: the opted-in status relay port is blocked"; cat /tmp/enable.log; exit 1; }
+              elif probe 8787; then
+                echo "FAIL: the status relay port passes, but the relay is off"; exit 1
+              fi
+              if probe 9000; then
+                echo "FAIL: another port on the relay host passes"; exit 1
+              fi
+              echo "OK: relay=$RELAY: the firewall allows TCP 8787 only when the relay is on"
+            '
+          done
       - name: Smoke test - declared firewall is on at every start; presets are opt-in
         run: |
           # A second project commits .devcontainer/firewall-enable and selects

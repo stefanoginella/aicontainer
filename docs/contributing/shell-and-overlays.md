@@ -196,6 +196,15 @@ The refresh has these properties:
 - It is fail-soft. An update that is offline or fails keeps the baked version.
   Do not make a failure fatal.
 - Set `AIC_FREEZE_TOOLS=1` to disable it and get a reproducible sandbox.
+- With `.devcontainer/firewall-enable`, Claude Code and Codex keep the baked
+  version and log one line. `claude update` needs `downloads.claude.ai`, and
+  `chatgpt.com/codex/install.sh` redirects to `releases.openai.com`. The
+  default allowlist does not hold these update-only hosts, so each updater
+  waited about 90 s and failed. Do not add them to the default allowlist for
+  an update. OpenCode still upgrades: it uses `opencode.ai` (which it needs to
+  run) and the GitHub hosts of the default allowlist. Guarded by the
+  "declared firewall keeps baked Claude and Codex" test in
+  `tests/test-aic-auth-sync.py`.
 
 Rules for each updater:
 
