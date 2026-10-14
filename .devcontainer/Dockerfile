@@ -6,8 +6,8 @@
 # versions stay current.
 # =============================================================================
 
-FROM ghcr.io/astral-sh/uv:0.13@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 AS uv
-FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04@sha256:21e9e3275736cb3bc33a2904b279a2ab292c51fedd53c2963463627d4586c3e6
+FROM ghcr.io/astral-sh/uv:0.12@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 AS uv
+FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04@sha256:d7c468679f45a52ad3673d06656b5bf16e488990b17216a1fa295d9e1f89d724
 
 # OCI labels: lets GitHub auto-link the GHCR package back to this repo.
 LABEL org.opencontainers.image.source="https://github.com/stefanoginella/aicontainer" \
@@ -94,9 +94,9 @@ COPY --from=uv /uv /usr/local/bin/uv
 # fzf (GitHub release is newer than apt and includes shell integration). Only
 # the fzf binary is installed, root-owned: the archive's own owner is not kept.
 # renovate: datasource=github-releases depName=junegunn/fzf
-ARG FZF_VERSION=0.74.5
-ARG FZF_SHA256_AMD64=d47d7f882972c7d674dbbba998ffa4116e68379616ffac7695d0671e9a722c5f
-ARG FZF_SHA256_ARM64=cf058001da21724a469b714a29cf4aab9cbe860d218a0d6c1b5b661efad7784c
+ARG FZF_VERSION=0.74.4
+ARG FZF_SHA256_AMD64=05e6813a337cc722c3ed07e54a764b75cc5d671e2e60459db0ba696ee5fa7504
+ARG FZF_SHA256_ARM64=5d673b849f494f0d64ec471d8640b153ca8849e3846a31da17abdcfce8df6b46
 RUN set -eu; \
     arch="$TARGETARCH"; \
     case "$arch" in \
