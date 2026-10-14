@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The agent-status relay works with the firewall on.** `aic-firewall` read
+  the relay mode from the environment of PID 1, which root cannot read without
+  `SYS_PTRACE`, so it never added the TCP-8787 rule. It now reads the mode from
+  the generated `.devcontainer/.env` on the read-only mount. (aic-firewall)
+
+- **A firewalled container no longer waits about 90 s for the AI-tool
+  refresh.** With `firewall-enable`, Claude Code and Codex keep the baked
+  version: their updates need `downloads.claude.ai` and `releases.openai.com`,
+  which the allowlist does not hold. OpenCode still upgrades. (post-create.py)
+
+- **The managed `.devcontainer/README.md` no longer suggests `lefthook
+  install` in the container.** The container mounts `.git/hooks` read-only; the
+  README now links to "Git hooks on the host". (template)
+
 ## [0.12.0] - 2026-10-14
 
 ### Added

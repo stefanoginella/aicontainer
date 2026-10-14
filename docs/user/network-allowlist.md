@@ -65,6 +65,10 @@ marker can only turn the firewall on. It cannot remove a rule.
 To turn the firewall off again, remove the marker on the host, then run
 `aic rebuild`.
 
+With the marker, post-create keeps the Claude Code and Codex versions of the
+image. Their updates need `downloads.claude.ai` and `releases.openai.com`,
+which are not on the default allowlist. See [Updating](updating.md).
+
 ## Add registry presets
 
 The default allowlist has npm and PyPI as package registries. For other

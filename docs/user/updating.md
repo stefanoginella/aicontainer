@@ -25,6 +25,12 @@ aic rebuild   # in a project: recreate the container → all enabled CLIs update
 The refresh is fail-soft. With no network, the container keeps the version
 that is baked into the image, and the container still starts.
 
+When the project has `.devcontainer/firewall-enable`, Claude Code and Codex
+keep the version of the image. Their updates need hosts that the
+[network allowlist](network-allowlist.md) does not hold. To get newer
+versions, update the image, or run `aic rebuild` with the firewall off.
+OpenCode still updates, because it uses only hosts of the allowlist.
+
 For a fully reproducible sandbox, pin the tools too. Set `AIC_FREEZE_TOOLS=1`
 in `.devcontainer/docker-compose.override.yml`.
 

@@ -95,7 +95,7 @@ This file sets the outbound allowlist and the unconditional metadata chains. The
 - Never set the policy to ACCEPT.
 - Never use `-m set` in a rule. It needs `CAP_NET_RAW`, which the devcontainer drops, so `enable` fails there. `accept_set_members_v4()` writes one exact `-d` rule for each member of the inactive set.
 - Never silently ignore configured IPv6 that cannot be filtered.
-- The host status relay uses its own ipset and an exact TCP-8787 rule. Never put `host.docker.internal` in the general all-port allowlist.
+- The host status relay uses its own ipset and an exact TCP-8787 rule. Never put `host.docker.internal` in the general all-port allowlist. The relay mode comes only from the read-only `.devcontainer/.env`, never from an environment. See [Host state](host-state.md#the-firewall-exception).
 - `is_internal_name()` refuses `localhost`, `*.localhost`, `*.internal`, and the managed service names in `firewall-allowlist` and in the presets. `refuse_internal_addresses_v4()` aborts the enable when the allowlist set holds the default gateway or an address of a host-gateway name or a managed service. Thus a raw address or a name that resolves there also fails.
 - A preset host comes only from the fixed `preset_domains()` table. A project file selects names, never hosts. Keep the names equal to `FIREWALL_PRESETS` in `lib/validate.mjs`.
 - `auto` only enables, and only when `.devcontainer/firewall-enable` exists. Keep the fail-closed start command in both Compose templates. See "Declarative enable and presets" in [Runtime policy](runtime-policy.md#declarative-enable-and-presets).
@@ -106,7 +106,7 @@ The OUTPUT chains accept `ESTABLISHED,RELATED` only with `--ctdir REPLY`. This m
 
 > **Warning:** Do not use a blanket `ESTABLISHED,RELATED` accept. It keeps an outbound session alive that the container opened before `enable`, to a host that is not on the list.
 
-Guarded by the static check in `tests/test-aic-host-security.sh`, `tests/test-aic-firewall-presets.sh`, the "allowlist enable cuts a connection opened before it" smoke, and the "declared firewall is on at every start" smoke. The smoke uses throwaway containers, because you cannot undo `enable` in a running container.
+Guarded by the static check in `tests/test-aic-host-security.sh`, `tests/test-aic-firewall-presets.sh`, `tests/test-aic-firewall-relay.sh`, the "allowlist enable cuts a connection opened before it" smoke, the "firewall allows the opted-in status relay on its port only" smoke, and the "declared firewall is on at every start" smoke. The smoke uses throwaway containers, because you cannot undo `enable` in a running container.
 
 ## `template/hooks/pre-tool-use.sh`
 
