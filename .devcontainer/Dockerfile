@@ -95,8 +95,8 @@ COPY --from=uv /uv /usr/local/bin/uv
 # the fzf binary is installed, root-owned: the archive's own owner is not kept.
 # renovate: datasource=github-releases depName=junegunn/fzf
 ARG FZF_VERSION=0.74.5
-ARG FZF_SHA256_AMD64=05e6813a337cc722c3ed07e54a764b75cc5d671e2e60459db0ba696ee5fa7504
-ARG FZF_SHA256_ARM64=5d673b849f494f0d64ec471d8640b153ca8849e3846a31da17abdcfce8df6b46
+ARG FZF_SHA256_AMD64=d47d7f882972c7d674dbbba998ffa4116e68379616ffac7695d0671e9a722c5f
+ARG FZF_SHA256_ARM64=cf058001da21724a469b714a29cf4aab9cbe860d218a0d6c1b5b661efad7784c
 RUN set -eu; \
     arch="$TARGETARCH"; \
     case "$arch" in \
