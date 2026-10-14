@@ -15,6 +15,7 @@ Start here if you run aicontainer in your projects.
 | [What's in the box](user/whats-in-the-box.md) | The security defaults and developer defaults of the image |
 | [Installing extra tools](user/extra-tools.md) | Ad-hoc installs, `Dockerfile.project`, the Playwright recipe |
 | [Customization](user/customization.md) | `docker-compose.override.yml`, named volumes and `chown-paths`, `post-create.project.sh`, VS Code extensions and settings, LSP recipes |
+| [Stack reference](user/stack-reference.md) | The project-owned files for each stack (Node.js, Python, Go, Rust, Ruby, PHP, Java, C and C++), with copy-ready snippets |
 | [Personal config](user/personal-config.md) | Your zsh config, p10k prompt, and Claude Code statusline in the sandbox |
 | [Agent status relay](user/status-relay.md) | Opt-in lifecycle events for a host dashboard |
 | [Updating](user/updating.md) | Update the AI tools and aicontainer, drift warnings, migration |
@@ -23,6 +24,7 @@ Start here if you run aicontainer in your projects.
 | [Security](user/security.md) | What crosses the boundary, the threat model, host daemon hardening |
 | [Network allowlist](user/network-allowlist.md) | The opt-in outbound firewall |
 | [Troubleshooting](user/troubleshooting.md) | FAQ and known problems |
+| [Stability contract](user/stability.md) | For tools: the stable commands, exit codes, JSON ids, files, and paths, and the release policy |
 
 ## Contributor guide
 

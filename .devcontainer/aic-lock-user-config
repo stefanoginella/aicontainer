@@ -12,7 +12,8 @@ Targets fall into two classes:
 
   * Validated config (``gitconfig``). Parsed against a fixed key/value
     allowlist before install; REQUIRED, so its absence is an error. This is the
-    former ``aic-lock-gitconfig`` behavior, unchanged.
+    former ``aic-lock-gitconfig`` behavior, plus aic's exact GitHub credential
+    helper (REQUIRED_EXACT_VALUE_LISTS).
 
   * Verbatim personal overlay (``shell/rc.zsh``, ``shell/p10k.zsh``, and one of
     ``statusline/statusline.{sh,mjs,js,py}``). Arbitrary zsh / statusline code
@@ -43,12 +44,16 @@ from typing import Callable, NoReturn, Optional
 
 
 MAX_FILE_BYTES = 1024 * 1024
+# The PATH of this root helper, as in aic-firewall and aic-chown-volumes. sudo
+# gives it secure_path, but main() sets it again so that a bare command name
+# never resolves in an agent-writable directory (~/.local/bin).
+SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Keep this fixed-key contract aligned with post-create's GIT_SEED_KEYS
 # (post_create_seeds.py) and setup_gitconfig() (post_create_git.py). None of
 # these seed keys execute commands, load paths, alter remotes/credentials, or
-# register hooks. Command/path-bearing aic-owned keys
-# are accepted separately only at their exact compiled-in values below.
+# register hooks. Command/path-bearing aic-owned keys (the credential helper
+# included) are accepted separately only at their exact compiled-in values below.
 SAFE_VALUE_KEYS = {
     "user.name",
     "user.email",
@@ -96,6 +101,28 @@ REQUIRED_LAST_VALUES = {
     "delta.line-numbers": "true",
     "merge.conflictstyle": "diff3",
     "diff.colormoved": "default",
+}
+
+# aic's own HTTPS credential helper for GitHub: the same config that
+# `gh auth setup-git` writes. gh cannot write it here, because the global
+# config is root-owned 0444. Keep it aligned with GH_CREDENTIAL_CONFIG (post_create_git.py).
+# The empty value resets any helper from an earlier config scope, so only gh
+# answers for these two URLs.
+#
+# The helper is the apt-installed, root-owned /usr/bin/gh by absolute path.
+# Never accept a bare or relative `gh`: ~/.local/bin is agent-writable and comes
+# first on PATH. The helper gives the agent no new power: it already can read
+# the gh token in ~/.config/gh/hosts.yml and run gh itself.
+#
+# Each key must hold EXACTLY this value list, in this order: no value can come
+# before or after it (so a host value cannot override it), and the subsection
+# must match case-exactly. Every other credential.* key (credential.helper,
+# another URL, username, useHttpPath, ...) and every url.* key stays forbidden.
+# There is no helper for other hosts (GitHub Enterprise, GitLab).
+GH_CREDENTIAL_HELPER = "!/usr/bin/gh auth git-credential"
+REQUIRED_EXACT_VALUE_LISTS = {
+    "credential.https://github.com.helper": ("", GH_CREDENTIAL_HELPER),
+    "credential.https://gist.github.com.helper": ("", GH_CREDENTIAL_HELPER),
 }
 
 
@@ -215,9 +242,14 @@ def validate_gitconfig_contents(source_fd: int) -> None:
         raw_key, separator, raw_value = raw_record.partition(b"\n")
         if not separator:
             fail("Git config parser returned a malformed record")
-        key = raw_key.decode("utf-8", "surrogateescape").lower()
+        exact_key = raw_key.decode("utf-8", "surrogateescape")
+        key = exact_key.lower()
         value = raw_value.decode("utf-8", "surrogateescape")
-        if key not in SAFE_VALUE_KEYS and key not in EXACT_VALUES:
+        if key in REQUIRED_EXACT_VALUE_LISTS:
+            # Git keeps the subsection case; accept only the exact spelling.
+            if exact_key != key:
+                fail(f"staging config contains forbidden key: {exact_key}")
+        elif key not in SAFE_VALUE_KEYS and key not in EXACT_VALUES:
             fail(f"staging config contains forbidden key: {key}")
         if key in EXACT_VALUES and value != EXACT_VALUES[key]:
             fail(f"staging config contains forbidden value for: {key}")
@@ -226,6 +258,10 @@ def validate_gitconfig_contents(source_fd: int) -> None:
     for key, required in REQUIRED_LAST_VALUES.items():
         if not values.get(key) or values[key][-1] != required:
             fail(f"staging config is missing aic's required value for: {key}")
+
+    for key, required_list in REQUIRED_EXACT_VALUE_LISTS.items():
+        if tuple(values.get(key, ())) != required_list:
+            fail(f"staging config does not hold aic's exact value list for: {key}")
 
 
 # The fixed install table. gitconfig keeps its allowlist validator and stays
@@ -435,6 +471,7 @@ def install_target(target: Target, vscode_uid: int) -> None:
 
 
 def main() -> None:
+    os.environ["PATH"] = SYSTEM_PATH
     if os.geteuid() != 0:
         fail("must run via sudo")
     try:

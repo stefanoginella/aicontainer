@@ -80,6 +80,9 @@ class ToolRefreshTests(unittest.TestCase):
                 mock.patch.dict(os.environ, {"AIC_FREEZE_TOOLS": ""}),
                 mock.patch.object(TOOLS, "CLAUDE_HOME", claude_home),
                 mock.patch.object(
+                    TOOLS, "FIREWALL_ENABLE_MARKER", claude_home / "no-firewall-enable"
+                ),
+                mock.patch.object(
                     TOOLS, "ENABLED_TOOLS",
                     frozenset({"claude-code", "codex", "opencode"}),
                 ),
@@ -89,6 +92,47 @@ class ToolRefreshTests(unittest.TestCase):
                 TOOLS.refresh_ai_tools()
 
         self.assertEqual(sorted(started), ["claude", "codex", "opencode"])
+
+    def test_declared_firewall_keeps_baked_claude_and_codex(self) -> None:
+        # Behind the firewall, `claude update` (downloads.claude.ai) and the
+        # Codex installer (releases.openai.com) wait for their time limits and
+        # fail. They must not start at all. OpenCode upgrades only through
+        # hosts of the default allowlist, so it still runs.
+        started: list[str] = []
+
+        def fake_command(name, _cmd, _timeout, _env) -> None:
+            started.append(name)
+
+        def fake_codex(_env) -> None:
+            started.append("codex")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".claude.json").write_text("{}\n")
+            (root / "firewall-enable").write_text("")
+            stderr = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"AIC_FREEZE_TOOLS": ""}),
+                mock.patch.object(TOOLS, "CLAUDE_HOME", root),
+                mock.patch.object(TOOLS, "FIREWALL_ENABLE_MARKER", root / "firewall-enable"),
+                mock.patch.object(
+                    TOOLS, "ENABLED_TOOLS",
+                    frozenset({"claude-code", "codex", "opencode"}),
+                ),
+                mock.patch.object(TOOLS, "_refresh_command", fake_command),
+                mock.patch.object(TOOLS, "_refresh_codex", fake_codex),
+                redirect_stderr(stderr),
+            ):
+                TOOLS.refresh_ai_tools()
+
+        self.assertEqual(started, ["opencode"])
+        for name in ("claude", "codex"):
+            self.assertIn(
+                f"firewall on: keeping the baked {name} version; run `aic rebuild` "
+                "with the firewall off, or update the image, to get a newer one",
+                stderr.getvalue(),
+            )
+        self.assertNotIn("baked opencode", stderr.getvalue())
 
 
 class ToolHomeInitializationTests(unittest.TestCase):

@@ -35,13 +35,13 @@ that silently gets wiped or breaks `aic sync`.
   `.devcontainer/docker-compose.yml`.** They are template-managed: `aic init`
   writes them and `aic sync` overwrites them (only the `AIC_TOOLS` / `AIC_SHELL`
   choices survive). All per-project customization goes in the **project-owned**
-  files instead (listed in Step 5). Edits to the managed files get reset on the
+  files instead (listed in the next rule). Edits to the managed files get reset on the
   next sync.
 - **All customization lives in project-owned files** that `aic sync` never
   touches: `Dockerfile.project`, `docker-compose.override.yml`, `chown-paths`,
   `post-create.project.sh`, `vscode-extensions`, `vscode-settings.json`,
-  `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`, `statusline.{sh,mjs,js,py}`.
-  These are opt-in by presence.
+  `firewall-allowlist`, `firewall-enable`, `firewall-presets`, `shell-rc.zsh`,
+  `p10k.zsh`, `statusline.{sh,mjs,js,py}`. These are opt-in by presence.
 - **`aic rebuild` is the verb that builds — `aic up` is not.** `aic up` runs a
   plain `devcontainer up`, and the managed pull-mode Compose sets
   `pull_policy: missing`: when the resolved image tag is already cached, Compose
@@ -133,8 +133,8 @@ stack profile (Steps 2–3) first, then:
 1. **Inventory what's already there.** List which project-owned files exist and
    **read their contents**: `Dockerfile.project`, `docker-compose.override.yml`,
    `chown-paths`, `post-create.project.sh`, `vscode-extensions`,
-   `vscode-settings.json`, `firewall-allowlist`, `shell-rc.zsh`, `p10k.zsh`,
-   `statusline.{sh,mjs,js,py}`. Also
+   `vscode-settings.json`, `firewall-allowlist`, `firewall-enable`,
+   `firewall-presets`, `shell-rc.zsh`, `p10k.zsh`, `statusline.{sh,mjs,js,py}`. Also
    note the current `AIC_TOOLS` / `AIC_SHELL` in `devcontainer.json` (the only
    managed values that survive `aic sync`), and which host-global overlays
    already exist at `~/.config/aicontainer/` (`rc.zsh`, `p10k.zsh`,
@@ -144,7 +144,9 @@ stack profile (Steps 2–3) first, then:
      language with no LSP server in `post-create.project.sh` and no editor
      extension; a Python project with no writable `.venv` volume; a newly-added
      Postgres/Redis service not wired in `docker-compose.override.yml`;
-     Playwright/Chromium added with no `Dockerfile.project`.
+     Playwright/Chromium added with no `Dockerfile.project`. Compare each
+     confirmed stack against its `## Stack:` section in the stack reference
+     (Step 1) — that section lists everything the stack should have.
    - **Missing personalization** — the user's environment, not the stack: no
      shell/prompt overlay and no statusline while their host has them (Step 6),
      or a statusline copied into the seed dir that has since drifted from the
@@ -170,29 +172,69 @@ stack profile (Steps 2–3) first, then:
    Step 9 to confirm the refreshed setup actually boots — an update that
    "should" fix a gap isn't done until you've watched it come up clean.
 
-## Step 1 — Read the current aicontainer docs
+## Step 1 — Read the aicontainer docs for the installed version
 
-Fetch the live user-guide pages so your recipes match the current release
-(override-file syntax and the `Dockerfile.project` / LSP recipes occasionally
-change). Base URL:
-`https://raw.githubusercontent.com/stefanoginella/aicontainer/main/docs/user/`
+Fetch the user-guide pages **from the release tag of the installed `aic`**, not
+from `main`. `main` can describe features the user's aic doesn't have (e.g. a
+`firewall-presets` file an older aic ignores — the user would believe the
+firewall allows hosts, or is on, when it isn't). Tags are never rewritten, so
+a tag fetch is also fixed content.
 
-- `customization.md` — `docker-compose.override.yml`, named volumes +
-  `chown-paths`, `post-create.project.sh`, VS Code extensions/settings, LSP
-  and `.venv` recipes. Always fetch this one.
-- `extra-tools.md` — `Dockerfile.project` and the Playwright recipe. Fetch when
-  the project needs OS packages or a browser.
-- `personal-config.md` — shell overlay and statusline. Fetch when the user asks
-  about their prompt or statusline.
-- Index of all pages: `https://raw.githubusercontent.com/stefanoginella/aicontainer/main/docs/README.md`
-- Human URL (for linking the user): `https://github.com/stefanoginella/aicontainer/tree/main/docs`
+1. **Get the version:** `aic --version` prints `aic vX.Y.Z` (Step 0 made sure
+   `aic` is installed). Base URL:
+   `https://raw.githubusercontent.com/stefanoginella/aicontainer/vX.Y.Z/docs/user/`
+2. **Fetch these pages from that base:**
+   - `stack-reference.md` — **the stack → files mapping. Always fetch this
+     one.** For each stack (Node.js, Python, Go, Rust, Ruby, PHP, Java, C/C++):
+     marker files, `Dockerfile.project` toolchain lines, named volumes +
+     `chown-paths`, `post-create.project.sh` steps (incl. the agent's LSP
+     server), editor extensions/settings, firewall presets, and
+     trust/caveats. Also: the shared `Dockerfile.project` /
+     `post-create.project.sh` parts, how to combine stacks, the volume reset,
+     and the devcontainer-fit matrix. Steps 2, 4, and 5 use it.
+   - `customization.md` — `docker-compose.override.yml`, named volumes +
+     `chown-paths`, `post-create.project.sh`, VS Code extensions/settings, LSP
+     and `.venv` recipes. Always fetch this one.
+   - `extra-tools.md` — `Dockerfile.project` and the Playwright recipe. Fetch
+     when the project needs OS packages or a browser.
+   - `personal-config.md` — shell overlay and statusline. Fetch when the user
+     asks about their prompt or statusline.
+   - Index of all pages: `…/vX.Y.Z/docs/README.md` on the same host.
+   - Human URL (for linking the user):
+     `https://github.com/stefanoginella/aicontainer/tree/vX.Y.Z/docs`
 
-If the fetch fails (offline, firewall), degrade gracefully — don't abort. Use, in
-order: (a) the `.devcontainer/README.md` that `aic init` drops into the project
-(version-matched, documents the managed-vs-project-owned split), (b) `aic help`,
-and (c) `references/stack-and-suitability.md` in this skill. The docs are the
-source of truth for *recipe syntax*; this skill carries the *judgment* (stack
-detection, suitability, LSP-by-language).
+**When the version-matched page isn't available, pick the safe path. Never
+fall back to `main` silently:**
+
+- **Version unknown** (`aic --version` fails or prints no `vX.Y.Z`): don't
+  fetch any stack page. Fix the install first (back to Step 0.3); without a
+  known version, generate only what the user explicitly asks for.
+- **The tag has no `stack-reference.md`** (HTTP 404 — an aic older than the
+  page): tell the user their aic predates the stack reference and recommend
+  `npm update -g aicontainer` (then `aic sync` in an existing project), and
+  re-fetch from the new tag. If they decline:
+  - installed aic is **v0.11.0 or later** (the page's baseline): you may use
+    the page from `main`, but say so first, and drop every item whose
+    `(since …)` marker is `Unreleased` or a version newer than the installed
+    one. Name each dropped item to the user.
+  - installed aic is **older than v0.11.0**: don't use the page at all; tell
+    the user, and generate only what they explicitly ask for.
+- **Offline / fetch failed:** use a local copy only if it is version-matched —
+  a git-checkout install at `~/.aicontainer` whose `package.json` `version`
+  equals the installed version. Any other copy (e.g. the plugin marketplace
+  clone at `~/.claude/plugins/marketplaces/aicontainer/`) tracks `main`:
+  treat it exactly like the `main` case above (say so, apply the markers).
+  For the managed-vs-project-owned split, the version-matched
+  `.devcontainer/README.md` that `aic init` writes and `aic help` also work.
+  With no usable copy of `stack-reference.md`, don't invent stack snippets
+  from memory: tell the user, and generate only what they explicitly ask for.
+
+The docs are the source of truth for *what to generate* — `stack-reference.md`
+for the stack mapping, the other pages for recipe syntax. This skill carries
+the *flow and judgment*: reading the repo, confirming with the user, choosing
+the optional pieces, and sequencing trust and boot
+(`references/stack-and-suitability.md` has the detection judgment the page
+leaves out).
 
 ## Step 2 — Detect the stack
 
@@ -213,8 +255,10 @@ Build a picture of what this project actually is. Read, don't guess. Cover:
   design files. Lean on these when code signals are thin or the repo is greenfield;
   a spec saying "React + FastAPI + Postgres" is a real signal.
 
-`references/stack-and-suitability.md` has the full signal→inference table. The
-goal is a short profile: **language(s) + package manager(s) + runtime versions +
+The "Detect a stack" table in `stack-reference.md` maps marker files to stack
+sections; `references/stack-and-suitability.md` covers the signals a marker
+table can't (services, design docs, greenfield repos). The goal is a short
+profile: **language(s) + package manager(s) + runtime versions +
 services + test tooling + any GUI/mobile/native/hardware signals.**
 
 ## Step 3 — Confirm the stack with the user
@@ -230,20 +274,10 @@ The customization plan is only as good as this profile, so it's worth the round-
 aicontainer is a **headless Linux** devcontainer. Most server / web / CLI /
 library / data / ML-on-CPU work is a great fit. Some work fundamentally can't run
 here — flag it *before* generating config so the user isn't surprised after a
-rebuild. Use the matrix in `references/stack-and-suitability.md`. The headline
-non-fits, and why:
-
-- **iOS / macOS-native** (Xcode, Swift/AppKit, code-signing/notarization) — the
-  toolchain is host-macOS-only; it can't run in a Linux container.
-- **Windows-native** (.NET Framework, WPF/WinForms, MSIX) — needs Windows.
-- **Native desktop GUI needing a host display** — no X/Wayland bridge by default.
-- **Embedded / firmware** needing USB / serial / JTAG passthrough — hardware isn't
-  forwarded.
-- **Android emulator** — needs nested KVM (painful); *building* APKs is fine,
-  *running the emulator* generally isn't.
-- **GPU / CUDA** — not wired by default (no `nvidia-container-toolkit`); possible
-  but advanced and may not be supported.
-- **No Docker runtime available** — nothing runs without one.
+rebuild. The fit/non-fit list (iOS/macOS-native, Windows-native, host-display
+GUI, hardware passthrough, Android emulator, GPU/CUDA) is the "Check the fit"
+section of `stack-reference.md` — classify against it. Also a non-fit here: no
+Docker runtime at all (Step 0) — nothing runs without one.
 
 When you hit a non-fit, say so plainly, explain what specifically won't work, and
 note whether a **partial** setup still helps (e.g. an iOS app with a Node backend
@@ -258,88 +292,50 @@ First the two `aic init` choices (ask, or take the defaults and say so):
   Default is all three.
 - **Shell** (`--shell`): `zsh` (default), `bash`, or `fish`.
 
-Then map the confirmed stack to **project-owned files**. The aim is a sandbox the
-project actually builds and runs in. Common mappings (full syntax: the docs from
-Step 1; rationale and the LSP-by-language table: `references/stack-and-suitability.md`):
+Then map the confirmed stack to **project-owned files** with
+`stack-reference.md` (Step 1). That page is the single source for the
+mapping — take the snippets from it; don't keep or improvise a private copy:
 
-- **Named volume + `chown-paths`** — for build artifacts you don't want on the
-  bind-mounted workspace: Python `.venv` + uv cache, Node `node_modules`, Rust
-  `target`/cargo, Go build cache. Persists across rebuilds and dodges the macOS
-  bind-mount perf hit. **Always pair a named volume with a `chown-paths` entry** —
-  Docker inits named volumes `root:root` and the mount is otherwise unwritable by
-  `vscode`. **`/workspace/…` and `/home/vscode/.cache/…` are the only mount
-  targets aic accepts at all** — that's a validator rule on every mount the
-  override adds, not merely a `chown-paths` limit. Most tools' default cache dirs
-  sit outside it — `~/.cargo`, `~/.m2`, `~/.gradle`, `~/go/pkg`, `~/.pub-cache` —
-  and mounting one makes aic reject the *whole config* with `added mount target
-  is outside approved project data paths`. Relocate the cache, not the rule: mount
-  `/home/vscode/.cache/<tool>` and point the tool at it by setting its home var
-  (`CARGO_HOME`, `GOMODCACHE`, `UV_CACHE_DIR`, …) in `Dockerfile.project`, so the
-  value is baked into the image rather than an override `environment:` key the
-  validator has to re-review.
-- **`Dockerfile.project`** — for anything needing `apt` / root or baked-in
-  browsers: native build deps, DB clients, Playwright/Chromium (`extra-tools.md` has the
-  exact recipe), extra language runtimes. `FROM` must match the pinned tag in the
-  generated `docker-compose.yml` (read it after init). Point at it with a `build:`
-  block in `docker-compose.override.yml`, **not** by editing `docker-compose.yml`.
-  Two consequences the recipe leaves implicit, and both bite:
-  - **Give the build its own `image:` tag in the same override block.** Compose
-    tags a build's output with whatever `image:` resolves to, and the managed file
-    resolves it to the *shared* `ghcr.io/stefanoginella/aicontainer:vX.Y.Z` — so a
-    bare `build:` block silently re-tags the base image locally and hands this
-    project's image to **every other aic project on the machine**. aic permits a
-    distinct tag whenever a `build:` is present, so always add
-    `image: <project>-devcontainer:vX.Y.Z` next to it.
-  - **It always costs exactly one `aic trust`, and it makes `aic rebuild` the
-    boot verb.** Image builds run as root, so aic treats every project Dockerfile
-    as a boundary expansion even when `FROM` is the official base. Both golden
-    rules above — plan the sequence around them rather than discovering them.
-- **`docker-compose.override.yml`** — env vars, host-service wiring
-  (`DATABASE_URL: …@host.docker.internal:5432/…` to reach a DB running on the
-  host; add the `extra_hosts` line on Linux), extra ports/mounts, the named-volume
-  declarations, and the `Dockerfile.project` `build:` block.
-- **`vscode-extensions` + `vscode-settings.json`** — editor IntelliSense: the
-  language extension stack (Python → `ms-python.python` + `ms-python.vscode-pylance`
-  + `charliermarsh.ruff`; TS → `dbaeumer.vscode-eslint` + `esbenp.prettier-vscode`;
-  etc.), interpreter path, format-on-save. Include the **stop-auto-activating-`.venv`**
-  settings for Python projects (otherwise VS Code types `source .../activate` into
-  the terminal and clobbers the AI CLI you just launched — `customization.md` has the two keys).
-- **`post-create.project.sh`** — runs as `vscode`, cwd `/workspace`, on every
-  create. Two jobs: (1) **install the agent's LSP server** binary on `PATH` so
-  Claude Code's go-to-def / find-refs tool works — this is *separate* from the
-  editor extensions and is the LSP piece people miss (Python → `npm i -g pyright`,
-  giving `pyright-langserver`; TS → `npm i -g typescript typescript-language-server`;
-  others in the references table); (2) project bootstrap (`uv sync`, `npm ci`,
-  DB seed). Three sandbox constraints shape this script — get them wrong and the
-  first boot logs a scary `❌` (full recipes: "post-create constraints" in the
-  references):
-  - **Guard bootstrap on the manifest existing.** Greenfield repos often have no
-    `pyproject.toml` / `package.json` yet, so wrap the step
-    (`if [ -f pyproject.toml ]; then uv sync; fi`) or it hard-fails on first create.
-  - **Never run a git-hook installer unconditionally.** `.git/hooks` is
-    bind-mounted **read-only** (sandbox self-protection), so `lefthook install` /
-    `husky install` / `pre-commit install` all fail with `read-only file system`.
-    The *host* owns hook installation; the container only needs the hook *binary*
-    on `PATH` so the host-written shim runs. Gate any install on `[ -w .git/hooks ]`.
-  - **`npm i -g` can't install postinstall-binary tools.** The sandbox sets
-    `NPM_CONFIG_IGNORE_SCRIPTS`, so tools that fetch a binary in a postinstall
-    (lefthook, gitleaks, …) install *nothing*. Fetch the pinned static release
-    binary into `~/.local/bin` instead. (Pure-JS LSP servers like `pyright` ship
-    their code and are unaffected; add `--no-audit` to real `npm i -g` calls to
-    quiet a cosmetic global+audit warning.)
-- **`firewall-allowlist`** — only if the user wants the stricter opt-in network
-  allowlist (reviewing untrusted code, corporate LAN). Off by default; mention it,
-  don't impose it.
-- **Personal overlays (`shell-rc.zsh`, `p10k.zsh`, `statusline.*`)** — the user's
-  own prompt, aliases, and Claude statusline inside the sandbox. These are
+- **One `## Stack: <name>` section per confirmed stack.** Every section has the
+  same subheadings in the same order — Detect, Toolchain, Named volumes and
+  chown-paths, Post-create, Editor, Firewall presets, Trust and caveats — so
+  read each one and carry its snippets into the plan.
+- **Two or more stacks → its "Combine stacks" section.** One file of each kind:
+  one `FROM`, one override `services.devcontainer` block, one `post-create`
+  header, merged `chown-paths` / `vscode-extensions` / `vscode-settings.json`.
+- **Shared parts → its "Common files" section**: the `Dockerfile.project`
+  `FROM` line and the override `build:` block with its own `image:` tag, the
+  `post-create.project.sh` header, and the post-create constraints (guard on
+  the manifest, read-only `.git/hooks`, `NPM_CONFIG_IGNORE_SCRIPTS`).
+- **Host services and browser e2e** are add-ons, not stacks: the page's
+  "Detect a stack" table links to the override example and the Playwright
+  recipe.
+- **A stack the page doesn't cover** (.NET, Elixir, Dart, …): say so plainly.
+  Propose only the common files and the pattern of the stack sections, flag
+  that none of it is tested, and get the user's explicit yes before you write
+  toolchain lines for it.
+
+Judgment that stays with you:
+
+- **Optional pieces are the user's call.** The page marks some entries
+  optional (a `node_modules` volume, a C/C++ build-dir volume, the Poetry
+  variant). Offer them; don't impose them.
+- **The firewall files are opt-in.** `firewall-enable` / `firewall-presets` /
+  `firewall-allowlist` fit stricter containment (reviewing untrusted code,
+  corporate LAN). Off by default; mention it, don't impose it. If the user opts
+  in, take the preset names and extra hosts from the stack sections.
+- **Every `Dockerfile.project` costs one `aic trust` and makes `aic rebuild`
+  the boot verb** — the golden rules above. Plan the sequence around them.
+- **Personal overlays (`shell-rc.zsh`, `p10k.zsh`, `statusline.*`)** are
   *personalization*, not stack mapping, and they're the piece users most often
   assume happens automatically. Handle them in **Step 6**, not here.
 
 **LSP is a first-class concern** (the user cares about it). Make explicit that
 there are *two* LSP surfaces: the **editor's** IntelliSense (extensions +
 settings) and the **agent's** LSP tool (a language-server binary on `PATH`,
-installed from `post-create.project.sh`). A project usually wants both. See the
-references table for the binary + extension per language.
+installed from `Dockerfile.project` or `post-create.project.sh`). A project
+usually wants both. Each stack section of `stack-reference.md` has both: the
+Editor subsection, and the server in Toolchain or Post-create.
 
 ## Step 6 — Port the user's host config and preferences
 
@@ -648,6 +644,9 @@ Keep the handoff concrete — these are copy-pasteable commands, not prose.
 
 ## Reference
 
-- `references/stack-and-suitability.md` — stack-detection signal table, the full
-  devcontainer-suitability matrix, and the LSP-server-by-language table (editor
-  extension + agent binary). Read it during Steps 2, 4, and 5.
+- `docs/user/stack-reference.md` (fetched in Step 1) — the stack → files
+  mapping, the shared files, how to combine stacks, and the fit matrix. Read it
+  during Steps 2, 4, and 5.
+- `references/stack-and-suitability.md` — the detection judgment the page
+  leaves out (services, design docs, greenfield repos) and how to handle a
+  project that doesn't fit. Read it during Steps 2 and 4.

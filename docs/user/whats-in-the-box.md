@@ -27,6 +27,10 @@ developer-experience defaults.
   time at `/etc/aic/user-config/gitconfig` as `root:root 0444`.
 - These items never cross: credential helpers, aliases, includes, hooks,
   remotes, and settings that contain a command or a path.
+- aic adds one credential helper of its own: `/usr/bin/gh auth git-credential`
+  for `https://github.com` and `https://gist.github.com`. Thus `git push` over
+  HTTPS uses your container `gh` login. See
+  [Push to GitHub from the container](install.md#push-to-github-from-the-container).
 - Zsh, Bash, and fish also start from root-owned aicontainer profiles. They
   never start from user rc files or host rc files that are writable.
 - The code that these profiles load is also root-owned: oh-my-zsh,
@@ -94,9 +98,18 @@ For the preference allowlist, see
 
 ### Container global gitignore
 
-The global gitignore of the container covers `.env*`, `.claude/`, `.codex/`,
-`node_modules/`, `.venv/`, `__pycache__/`, and `.DS_Store`. Thus it is more
-difficult to commit a secret by accident.
+The global gitignore of the container covers `.env*`, `node_modules/`,
+`.venv/`, `__pycache__/`, and `.DS_Store`. Thus it is more difficult to commit
+a secret by accident.
+
+It also covers the agent files that Claude Code documents as personal or
+local: `.claude/settings.local.json`, `.claude/agent-memory-local/`,
+`.claude/worktrees/`, and `CLAUDE.local.md`. It does not cover the other
+`.claude/` and `.codex/` files, for example `.claude/settings.json`,
+`.claude/skills/`, `.claude/agents/`, and `.codex/config.toml`. You can commit
+them, and `git status` shows each change that the agent makes to them. These
+files can hold hooks that a host AI tool runs. See
+[Threat model](security.md#not-sandboxed-unless-you-opt-in).
 
 ### No host credential forwarding
 
@@ -131,6 +144,10 @@ in `Dockerfile.project`.
   - Python 3.13 through [`uv`](https://github.com/astral-sh/uv).
   - Node 24 LTS through [`fnm`](https://github.com/Schniz/fnm). Thus a project
     can override the version with `.nvmrc`.
+  - The default Node of fnm (`node`, `npm`, `npx`) is also the last entry on
+    the image `PATH`. Thus Claude Code hooks, MCP servers, and `docker exec`
+    commands find `node` without a shell startup. A shell in the container
+    still uses the `.nvmrc` version first.
 - **CLI utilities:** `ripgrep`, `fd-find`, `fzf`, `tmux`, `jq`, `gh`, the
   `docker` CLI (+ buildx, compose), `semgrep`, and
   [`git-delta`](https://github.com/dandavison/delta). `git-delta` is set as

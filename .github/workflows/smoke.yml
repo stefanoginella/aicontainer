@@ -138,7 +138,7 @@ jobs:
           # 0444 and the baked .zshrc sources them after the managed baseline.
           printf '# aic smoke overlay rc\nexport AIC_SMOKE_RC=1\ntouch /tmp/aic-smoke-rc-sourced\n' \
             > /tmp/proj/.devcontainer/shell-rc.zsh
-          printf '# aic smoke overlay p10k\ntouch /tmp/aic-smoke-p10k-sourced\n' \
+          printf '# aic smoke overlay p10k\ntypeset -g POWERLEVEL9K_INSTANT_PROMPT=verbose\ntouch /tmp/aic-smoke-p10k-sourced\n' \
             > /tmp/proj/.devcontainer/p10k.zsh
           # Opt-in personal statusline overlay: the script lands root-owned 0444
           # and Claude Code is pointed at the fixed baked launcher, never at a
@@ -200,6 +200,34 @@ jobs:
           sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
           ' "$GITHUB_WORKSPACE/aic" trust
           devcontainer up --workspace-folder .
+      - name: Smoke test - the running stack has the path-unique name of the generated .env
+        working-directory: /tmp/proj
+        run: |
+          # The committed Compose file holds one fixed name line and no path
+          # hash. The path-unique value is only in the gitignored, host-written
+          # .devcontainer/.env, and the direct start above must have used it.
+          line='name: ${AIC_PROJECT_NAME:?run aic up or aic sync}'
+          [ "$(grep -cE '^name[[:space:]]*:' .devcontainer/docker-compose.yml)" = 1 ] \
+            && grep -Fqx "$line" .devcontainer/docker-compose.yml \
+            || { echo "FAIL: committed Compose file does not hold exactly the managed name line"; exit 1; }
+          root=$(/bin/pwd -P)
+          label=$(basename "$root" | tr '[:upper:]' '[:lower:]' | tr -dc 'a-z0-9_-' | cut -c1-32)
+          expected="aic-${label}-$(printf '%s' "$root" | sha256sum | cut -c1-12)"
+          [ "$(sed -n 's/^AIC_PROJECT_NAME=//p' .devcontainer/.env)" = "$expected" ] \
+            || { echo "FAIL: .devcontainer/.env does not hold the path-unique name $expected"; exit 1; }
+          if grep -Fq "$expected" .devcontainer/docker-compose.yml; then
+            echo "FAIL: committed Compose file holds the path-specific name"; exit 1
+          fi
+          git check-ignore -q .devcontainer/.env \
+            || { echo "FAIL: .devcontainer/.env is not ignored by Git"; exit 1; }
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer \
+            --filter "label=devcontainer.local_folder=$root")
+          [ "$(printf '%s\n' "$cid" | grep -c .)" = 1 ] \
+            || { echo "FAIL: expected one running devcontainer for $root"; exit 1; }
+          actual=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$cid")
+          [ "$actual" = "$expected" ] \
+            || { echo "FAIL: running stack project is $actual, expected $expected"; exit 1; }
+          echo "OK: running stack uses the path-unique name from .env; committed name line is fixed"
       - name: Smoke test - personal shell overlay installs root-locked and is sourced
         working-directory: /tmp/proj
         run: |
@@ -220,6 +248,11 @@ jobs:
             zsh -lic true
             [ -e /tmp/aic-smoke-rc-sourced ] && [ -e /tmp/aic-smoke-p10k-sourced ] \
               || { echo "FAIL: overlay not sourced by login zsh"; exit 1; }
+            # The overlay p10k.zsh asks for instant prompt. Its cache directory
+            # is root-owned, so the managed .zshrc must turn it off again.
+            instant=$(zsh -lic "print -r -- \$POWERLEVEL9K_INSTANT_PROMPT")
+            [ "$instant" = off ] \
+              || { echo "FAIL: p10k instant prompt is \"$instant\" after the overlay, expected off"; exit 1; }
             echo "OK: personal shell overlay is root-locked, verbatim, and sourced after baseline"
           '
       - name: Smoke test - a deleted host overlay seed leaves the sanitized volume
@@ -228,8 +261,8 @@ jobs:
           # The sanitized volume outlives the container. When the human deletes
           # ~/.config/aicontainer/rc.zsh, the next sanitizer run must remove the
           # old copy, or it stays installed and sourced on every rebuild.
-          project_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
-            .devcontainer/docker-compose.yml)
+          project_name=$(sed -n 's/^AIC_PROJECT_NAME=//p' .devcontainer/.env)
+          [ -n "$project_name" ] || { echo "FAIL: generated .env has no project name"; exit 1; }
           sanitizer_id=$(docker ps -aq \
             --filter "label=com.docker.compose.project=$project_name" \
             --filter "label=com.docker.compose.service=aic-seed-sanitizer")
@@ -267,6 +300,35 @@ jobs:
             done
             echo "OK: managed zsh loads powerlevel10k, both plugins, node, fnm, fzf, and delta"
           '
+      - name: Smoke test - a process without shell startup finds the fnm default Node
+        working-directory: /tmp/proj
+        run: |
+          # Hooks, MCP servers, and `docker exec` do not run `fnm env`. The image
+          # PATH ends with the fnm default Node, so a plain /bin/sh that reads no
+          # rc file finds node, npm, and npx. `devcontainer exec` probes a login
+          # shell for its environment, so this uses `docker exec`. The entry must
+          # stay last, a managed shell must still put the fnm per-directory Node
+          # first, and the system-only PATH must find no node: startup and root
+          # PATHs never reach the vscode-owned Node.
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer | head -n1)
+          [ -n "$cid" ] || { echo "FAIL: no running devcontainer"; exit 1; }
+          fnm_bin=/home/vscode/.fnm/aliases/default/bin
+          node_path=$(docker exec -u vscode "$cid" /bin/sh -c 'command -v node' | tr -d '\r')
+          [ "$node_path" = "$fnm_bin/node" ] \
+            || { echo "FAIL: /bin/sh -c finds node at \"$node_path\", expected $fnm_bin/node"; exit 1; }
+          docker exec -u vscode "$cid" /bin/sh -c 'node -v && npm -v && npx -v' \
+            || { echo "FAIL: node, npm, or npx does not run from a plain /bin/sh"; exit 1; }
+          last=$(docker exec -u vscode "$cid" /bin/sh -c 'printf "%s\n" "${PATH##*:}"' | tr -d '\r')
+          [ "$last" = "$fnm_bin" ] \
+            || { echo "FAIL: the last image PATH entry is \"$last\", expected $fnm_bin"; exit 1; }
+          docker exec -u vscode "$cid" zsh -ic '
+            (( ${path[(i)*/fnm_multishells/*]} < ${path[(i)'"$fnm_bin"']} )) \
+              || { echo "FAIL: the fnm default Node is before the fnm per-directory Node in zsh"; exit 1; }
+          ' || exit 1
+          if docker exec -u vscode "$cid" env -i /bin/sh -c 'command -v node'; then
+            echo "FAIL: a system directory holds a node; the system-only PATH must not find one"; exit 1
+          fi
+          echo "OK: a plain /bin/sh finds the fnm default Node last on PATH; system directories hold no node"
       - name: Smoke test - personal statusline installs root-locked and is wired
         working-directory: /tmp/proj
         run: |
@@ -470,7 +532,9 @@ jobs:
           socketserver.ThreadingTCPServer.allow_reuse_address = True
           socketserver.ThreadingTCPServer(("0.0.0.0", 9000), H).serve_forever()
           ' >/dev/null
-          docker run --rm --network "$net" --cap-add NET_ADMIN --user root \
+          # The same capability set as the devcontainer: no NET_RAW, which
+          # iptables `-m set` would need.
+          docker run --rm --network "$net" --cap-drop ALL --cap-add NET_ADMIN --user root \
             --entrypoint /bin/bash "$img" -c '
             for _ in $(seq 40); do
               (: </dev/tcp/aic-fw-smoke-srv/9000) 2>/dev/null && break
@@ -488,6 +552,182 @@ jobs:
             fi
             echo "OK: enable cut the earlier session and blocks new off-list connections"
           '
+      - name: Smoke test - firewall allows the opted-in status relay on its port only
+        working-directory: /tmp/proj
+        run: |
+          # The relay mode comes from the generated .devcontainer/.env on the
+          # read-only mount. It never comes from /proc/1/environ: PID 1 runs as
+          # vscode, and root needs CAP_SYS_PTRACE to read it. Throwaway
+          # containers as above, with PID 1 as vscode and the devcontainer
+          # capability set. A test server stands in for host.docker.internal.
+          # Relay on: TCP 8787 passes, TCP 9000 on the same host stays blocked.
+          # Relay off: both stay blocked, also with AIC_STATUS_RELAY=1 in the
+          # environment.
+          set -euo pipefail
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer | head -n1)
+          [ -n "$cid" ] || { echo "FAIL: no devcontainer to take the image from"; exit 1; }
+          img=$(docker inspect -f '{{.Config.Image}}' "$cid")
+          net=aic-relay-smoke
+          envdir=$(mktemp -d)
+          cleanup() {
+            docker rm -f aic-relay-smoke-srv >/dev/null 2>&1 || true
+            docker network rm "$net" >/dev/null 2>&1 || true
+            rm -rf "$envdir"
+          }
+          trap cleanup EXIT
+          docker network create "$net" >/dev/null
+          # The socket-proxy alias lets `enable` find a socket-proxy address.
+          docker run -d --rm --name aic-relay-smoke-srv --network "$net" \
+            --network-alias socket-proxy --entrypoint /usr/bin/python3 "$img" -I -c '
+          import socketserver, threading
+          class H(socketserver.StreamRequestHandler):
+              def handle(self):
+                  for _ in self.rfile:
+                      self.wfile.write(b"pong\n"); self.wfile.flush()
+          socketserver.ThreadingTCPServer.allow_reuse_address = True
+          for port in (8787, 9000):
+              server = socketserver.ThreadingTCPServer(("0.0.0.0", port), H)
+              threading.Thread(target=server.serve_forever).start()
+          ' >/dev/null
+          srv_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' aic-relay-smoke-srv)
+          [ -n "$srv_ip" ] || { echo "FAIL: no address for the test server"; exit 1; }
+          for relay in 1 0; do
+            mkdir -p "$envdir/$relay"
+            printf 'AIC_STATUS_RELAY=%s\n' "$relay" > "$envdir/$relay/.env"
+            # aic writes the file 0600 as the host user; root reads it.
+            chmod 600 "$envdir/$relay/.env"
+            docker run --rm --network "$net" --user vscode \
+              --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH --cap-add FOWNER \
+              --cap-add SETGID --cap-add SETUID --cap-add NET_ADMIN \
+              --add-host "host.docker.internal:$srv_ip" \
+              -v "$envdir/$relay:/workspace/.devcontainer:ro" \
+              -e AIC_STATUS_RELAY=1 -e RELAY="$relay" \
+              --entrypoint /bin/bash "$img" -c '
+              probe() {
+                timeout 6 bash -c "exec 3<>/dev/tcp/host.docker.internal/$1 && echo ping >&3 && read -r -t 4 x <&3 && [ \"\$x\" = pong ]" 2>/dev/null
+              }
+              for _ in $(seq 40); do probe 8787 && break; sleep 0.5; done
+              probe 8787 && probe 9000 || { echo "FAIL: cannot reach the test server"; exit 1; }
+              sudo -n /usr/local/bin/aic-firewall enable >/tmp/enable.log 2>&1 \
+                || { echo "FAIL: aic-firewall enable failed"; cat /tmp/enable.log; exit 1; }
+              if [ "$RELAY" = 1 ]; then
+                probe 8787 || { echo "FAIL: the opted-in status relay port is blocked"; cat /tmp/enable.log; exit 1; }
+              elif probe 8787; then
+                echo "FAIL: the status relay port passes, but the relay is off"; exit 1
+              fi
+              if probe 9000; then
+                echo "FAIL: another port on the relay host passes"; exit 1
+              fi
+              echo "OK: relay=$RELAY: the firewall allows TCP 8787 only when the relay is on"
+            '
+          done
+      - name: Smoke test - declared firewall is on at every start; presets are opt-in
+        run: |
+          # A second project commits .devcontainer/firewall-enable and selects
+          # the crates preset. The files need no trust. Every start (also a
+          # plain `docker restart`, outside Dev Containers) must enable the
+          # firewall. The selected preset host passes; the host of a preset
+          # that is not selected, and any other host, stay blocked. The
+          # allowlist names are pinned to the allowed addresses in /etc/hosts.
+          # The agent cannot remove the marker, change the pins, or turn the
+          # firewall off.
+          set -euo pipefail
+          mkdir -p /tmp/proj-fw && cd /tmp/proj-fw && git init -q
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build --force
+          : > .devcontainer/firewall-enable
+          printf '# registries\ncrates\n' > .devcontainer/firewall-presets
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" validate </dev/null \
+            || { echo "FAIL: the declarative firewall files needed trust"; exit 1; }
+          name=$(sed -n 's/^AIC_PROJECT_NAME=//p' .devcontainer/.env)
+          cleanup() {
+            docker compose -p "$name" -f .devcontainer/docker-compose.yml down >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          devcontainer up --workspace-folder .
+          check_firewall() {
+            devcontainer exec --workspace-folder . bash -lc '
+              set -u
+              fw_status=$(sudo -n /usr/local/bin/aic-firewall status)
+              printf "%s\n" "$fw_status" | grep -q "policy DROP" \
+                || { echo "FAIL: the declared firewall is off after start"; exit 1; }
+              # index.crates.io is a CDN name: each resolver can get other
+              # valid addresses, with a TTL of seconds. enable pins the
+              # allowed addresses in /etc/hosts, so every address that the
+              # container resolves for the name is in the active rules.
+              pins=$(sed -n "/^# BEGIN aic-firewall/,/^# END aic-firewall/p" /etc/hosts)
+              printf "%s\n" "$pins" | grep -Eq "^[0-9.]+ index\.crates\.io$" \
+                || { echo "FAIL: the selected preset host index.crates.io is not pinned"; exit 1; }
+              if printf "%s\n" "$pins" | grep -q "proxy\.golang\.org"; then
+                echo "FAIL: proxy.golang.org is pinned, but the go preset is not selected"; exit 1
+              fi
+              resolved=$(getent ahostsv4 index.crates.io | awk "{print \$1}" | sort -u)
+              [ -n "$resolved" ] || { echo "FAIL: index.crates.io does not resolve"; exit 1; }
+              for addr in $resolved; do
+                printf "%s\n" "$fw_status" | grep -Fqx "$addr" \
+                  || { echo "FAIL: index.crates.io resolves to $addr, which the rules do not allow"; exit 1; }
+              done
+              if { echo "192.0.2.1 index.crates.io" >> /etc/hosts; } 2>/dev/null; then
+                echo "FAIL: the agent could change the pinned names in /etc/hosts"; exit 1
+              fi
+              curl -fsS --max-time 20 -o /dev/null https://index.crates.io/config.json \
+                || { echo "FAIL: the selected preset host index.crates.io is blocked"; exit 1; }
+              if curl -sS --max-time 8 -o /dev/null https://proxy.golang.org/ 2>/dev/null; then
+                echo "FAIL: proxy.golang.org passes, but the go preset is not selected"; exit 1
+              fi
+              if curl -sS --max-time 8 -o /dev/null http://1.1.1.1/ 2>/dev/null; then
+                echo "FAIL: a host off the allowlist passes"; exit 1
+              fi
+              if rm -f /workspace/.devcontainer/firewall-enable 2>/dev/null \
+                  || [ ! -e /workspace/.devcontainer/firewall-enable ]; then
+                echo "FAIL: the agent could remove the firewall-enable marker"; exit 1
+              fi
+              if { printf "go\n" >> /workspace/.devcontainer/firewall-presets; } 2>/dev/null; then
+                echo "FAIL: the agent could change the presets"; exit 1
+              fi
+              if sudo -n /usr/local/bin/aic-firewall disable >/dev/null 2>&1; then
+                echo "FAIL: aic-firewall has a disable command"; exit 1
+              fi
+            '
+          }
+          check_firewall
+          echo "OK: devcontainer up enabled the declared firewall with the selected preset only"
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer \
+            --filter "label=com.docker.compose.project=$name")
+          [ "$(printf '%s\n' "$cid" | grep -c .)" = 1 ] || { echo "FAIL: no single firewalled devcontainer"; exit 1; }
+          docker restart "$cid" >/dev/null
+          on=0
+          for _ in $(seq 60); do
+            # Read all the output first: with pipefail, `grep -q` can end
+            # docker exec with SIGPIPE and hide a firewall that is on.
+            st=$(docker exec -u vscode "$cid" sudo -n /usr/local/bin/aic-firewall status 2>/dev/null) || st=""
+            if printf '%s\n' "$st" | grep -q "policy DROP"; then
+              on=1; break
+            fi
+            sleep 1
+          done
+          [ "$on" = 1 ] || { echo "FAIL: a plain docker restart left the declared firewall off"; docker logs "$cid" | tail -20; exit 1; }
+          check_firewall
+          echo "OK: a restart enabled the declared firewall again"
+          # Fail closed: when `auto` fails at start (here an unknown preset that
+          # bypasses the host gate through a plain docker restart), the
+          # container must stop instead of running with open egress.
+          printf 'crates\nnot-a-preset\n' > .devcontainer/firewall-presets
+          docker restart "$cid" >/dev/null || true
+          state=""
+          for _ in $(seq 60); do
+            state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$cid")
+            [ "${state%% *}" = exited ] && break
+            sleep 1
+          done
+          [ "${state%% *}" = exited ] && [ "${state##* }" != 0 ] \
+            || { echo "FAIL: a failed declared firewall left the container running ($state)"; exit 1; }
+          docker logs "$cid" 2>&1 | grep -q 'firewall-enable is set, but the firewall could not be enabled' \
+            || { echo "FAIL: the stopped container did not log the firewall failure"; exit 1; }
+          if devcontainer up --workspace-folder . >/dev/null 2>&1; then
+            echo "FAIL: devcontainer up started a project whose declared firewall fails"; exit 1
+          fi
+          echo "OK: a failed declared firewall stops the container"
+
       - name: Smoke test - npm quarantine window is sane (npx-based MCPs installable)
         working-directory: /tmp/proj
         run: |
@@ -684,6 +924,72 @@ jobs:
               || { echo "FAIL: fnm Node is not on the zsh PATH"; exit 1; }
             echo "OK: managed git/shell config is locked and home startup replacements are ignored"
           '
+
+      - name: Smoke test - root processes never search the vscode-owned PATH
+        working-directory: /tmp/proj
+        run: |
+          # Docker gives the image PATH, which starts with the vscode-owned
+          # ~/.local/bin, to root processes too. vscode cannot write to a system
+          # PATH directory. The sudo helpers (called as post-create and the
+          # Compose start command call them) and the startup of a root bash,
+          # zsh, and fish (login or not) never run a binary that an agent put
+          # in ~/.local/bin, and a root shell keeps a PATH with no /home/vscode
+          # directory. A root shell also keeps its history in /root, so it never
+          # writes through a symlink that an agent put in the history volume.
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer \
+            --filter "label=devcontainer.local_folder=$(/bin/pwd -P)")
+          [ "$(printf '%s\n' "$cid" | grep -c .)" = 1 ] \
+            || { echo "FAIL: expected one running devcontainer"; exit 1; }
+          writable=$(docker exec -u vscode "$cid" /usr/bin/find /usr/local/sbin /usr/local/bin \
+            /usr/sbin /usr/bin/ /sbin/ /bin/ -maxdepth 1 -writable -print)
+          [ -z "$writable" ] || { echo "FAIL: vscode can write to a system PATH entry: $writable"; exit 1; }
+          shadows="iptables ip6tables ipset getent curl chown chmod stat id git cat sed mkdir rm grep awk dircolors lesspipe mesg groups whoami tput"
+          cleanup() {
+            docker exec -u vscode "$cid" /bin/sh -c 'cd "$HOME/.local/bin" && /bin/rm -f '"$shadows" || true
+            docker exec -u vscode "$cid" /bin/sh -c 'cd "$HOME/.shell-history" && for f in .zsh_history .bash_history; do
+              /bin/rm -f "$f"; [ ! -e "$f.aic-smoke" ] || /bin/mv "$f.aic-smoke" "$f"; done' || true
+            docker exec -u root "$cid" /bin/sh -c '/bin/rm -f /tmp/aic-root-plant-* /etc/aic-victim-*' || true
+          }
+          trap cleanup EXIT
+          docker exec -u vscode "$cid" /bin/bash -c '
+            set -euo pipefail
+            for bin in '"$shadows"'; do
+              [ ! -e "$HOME/.local/bin/$bin" ] || { echo "precondition: $HOME/.local/bin/$bin exists"; exit 1; }
+              printf "#!/bin/sh\n[ \"\$(/usr/bin/id -u)\" != 0 ] || : > /tmp/aic-root-plant-%s\n" "$bin" \
+                > "$HOME/.local/bin/$bin"
+              /bin/chmod +x "$HOME/.local/bin/$bin"
+            done
+            cd "$HOME/.shell-history"
+            for f in .zsh_history .bash_history; do
+              [ ! -e "$f" ] || /bin/mv "$f" "$f.aic-smoke"
+              /bin/ln -s "/etc/aic-victim-$f" "$f"
+            done'
+          for helper in "aic-firewall status" "aic-firewall block-metadata" aic-chown-volumes; do
+            # shellcheck disable=SC2086 # the helper and its argument are split on purpose
+            docker exec -u vscode "$cid" /usr/bin/sudo -n /usr/local/bin/$helper >/dev/null \
+              || { echo "FAIL: sudo $helper failed"; exit 1; }
+          done
+          for shell in "/bin/bash -ic" "/bin/bash -lic" "/bin/bash -lc" "/bin/sh -lc" \
+              "/usr/bin/zsh -ic" "/usr/bin/zsh -lic" "/usr/bin/fish -c"; do
+            # shellcheck disable=SC2086 # the shell and its flags are split on purpose
+            path=$(docker exec -u root "$cid" $shell 'printf "%s\n" "$PATH"' 2>/dev/null | tr -d '\r' | tail -n 1)
+            [ -n "$path" ] || { echo "FAIL: a root '$shell' printed no PATH"; exit 1; }
+            case ":$path:" in
+              *:/home/vscode*) echo "FAIL: a root '$shell' has PATH $path"; exit 1 ;;
+            esac
+          done
+          # A non-login, non-interactive bash reads no startup file.
+          docker exec -u root "$cid" /bin/bash -c : || { echo "FAIL: a root bash -c failed"; exit 1; }
+          # An interactive root shell saves its history on exit.
+          for shell in "/bin/bash -i" "/bin/bash -li" "/usr/bin/zsh -i" "/usr/bin/zsh -li"; do
+            # shellcheck disable=SC2086 # the shell and its flags are split on purpose
+            printf 'echo aic-history\n' | docker exec -i -u root "$cid" $shell >/dev/null 2>&1 || true
+          done
+          ran=$(docker exec -u root "$cid" /bin/sh -c '/bin/ls /tmp | /bin/grep "^aic-root-plant-" || true')
+          [ -z "$ran" ] || { echo "FAIL: a root process ran a binary from ~/.local/bin: $ran"; exit 1; }
+          victims=$(docker exec -u root "$cid" /bin/sh -c '/bin/ls /etc | /bin/grep "^aic-victim-" || true')
+          [ -z "$victims" ] || { echo "FAIL: a root shell wrote through a history-volume symlink: $victims"; exit 1; }
+          echo "OK: root helpers and root shells never search the vscode-owned PATH or write vscode-owned history"
 
       - name: Smoke test - Git control paths are read-only mount points
         working-directory: /tmp/proj
@@ -983,8 +1289,8 @@ jobs:
             || { echo "FAIL: direct start did not explain the root .env refusal"; echo "$out"; exit 1; }
           (cd /tmp/proj-b && AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" up)
           rm /tmp/proj-b/.env
-          proj_b_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
-            /tmp/proj-b/.devcontainer/docker-compose.yml)
+          proj_b_name=$(sed -n 's/^AIC_PROJECT_NAME=//p' /tmp/proj-b/.devcontainer/.env)
+          [ -n "$proj_b_name" ] || { echo "FAIL: proj-b .env has no project name"; exit 1; }
           [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$proj_b_name" \
               --filter label=com.docker.compose.service=devcontainer)" ] \
             || { echo "FAIL: aic up did not start proj-b under its managed Compose name"; exit 1; }
@@ -1121,8 +1427,8 @@ jobs:
           '
 
           for workspace in /tmp/proj /tmp/proj-b; do
-            project_name=$(sed -nE 's/^name:[[:space:]]*([^[:space:]]+).*$/\1/p' \
-              "$workspace/.devcontainer/docker-compose.yml")
+            project_name=$(sed -n 's/^AIC_PROJECT_NAME=//p' "$workspace/.devcontainer/.env")
+            [ -n "$project_name" ] || { echo "FAIL: generated .env has no project name for $workspace"; exit 1; }
             expected_user=$(sed -nE 's/^AIC_RUNTIME_USER=([0-9]+:[0-9]+)$/\1/p' \
               "$workspace/.devcontainer/.env")
             [ -n "$expected_user" ] \
@@ -1221,6 +1527,62 @@ jobs:
               *) echo "FAIL: expected a signature (G or U), got $v"; git log -1 --show-signature; exit 1 ;;
             esac
             echo "OK: sandbox signing key wired; managed gitconfig still root-locked; commit signed"
+          '
+
+      - name: Smoke test - managed gitconfig wires only the gh credential helper for GitHub
+        working-directory: /tmp/proj
+        run: |
+          # `gh auth setup-git` cannot write the root-locked global config, so
+          # aic writes the same helper itself, by the absolute path of the
+          # root-owned gh (~/.local/bin is agent-writable and first on PATH).
+          # Assert the exact value list for both URLs, no other credential key,
+          # a still root-locked config, and that git really asks gh (GH_TOKEN
+          # is a dummy) for github.com and nothing for another host.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            cd "$HOME"
+            managed=/etc/aic/user-config/gitconfig
+            perms=$(stat -c "%U:%G %a" "$managed")
+            [ "$perms" = "root:root 444" ] || { echo "FAIL: managed gitconfig not root-locked ($perms)"; exit 1; }
+            [ "$(stat -c "%U %a" /usr/bin/gh)" = "root 755" ] || { echo "FAIL: /usr/bin/gh is not root-owned 0755"; exit 1; }
+            expected=$(printf "\n!/usr/bin/gh auth git-credential")
+            for url in https://github.com https://gist.github.com; do
+              got=$(git config --global --get-all "credential.$url.helper")
+              [ "$got" = "$expected" ] || { echo "FAIL: credential.$url.helper is not the exact gh helper list"; printf "%s\n" "$got" | od -c; exit 1; }
+            done
+            names=$(git config --global --name-only --get-regexp "^(credential|url)\." | sort -u | tr "\n" " ")
+            [ "$names" = "credential.https://gist.github.com.helper credential.https://github.com.helper " ] \
+              || { echo "FAIL: unexpected credential/url keys in managed gitconfig: $names"; exit 1; }
+            out=$(printf "protocol=https\nhost=github.com\n\n" \
+              | GH_TOKEN=aic-smoke-dummy-token GIT_TERMINAL_PROMPT=0 git credential fill)
+            printf "%s\n" "$out" | grep -qx "password=aic-smoke-dummy-token" \
+              || { echo "FAIL: git did not get the github.com credential from gh"; exit 1; }
+            if other=$(printf "protocol=https\nhost=gitlab.com\n\n" \
+                | GH_TOKEN=aic-smoke-dummy-token GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= git credential fill 2>/dev/null); then
+              echo "FAIL: git found a credential for gitlab.com"; exit 1
+            fi
+            case "$other" in *aic-smoke-dummy-token*) echo "FAIL: gh token offered to another host"; exit 1 ;; esac
+            echo "OK: exact gh credential helper for GitHub only; managed gitconfig still root-locked"
+          '
+
+      - name: Smoke test - global Git excludes show shared agent config
+        working-directory: /tmp/proj
+        run: |
+          # An agent can put hooks in .claude/settings.json or .codex/config.toml,
+          # and a host AI tool runs them. The global excludes of the container
+          # must not hide them from `git status`, but must keep local files out.
+          devcontainer exec --workspace-folder . bash -lc '
+            set -euo pipefail
+            repo=$(mktemp -d)
+            git init -q "$repo"
+            for p in .claude/settings.json .codex/config.toml; do
+              if git -C "$repo" check-ignore -q --no-index -- "$p"; then
+                echo "FAIL: global Git excludes hide $p"; exit 1
+              fi
+            done
+            git -C "$repo" check-ignore -q --no-index -- .claude/settings.local.json \
+              || { echo "FAIL: global Git excludes do not ignore .claude/settings.local.json"; exit 1; }
+            echo "OK: shared agent config is visible to Git; settings.local.json is ignored"
           '
 
       - name: CLI test - aic sync warns on / bumps a stale Dockerfile.project base

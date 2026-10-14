@@ -9,6 +9,7 @@
 # Usage (from inside the container):
 #   sudo aic-firewall enable          # apply allowlist (default DROP)
 #   sudo aic-firewall status          # show rules + resolved IPs
+#   sudo aic-firewall auto            # enable only when the project declares it
 #
 # There is no "disable" / "flush" command on purpose: once enabled, the only
 # way to widen the policy is `aic rebuild` from the host. That way the
@@ -26,6 +27,31 @@
 # Per-project extra domains: list one domain per line in
 #   /workspace/.devcontainer/firewall-allowlist
 # (comment lines starting with `#` are ignored).
+#
+# Per-project presets: list one preset name per line in
+#   /workspace/.devcontainer/firewall-presets
+# A preset is a name from the fixed table in preset_domains() below. The hosts
+# come from this root-owned script, never from the repository. An unknown name
+# aborts the change, and the active policy stays the same.
+#
+# Declarative enable: when /workspace/.devcontainer/firewall-enable exists,
+# `auto` enables the allowlist. The managed Compose command runs `auto` on
+# every container start (the rules do not survive a restart), and the
+# container stops when it fails. post-create and postStartCommand run `auto`
+# again, so they wait for that first run. `auto` can only enable: without the
+# marker it does nothing, and it never removes a rule.
+#
+# The three project files are on the read-only /workspace/.devcontainer
+# mount, so the agent in the container cannot change them.
+#
+# Pinned names: the rules allow the addresses that enable resolved. A CDN host
+# (Fastly, CloudFront, ...) gives different valid addresses to different
+# resolvers, often with a TTL of seconds, so a later lookup in the container
+# can get an address that is not in the rules. Thus enable also writes each
+# allowed name with its allowed addresses into a managed block in /etc/hosts.
+# Programs in the container then connect only to addresses that the rules
+# allow. The block never widens the rules: it holds only names that are on the
+# allowlist and addresses that are in the active rules.
 # =============================================================================
 set -euo pipefail
 readonly PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -34,11 +60,6 @@ readonly HOME=/root
 export PATH LC_ALL HOME
 unset CDPATH ENV BASH_ENV XTABLES_LIBDIR RES_OPTIONS LOCALDOMAIN HOSTALIASES
 umask 077
-
-if [ "$(id -u)" -ne 0 ]; then
-  echo "aic-firewall: must run via sudo (the scoped sudoers entry allows it)" >&2
-  exit 1
-fi
 
 DEFAULT_ALLOWLIST=(
   # AI APIs
@@ -71,6 +92,32 @@ DEFAULT_ALLOWLIST=(
 )
 
 EXTRA_FILE="/workspace/.devcontainer/firewall-allowlist"
+PRESETS_FILE="/workspace/.devcontainer/firewall-presets"
+ENABLE_MARKER="/workspace/.devcontainer/firewall-enable"
+RUNTIME_ENV_FILE="/workspace/.devcontainer/.env"
+LOCK_FILE="/run/aic-firewall.flock"
+HOSTS_FILE="/etc/hosts"
+HOSTS_BEGIN="# BEGIN aic-firewall: allowlist names pinned to the allowed addresses (managed)"
+HOSTS_END="# END aic-firewall"
+LOCK_WAIT_SECONDS=180
+
+# The fixed preset table. Keep the names equal to FIREWALL_PRESETS in
+# lib/validate.mjs (tests/test-aic-firewall-presets.sh checks this). Each host
+# is the minimum that the default client of the registry needs. A new host
+# here expands reachability for every project that selects the preset.
+PRESET_NAMES="crates go maven nodejs packagist rubygems semgrep"
+preset_domains() {
+  case "$1" in
+    crates)    printf '%s\n' index.crates.io static.crates.io ;;
+    go)        printf '%s\n' proxy.golang.org sum.golang.org ;;
+    maven)     printf '%s\n' repo.maven.apache.org ;;
+    nodejs)    printf '%s\n' nodejs.org ;;
+    packagist) printf '%s\n' repo.packagist.org ;;
+    rubygems)  printf '%s\n' rubygems.org index.rubygems.org ;;
+    semgrep)   printf '%s\n' semgrep.dev ;;
+    *) return 1 ;;
+  esac
+}
 STATUS_RELAY_HOST="host.docker.internal"
 STATUS_RELAY_PORT=8787
 
@@ -80,14 +127,16 @@ ip6t() { ip6tables -w 5 "$@"; }
 lock_firewall() {
   # Serialize scoped-sudo invocations. The inactive rule/set buffer is safe
   # from traffic, but two simultaneous builders must not mutate the same one.
-  # mkdir is an atomic lock primitive and adds no runtime dependency. /run is
-  # container-ephemeral, so a crash can only require a rebuild (fail closed).
-  local lock_dir=/run/aic-firewall.lock
-  if ! mkdir "$lock_dir" 2>/dev/null; then
-    echo "aic-firewall: another firewall operation is running (or a previous one did not finish)" >&2
+  # The kernel releases a flock when its holder exits, so a crash or a kill
+  # never leaves a stale lock that blocks the enable at the next start. A
+  # caller waits for a running operation (the start-time `auto` resolves DNS
+  # for some seconds), but not forever. /run is root-only, so vscode cannot
+  # plant or hold this file.
+  exec 9>"$LOCK_FILE"
+  if ! flock -w "$LOCK_WAIT_SECONDS" 9; then
+    echo "aic-firewall: another firewall operation is still running after ${LOCK_WAIT_SECONDS}s" >&2
     exit 1
   fi
-  trap 'rmdir /run/aic-firewall.lock 2>/dev/null || true' EXIT
 }
 
 trim() {
@@ -119,6 +168,10 @@ is_prohibited_v4() {
 }
 
 PROHIBITED_RESOLUTION=0
+# The allowlist set of the generation that enable builds. Each address added to
+# it is also recorded with its name for the /etc/hosts pins.
+PIN_SET=""
+PIN_LINES=()
 
 add_resolved_ipv4() {
   local set="$1" description="$2" ip="$3"
@@ -128,6 +181,9 @@ add_resolved_ipv4() {
     return 0
   fi
   ipset add "$set" "$ip/32" -exist
+  if [ -n "$PIN_SET" ] && [ "$set" = "$PIN_SET" ]; then
+    PIN_LINES+=("$ip $description")
+  fi
 }
 
 resolve_domain_into_set() {
@@ -154,16 +210,55 @@ resolve_proxy_into_set() {
   )
 }
 
+# Print the IPv4 members of an ipset, one on each line. Fail on a member that
+# is not a plain IPv4 address or network.
+ipset_members_v4() {
+  local member
+  while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    if ! [[ "$member" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]; then
+      echo "aic-firewall: unexpected member in ipset $1" >&2
+      return 1
+    fi
+    printf '%s\n' "$member"
+  done < <(ipset list "$1" | awk '/^Members:/ {members=1; next} members {print $1}')
+}
+
+# Accept each member of an ipset in a chain, with one exact -d rule each.
+# An iptables set match opens a raw socket to talk to ipset, and that needs
+# CAP_NET_RAW, which the devcontainer drops on purpose ("Can't open socket to
+# ipset"). The set stays the one source of the resolved addresses: the
+# prohibited-range and zero-IP checks, and `status`, read it. Extra arguments
+# (protocol and port) go before -d, so a rule is never wider than the set.
+accept_set_members_v4() {
+  local chain="$1" set="$2" member
+  shift 2
+  local -a members=()
+  mapfile -t members < <(ipset_members_v4 "$set") || return 1
+  # mapfile cannot see a failure of the process substitution; check again.
+  ipset_members_v4 "$set" >/dev/null || return 1
+  for member in "${members[@]}"; do
+    ipt -A "$chain" "$@" -d "$member" -j ACCEPT
+  done
+}
+
 ipset_count() {
   ipset list "$1" | awk '/Number of entries:/ {print $4}'
 }
 
+# The relay mode comes from the generated .devcontainer/.env. The host writes
+# AIC_STATUS_RELAY there from its own marker, and the pre-Docker gate checks
+# that the file matches the host state before each start. The file is on the
+# read-only /workspace/.devcontainer mount, so the agent cannot change it. The
+# value only selects the fixed STATUS_RELAY_HOST:STATUS_RELAY_PORT rule; no
+# host or port comes from the file. Never read the mode from the environment:
+# sudo resets it, and /proc/1/environ (PID 1 runs as vscode) needs
+# CAP_SYS_PTRACE, which the container does not have.
 status_relay_enabled() {
-  # sudo intentionally does not trust a caller-supplied environment here. PID
-  # 1 inherited the managed Compose environment when the container was made.
   local value
-  [ -r /proc/1/environ ] || return 1
-  value="$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^AIC_STATUS_RELAY=//p' | tail -n1)"
+  project_file_present "$RUNTIME_ENV_FILE" || return 1
+  require_regular_project_file "$RUNTIME_ENV_FILE" "runtime environment" || return 1
+  value="$(sed -n 's/^AIC_STATUS_RELAY=//p' "$RUNTIME_ENV_FILE" | tail -n1)" || return 1
   [ "$value" = 1 ]
 }
 
@@ -264,28 +359,194 @@ switch_chain_v6() {
   fi
 }
 
-load_extra_domains() {
-  local set="$1" real line domain
-  [ -e "$EXTRA_FILE" ] || [ -L "$EXTRA_FILE" ] || return 0
-  real=$(realpath -e -- "$EXTRA_FILE" 2>/dev/null || true)
-  if [ "$real" != "$EXTRA_FILE" ] || [ ! -f "$EXTRA_FILE" ] || [ -L "$EXTRA_FILE" ]; then
-    echo "aic-firewall: refusing non-regular or symlinked allowlist: $EXTRA_FILE" >&2
+# --- /etc/hosts pins -----------------------------------------------------------
+# /etc/hosts is a Docker bind mount: a rename cannot replace it, so these
+# functions write it in place. Docker writes it again at each container start.
+hosts_file_writable() {
+  [ -f "$HOSTS_FILE" ] && [ ! -L "$HOSTS_FILE" ] && [ -O "$HOSTS_FILE" ] && [ -w "$HOSTS_FILE" ]
+}
+
+# Print the hosts file without the managed block.
+hosts_without_pins() {
+  awk -v begin="$HOSTS_BEGIN" -v end="$HOSTS_END" '
+    $0 == begin { skip = 1; next }
+    skip && $0 == end { skip = 0; next }
+    !skip { print }
+  ' "$HOSTS_FILE"
+}
+
+# Replace the content of the hosts file with $1. The full content is built
+# first. The write does not truncate first, so the file is never empty: it
+# opens the file without O_TRUNC, writes the new content from offset 0 with one
+# printf, then cuts the old tail. sudo relays signals from the caller (the
+# agent can signal its own `sudo aic-firewall enable`), so the write ignores
+# them; they are restored after it.
+WRITE_SIGNALS="HUP INT QUIT PIPE TERM USR1 USR2 ALRM TSTP"
+write_hosts_file() {
+  local content="$1" rc=0
+  # LC_ALL=C: ${#content} counts bytes.
+  local length="${#content}"
+  # shellcheck disable=SC2086 # a fixed list of signal names
+  trap '' $WRITE_SIGNALS
+  # fd 8: fd 9 holds the lock. <> opens read-write without O_TRUNC.
+  if exec 8<>"$HOSTS_FILE"; then
+    printf '%s' "$content" >&8 || rc=1
+    exec 8>&-
+    [ "$rc" -ne 0 ] || truncate -s "$length" -- "$HOSTS_FILE" || rc=1
+  else
+    rc=1
+  fi
+  # shellcheck disable=SC2086
+  trap - $WRITE_SIGNALS
+  return "$rc"
+}
+
+# Remove the managed block before enable resolves the names. Otherwise the
+# getent lookups read the old pins, and an old address stays pinned for ever.
+unpin_hosts() {
+  hosts_file_writable || return 1
+  local content
+  content=$(hosts_without_pins) || return 1
+  write_hosts_file "$content"$'\n'
+}
+
+# Write the managed block from PIN_LINES ("address name"): one line for each
+# allowed address of each allowlist name.
+pin_hosts() {
+  hosts_file_writable || return 1
+  [ "${#PIN_LINES[@]}" -gt 0 ] || return 0
+  local content pins
+  content=$(hosts_without_pins) || return 1
+  pins=$(printf '%s\n' "${PIN_LINES[@]}" | sort -u -k2,2 -k1,1) || return 1
+  write_hosts_file "$content"$'\n'"$HOSTS_BEGIN"$'\n'"$pins"$'\n'"$HOSTS_END"$'\n'
+}
+
+project_file_present() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+# The project files must be regular files at their exact path: no symlink, also
+# not in a parent directory.
+require_regular_project_file() {
+  local file="$1" label="$2" real
+  real=$(realpath -e -- "$file" 2>/dev/null || true)
+  if [ "$real" != "$file" ] || [ ! -f "$file" ] || [ -L "$file" ]; then
+    echo "aic-firewall: refusing non-regular or symlinked $label: $file" >&2
     return 1
   fi
+}
+
+# Names that reach the host or a managed service of the stack, never a public
+# host. They must not get the all-port allowlist rule or a pin: the socket
+# proxy has its own TCP-2375 rule, and the status relay its own TCP-8787 rule.
+# `*.internal` covers host.docker.internal, gateway.docker.internal,
+# host.containers.internal, and metadata.google.internal.
+MANAGED_SERVICE_NAMES="devcontainer socket-proxy aic-auth-sync aic-seed-sanitizer"
+is_internal_name() {
+  local name="$1" service
+  case "$name" in
+    localhost | *.localhost | *.internal | "$STATUS_RELAY_HOST") return 0 ;;
+  esac
+  for service in $MANAGED_SERVICE_NAMES; do
+    case "$name" in
+      "$service" | *-"$service"-[0-9]*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# The IPv4 addresses that reach the host or a managed service, one on each
+# line: the default gateway, the host-gateway names, and the managed services.
+# The allowlist set must hold none of them, whatever name resolved to them.
+internal_addresses_v4() {
+  ip -4 route show default 2>/dev/null \
+    | awk '{ for (i = 1; i < NF; i++) if ($i == "via") print $(i + 1) }' || true
+  local name
+  for name in "$STATUS_RELAY_HOST" gateway.docker.internal host.containers.internal $MANAGED_SERVICE_NAMES; do
+    getent ahostsv4 "$name" 2>/dev/null | awk '{print $1}' || true
+  done
+}
+
+# Fail when the allowlist set holds an internal address.
+refuse_internal_addresses_v4() {
+  local set="$1" members addr found=0
+  members=$(ipset_members_v4 "$set") || return 1
+  while IFS= read -r addr; do
+    [[ "$addr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || continue
+    if printf '%s\n' "$members" | grep -Fqx -e "$addr" -e "$addr/32"; then
+      echo "aic-firewall: ERROR — an allowlist name resolved to $addr, the host gateway or a managed service; leaving the allowlist policy unchanged." >&2
+      found=1
+    fi
+  done < <(internal_addresses_v4 | sort -u)
+  [ "$found" -eq 0 ]
+}
+
+load_extra_domains() {
+  local set="$1" line domain
+  project_file_present "$EXTRA_FILE" || return 0
+  require_regular_project_file "$EXTRA_FILE" allowlist || return 1
 
   echo "==> aic-firewall: loading extras from $EXTRA_FILE"
   while IFS= read -r line || [ -n "$line" ]; do
     domain=$(trim "${line%%#*}")
     [ -n "$domain" ] || continue
     domain=$(normalize_domain "$domain") || return 1
+    if is_internal_name "$domain"; then
+      echo "aic-firewall: refusing $domain in $EXTRA_FILE: it reaches the host or a managed service, never a public host" >&2
+      return 1
+    fi
     resolve_domain_into_set "$set" "$domain"
   done < "$EXTRA_FILE"
 }
 
+# The repository selects names only. Each name must be in the fixed table;
+# the hosts come from preset_domains(), never from the file.
+load_preset_domains() {
+  local set="$1" line name domain
+  project_file_present "$PRESETS_FILE" || return 0
+  require_regular_project_file "$PRESETS_FILE" "preset list" || return 1
+
+  echo "==> aic-firewall: loading presets from $PRESETS_FILE"
+  while IFS= read -r line || [ -n "$line" ]; do
+    name=$(trim "${line%%#*}")
+    [ -n "$name" ] || continue
+    if ! [[ "$name" =~ ^[a-z0-9-]{1,32}$ ]] || ! preset_domains "$name" >/dev/null; then
+      echo "aic-firewall: unknown firewall preset in $PRESETS_FILE (known: $PRESET_NAMES)" >&2
+      return 1
+    fi
+    for domain in $(preset_domains "$name"); do
+      if is_internal_name "$domain"; then
+        echo "aic-firewall: preset $name has an internal host" >&2
+        return 1
+      fi
+      resolve_domain_into_set "$set" "$domain"
+    done
+  done < "$PRESETS_FILE"
+}
+
 cmd_enable() {
+  lock_firewall
+  enable_policy
+}
+
+# Enable only when the project declares it with the firewall-enable marker.
+# The managed Compose command runs this on every start, and post-create and
+# postStartCommand run it again. A run that finds an active generation leaves
+# it as it is, so the later runs only wait for the first one.
+cmd_auto() {
+  project_file_present "$ENABLE_MARKER" || return 0
+  lock_firewall
+  if [ -n "$(active_chain_v4 OUTPUT)" ]; then
+    echo "==> aic-firewall: already enabled ($ENABLE_MARKER)"
+    return 0
+  fi
+  echo "==> aic-firewall: $ENABLE_MARKER is present"
+  enable_policy
+}
+
+enable_policy() {
   echo "==> aic-firewall: building allowlist..."
 
-  lock_firewall
   ensure_prohibited_set
   # Repair/strengthen the always-on baseline before doing any fallible DNS or
   # staging work. These additions never widen an existing policy.
@@ -349,12 +610,24 @@ cmd_enable() {
   ipset flush "$proxy_set"
   ipset flush "$status_set"
 
+  # Resolve from DNS, not from the pins of an earlier enable. If this enable
+  # fails below, the active rules stay and the names resolve from DNS again:
+  # the reachability can go down, the rules never get wider.
+  local pins_ok=1
+  if ! unpin_hosts; then
+    pins_ok=0
+    echo "aic-firewall: WARNING — cannot write $HOSTS_FILE; allowlist names are not pinned, so a CDN host can resolve to an address that the rules block." >&2
+  fi
+  PIN_SET="$allow_set"
+  PIN_LINES=()
+
   PROHIBITED_RESOLUTION=0
   local d relay=0
   status_relay_enabled && relay=1
   for d in "${DEFAULT_ALLOWLIST[@]}"; do
     resolve_domain_into_set "$allow_set" "$d"
   done
+  load_preset_domains "$allow_set"
   load_extra_domains "$allow_set"
   resolve_proxy_into_set "$proxy_set"
   if [ "$relay" -eq 1 ]; then
@@ -375,6 +648,7 @@ cmd_enable() {
     echo "aic-firewall: ERROR — a name resolved into a prohibited metadata/link-local range; leaving the allowlist policy unchanged." >&2
     exit 1
   fi
+  refuse_internal_addresses_v4 "$allow_set" || exit 1
 
   local count proxy_count status_count
   count=$(ipset_count "$allow_set")
@@ -417,13 +691,13 @@ cmd_enable() {
   done
   # Port 2375 is reachable only at the current compose socket-proxy address,
   # never at an arbitrary destination that happens to listen on that port.
-  ipt -A "$out_chain" -p tcp -m set --match-set "$proxy_set" dst --dport 2375 -j ACCEPT
+  accept_set_members_v4 "$out_chain" "$proxy_set" -p tcp --dport 2375
   # The optional dashboard callback is equally narrow: the host-gateway
   # address receives TCP 8787 only, never general access to host services.
   if [ "$relay" -eq 1 ]; then
-    ipt -A "$out_chain" -p tcp -m set --match-set "$status_set" dst --dport "$STATUS_RELAY_PORT" -j ACCEPT
+    accept_set_members_v4 "$out_chain" "$status_set" -p tcp --dport "$STATUS_RELAY_PORT"
   fi
-  ipt -A "$out_chain" -m set --match-set "$allow_set" dst -j ACCEPT
+  accept_set_members_v4 "$out_chain" "$allow_set"
   ipt -A "$out_chain" -j DROP
 
   prepare_chain_v4 "$in_chain"
@@ -483,8 +757,14 @@ cmd_enable() {
   ipt -P OUTPUT DROP
   ipt -P INPUT DROP
 
+  # Pin after the switch: each pinned address is in the active rules. A failure
+  # here leaves the rules on; only the reachability of CDN hosts goes down.
+  if [ "$pins_ok" -eq 1 ] && ! pin_hosts; then
+    echo "aic-firewall: WARNING — cannot write $HOSTS_FILE; allowlist names are not pinned, so a CDN host can resolve to an address that the rules block." >&2
+  fi
+
   echo "==> aic-firewall: enabled (default DROP, allowlist active; IPv6 blocked)"
-  echo "    To widen: 'aic rebuild' from the host."
+  echo "    To widen: 'aic rebuild' from the host (with .devcontainer/firewall-enable, the new container enables it again)."
 }
 
 # Always-on baseline. Dedicated chains are additive and never flushed; ensuring
@@ -537,11 +817,46 @@ cmd_status() {
   else
     echo "(not created yet — run: sudo aic-firewall enable)"
   fi
+  echo
+  # One line only: the block is in the world-readable hosts file. Keep the
+  # output short, so `status | grep -q` does not end with SIGPIPE.
+  local pins
+  pins=$(awk -v begin="$HOSTS_BEGIN" -v end="$HOSTS_END" '
+    $0 == begin { show = 1; next }
+    $0 == end { show = 0 }
+    show { n++ }
+    END { print n + 0 }
+  ' "$HOSTS_FILE" 2>/dev/null || echo 0)
+  echo "## allowlist names pinned in $HOSTS_FILE: $pins address(es) (the '$HOSTS_END' block)"
+  echo
+  echo "## project firewall files"
+  if project_file_present "$ENABLE_MARKER"; then
+    echo "firewall-enable: present (enabled on every container start)"
+  else
+    echo "firewall-enable: absent (enable by hand)"
+  fi
+  if project_file_present "$PRESETS_FILE"; then
+    echo "firewall-presets: present (available: $PRESET_NAMES)"
+  else
+    echo "firewall-presets: absent (available: $PRESET_NAMES)"
+  fi
 }
 
-case "${1:-}" in
-  enable) cmd_enable ;;
-  block-metadata) cmd_block_metadata ;;
-  status) cmd_status ;;
-  *) echo "Usage: sudo aic-firewall {enable|block-metadata|status}" >&2; exit 1 ;;
-esac
+main() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "aic-firewall: must run via sudo (the scoped sudoers entry allows it)" >&2
+    exit 1
+  fi
+  case "${1:-}" in
+    enable) cmd_enable ;;
+    auto) cmd_auto ;;
+    block-metadata) cmd_block_metadata ;;
+    status) cmd_status ;;
+    *) echo "Usage: sudo aic-firewall {enable|auto|block-metadata|status}" >&2; exit 1 ;;
+  esac
+}
+
+# tests/test-aic-firewall-presets.sh sources this file to test the parsers.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

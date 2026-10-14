@@ -51,7 +51,10 @@ into `.devcontainer/`: the `Dockerfile`, `post-create.py` and its
 ### Other commands
 
 - `aic run CMD ...` runs one command inside the container. It does not open a
-  shell.
+  shell. The command must not start with `-`. You can write `--` before it.
+- `aic up -- --log-level debug` gives a log option to `devcontainer up`. Only
+  `--log-level`, `--log-format`, `--terminal-columns`, and `--terminal-rows`
+  pass. aic refuses every other option, because it can weaken the sandbox.
 - `aic down` stops the container. It does not remove the volumes. To continue,
   run `aic up`.
 
@@ -119,6 +122,9 @@ aic status     # identity, modes, runtime, credential bridge, and volumes
 aic validate   # managed provenance + fully resolved Compose security model
 ```
 
+Each one also has a JSON form for programs. See
+[JSON output](#json-output---json).
+
 ### `aic doctor`
 
 You can run `doctor` before `init`. It examines these items:
@@ -157,15 +163,113 @@ credential bridge. It also works when the daemon is stopped.
 
 ### `aic validate`
 
-You can use `validate` in CI. It never shows a prompt and never records trust.
-It accepts an exact approval that already exists. It gives an exit code that is
-not zero for these problems:
+You can use `validate` in CI. It never shows a prompt, never records trust, and
+never writes `.devcontainer/.env`. It accepts an exact approval that already
+exists. It works in every clone of the repository, at any path, with no
+`aic sync` first: the committed files hold no path-specific value. It gives an
+exit code that is not zero for these problems:
 
-- managed drift
+- managed drift (this includes a changed top-level `name:` line in
+  `docker-compose.yml`)
 - an unsafe `.git` control path
+- a `.devcontainer/.env` that Git tracks (in any letter case)
+- a top-level `name:` in `docker-compose.override.yml` (the project name is
+  managed)
 - a boundary expansion that you did not trust
 - a `COMPOSE_PROJECT_NAME` (in the root `.env` or in the environment) that a
   direct start would use instead of the managed name
+- an `AIC_PROJECT_NAME`, `COMPOSE_ENV_FILES`, or `COMPOSE_DISABLE_ENV_FILE` in
+  the environment (each one can replace the project name in
+  `.devcontainer/.env`)
+- an `AIC_DOCKER_SOCKET`, `AIC_RUNTIME_USER`, `AIC_STATUS_RELAY`,
+  `AIC_STATUS_PROJECT`, or `AIC_STATUS_PROJECT_ID` in the environment (each
+  one can replace a host value in `.devcontainer/.env`)
+
+Because managed drift gives an exit code that is not zero, you can also use
+`aic validate` to find out if `aic sync` would change a managed file.
+
+### JSON output (`--json`)
+
+To get output that a program can read, add `--json` to `aic doctor`,
+`aic status`, `aic validate`, or `aic version`:
+
+```bash
+aic doctor --json
+aic validate --json
+```
+
+- The command does the same checks as without `--json`. The exit code does
+  not change.
+- stdout holds only one JSON object, on one line. The messages and warnings
+  go to stderr. The JSON has no color codes.
+- `aic version --json` does the same update check as `aic version`. It uses
+  the same 24-hour cache, and `AIC_NO_UPDATE_CHECK` and `CI` stop it.
+- A usage error gives no JSON. An unknown flag gives exit code 2 and a message
+  on stderr. The exit codes are in [Stability contract](stability.md#exit-codes).
+
+Each JSON object has these members:
+
+| Member | Value |
+|---|---|
+| `schema` | The version of the JSON shape. The value is `1`. Only a change that is not compatible increments it. |
+| `command` | `doctor`, `status`, `validate`, or `version`. |
+| `ok` | `true` when the exit code is 0, else `false`. |
+| `error` | The message that stopped the command, or `null`. A failed check is not an error: a `doctor` blocker gives `"error": null`. In some failures `error` is `null` and only stderr has the message. |
+
+Each command adds these members:
+
+| Command | Members |
+|---|---|
+| `doctor` | `result` (`ready`, `warnings`, or `blocked`), `warnings` and `failures` (counts), and `checks` (a list of items). |
+| `validate` | `findings` (a list of items). |
+| `status` | `project`, `mode` (`pull` or `build`), `tools` (a list), `shell`, `docker` (`none`, `ro`, `rw`, or `invalid`), `docker_consent` (`present`, `missing`, or `null`), `relay` (`enabled`, `disabled`, or `invalid`), `relay_applied`, `socket`, `runtime_kind`, `bind_source`, `runtime_uid_gid`, `cli_version`, `image` (`match`, `drift`, `build`, or `unrecognized`), `image_pinned`, `docker_available`, `container`, `container_image`, `auth_bridge`, `auth_volume`, and `sessions_volume`. |
+| `version` | `version`, `latest` (the newest version that the update check knows, or `null`), and `update_available`. |
+
+In `status`, a value that aic cannot find is `null`. The Docker states are
+lower case. `not-created` and `unavailable` (Docker is not available) replace
+the text forms.
+
+An item in `checks` or `findings` has three members: `id`, `level`, and
+`message`.
+
+- In `doctor`, `id` is the name of the check, for example `node`,
+  `compose-version`, or `git-control-paths`. One check can give more than one
+  item. `level` is `ok`, `warn`, or `fail`.
+- In `validate`, `id` is the type of the finding. `managed`, `compose`, and
+  `name` (a direct-start project name problem) have the level `fail`.
+  `unsafe`, `docker`, and `volatile` (a host-access expansion that needs
+  trust) have the level `warn`. With an exact approval, `validate` gives exit
+  code 0 and still lists the `warn` items.
+
+Example:
+
+```json
+{"schema":1,"command":"validate","ok":false,"findings":[{"id":"compose","level":"fail","message":"Docker Compose 2.29.7 is too old; aic needs Compose 2.35+ (run aic doctor)"}],"error":"configuration cannot be validated: upgrade Docker Compose to 2.35+ (see 'aic doctor')"}
+```
+
+> **Note:** In a program, use the exit code, `ok`, `id`, and `level`. The
+> text of `message` and `error` can change in a new version.
+
+The [Stability contract](stability.md) lists the stable members and ids, and
+the rules for a new `schema` value.
+
+### The project name and teammates
+
+Each checkout gets a path-unique Compose project name. Thus two checkouts never
+share containers or session volumes. aic writes the name as `AIC_PROJECT_NAME`
+into `.devcontainer/.env`. That file is host state, and Git ignores it. The
+committed `docker-compose.yml` has only this fixed line:
+
+```yaml
+name: ${AIC_PROJECT_NAME:?run aic up or aic sync}
+```
+
+Thus a teammate's `aic sync` in a clone at another path does not change a
+committed file. Do not edit that line, and do not commit `.devcontainer/.env`.
+
+A project from an earlier aic version has the path-specific name in that line.
+Run `aic sync` one time and commit the result. Until then, `aic up`, the editor
+start, and `aic validate` refuse the project.
 
 ## Select the tools for a project
 
@@ -261,7 +365,12 @@ that start. Do one of these:
   Containers.
 
 The initializer also refuses a `COMPOSE_PROJECT_NAME` that the environment of
-the editor exports.
+the editor exports. For the same reason, it refuses these variables in the
+environment of the editor: an `AIC_PROJECT_NAME` that is not the managed name,
+`COMPOSE_ENV_FILES`, and `COMPOSE_DISABLE_ENV_FILE`. It also refuses the host
+values that `.devcontainer/.env` holds: `AIC_DOCKER_SOCKET`,
+`AIC_RUNTIME_USER`, `AIC_STATUS_RELAY`, `AIC_STATUS_PROJECT`, and
+`AIC_STATUS_PROJECT_ID`. Unset them, or start with `aic up`.
 
 ### Use `aic` and VS Code together
 
@@ -279,14 +388,16 @@ Examples:
 - a `Dockerfile.project` for Playwright
 - environment variables for host services
 
-See [Customization](customization.md).
+See [Customization](customization.md). The
+[Stack reference](stack-reference.md) lists the files for each stack.
 
 The optional **aicontainer** Claude Code plugin does this work in a
 conversation:
 
 1. It finds your stack.
 2. It checks whether a headless Linux devcontainer is applicable.
-3. It proposes the files and writes them for you.
+3. It proposes the files from the [Stack reference](stack-reference.md) and
+   writes them for you.
 
 If the `aic` CLI is missing, the plugin offers to install it first. It can
 also set up a project again: it audits an existing `.devcontainer/` and updates

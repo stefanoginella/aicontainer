@@ -14,7 +14,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  activeInterpolations, analyzeResolvedConfig, formatFindings, parseJsonc, safeDiagnostic,
+  activeInterpolations, analyzeResolvedConfig, FIREWALL_PRESETS, firewallPresetsProblems,
+  formatFindings, parseJsonc, safeDiagnostic,
 } from '../lib/validate.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -61,6 +62,8 @@ function scenario(edit = () => {}) {
     statusRelay: '0',
     statusProject: 'fixture',
     statusProjectId: NAME,
+    // The text of docker-compose.override.yml when a case sets hasOverride.
+    overrideText: 'services:\n  devcontainer: {}\n',
   };
   ctx.final = structuredClone(ctx.base);
   ctx.rawFinal = structuredClone(ctx.rawBase);
@@ -92,6 +95,8 @@ const toInput = ctx => ({
   statusRelay: ctx.statusRelay,
   statusProject: ctx.statusProject,
   statusProjectId: ctx.statusProjectId,
+  overrideText: ctx.hasOverride ? ctx.overrideText : undefined,
+  firewallPresetsText: ctx.firewallPresetsText,
 });
 
 const analyze = edit => analyzeResolvedConfig(toInput(scenario(edit)));
@@ -217,6 +222,55 @@ test('unparsable Compose JSON is one finding and stops the analysis', () => {
 
 test('a resolved Compose name other than the expected one is refused', () => {
   expectFinding(analyze(ctx => { ctx.final.name = 'other-project'; }), 'MANAGED', /Compose name must be/);
+});
+
+test('an override that changes the uninterpolated Compose name is refused', () => {
+  // The fixture keeps the managed spelling, normalized by Compose.
+  expectNone(analyze(ctx => { ctx.hasOverride = true; }));
+  // name: ${AIC_PROJECT_NAME:-other} resolves to the expected name while aic
+  // sets the variable, so only the uninterpolated model shows it.
+  for (const raw of ['aic_project_name-other', 'aic_project_name', NAME]) {
+    expectOnly(analyze(ctx => { ctx.hasOverride = true; ctx.rawFinal.name = raw; }),
+      'MANAGED', /override\.yml must not change the top-level Compose name/);
+  }
+});
+
+test('an override that sets a top-level name in any spelling is refused', () => {
+  // Compose normalizes the uninterpolated name, so this spelling has the same
+  // raw name as the managed line. Only the text shows it.
+  const sneaky = 'name: ${AIC_PROJECT_NAME?run}${AIC:+}${UP:+}${OR:+}${AIC:+}${SYNC:+}\nservices: {}\n';
+  for (const text of [sneaky, 'name: ${AIC_PROJECT_NAME:?run aic up or aic sync}\n',
+    'services: {}\nname : x\n', 'services: {}\nname:\n  x\n']) {
+    expectOnly(analyze(ctx => { ctx.hasOverride = true; ctx.overrideText = text; }),
+      'MANAGED', /override\.yml must not set a top-level Compose name/);
+  }
+  // Spellings that a line check cannot read as the key, and an indented root
+  // mapping whose name key hides below column 0.
+  for (const text of ['"name": x\nservices: {}\n', 'services: {}\n? name\n: x\n',
+    'services: {}\n---\n"n\\u0061me": x\n', 'services: {}\n<<: *a\n', '{name: x}\n']) {
+    expectFinding(analyze(ctx => { ctx.hasOverride = true; ctx.overrideText = text; }),
+      'MANAGED', /override\.yml (has top-level YAML that is not a plain key|must start its top-level mapping)/);
+  }
+  expectOnly(analyze(ctx => {
+    ctx.hasOverride = true;
+    ctx.overrideText = '# comment\n services: {}\n name: ${AIC_PROJECT_NAME:-x}\n';
+  }), 'MANAGED', /override\.yml must start its top-level mapping with a plain key at column 0/);
+  // Comments, blank lines, indented content, and plain keys are fine.
+  expectNone(analyze(ctx => {
+    ctx.hasOverride = true;
+    ctx.overrideText = '# x\n\nservices:\n  devcontainer:\n    environment:\n      name: ok\nvolumes: {}\n';
+  }));
+  // The validator CLI reads the override file itself and fails closed without it.
+  const ctx = scenario(c => { c.hasOverride = true; c.overrideText = sneaky; });
+  const result = runCli(ctx);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^MANAGED\tdocker-compose\.override\.yml must not set a top-level Compose name$/m);
+  fs.rmSync(path.join(ctx.root, '.devcontainer', 'docker-compose.override.yml'));
+  const args = runCli.lastArgs;
+  assert.ok(args, 'runCli did not record its arguments');
+  const missing = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8' });
+  assert.notEqual(missing.status, 0, 'the validator ran without the override file');
+  assert.equal(missing.stdout, '');
 });
 
 test('a docker-compose.yml that differs from the template is drift', () => {
@@ -422,13 +476,50 @@ function runCli(ctx, extra = []) {
     fs.writeFileSync(path.join(dir, name), text);
     return path.join(dir, name);
   };
+  if (ctx.hasOverride) {
+    fs.writeFileSync(path.join(ctx.root, '.devcontainer', 'docker-compose.override.yml'), ctx.overrideText);
+  }
+  if (ctx.firewallPresetsText !== undefined) {
+    fs.writeFileSync(path.join(ctx.root, '.devcontainer', 'firewall-presets'), ctx.firewallPresetsText);
+  }
   const args = [
     file('dev'), file('template'), file('base'), file('expected'), file('final'), file('noenv'),
     file('rawBase'), file('rawFinal'), ctx.root, NAME, ctx.hasOverride ? '1' : '0',
     ctx.runtimeUser, ctx.statusRelay, ctx.statusProject, ctx.statusProjectId, ...extra,
   ];
+  runCli.lastArgs = args;
   return spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8' });
 }
+
+test('firewall-presets: known preset names have no findings and need no trust', () => {
+  // A preset only adds fixed hosts to the opt-in allowlist, exactly like
+  // firewall-allowlist, so a selection is not a trust finding.
+  expectNone(analyze(ctx => {
+    ctx.firewallPresetsText = '# registries\ncrates\n  go  # module proxy\r\n\n' + FIREWALL_PRESETS.join('\n');
+  }));
+  expectNone(analyze(ctx => { ctx.firewallPresetsText = ''; }));
+});
+
+test('firewall-presets: an unknown name or a host is refused and cannot be trusted', () => {
+  for (const line of ['evil.example.com', 'Go', 'crates io', 'go,crates', '../crates', 'x'.repeat(40)]) {
+    expectOnly(analyze(ctx => { ctx.firewallPresetsText = `crates\n${line}\n`; }),
+      'MANAGED', /^\.devcontainer\/firewall-presets line 2 is not a known firewall preset; use one of: crates, go, /);
+  }
+  // The diagnostic never echoes the raw line, so it cannot carry terminal controls.
+  const [finding] = analyze(ctx => { ctx.firewallPresetsText = '\u001b]8;;http://x\u0007go\n'; });
+  assert.equal(finding.kind, 'MANAGED');
+  assert.doesNotMatch(finding.message, /http|\u001b|\\u001b/);
+  assert.deepEqual(firewallPresetsProblems(undefined), ['.devcontainer/firewall-presets could not be read']);
+});
+
+test('firewall-presets: the CLI reads the project file', () => {
+  const ok = runCli(scenario(ctx => { ctx.firewallPresetsText = 'crates\nnodejs\n'; }));
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(ok.stdout, '');
+  const bad = runCli(scenario(ctx => { ctx.firewallPresetsText = 'pypi-mirror.example\n'; }));
+  assert.equal(bad.status, 0, bad.stderr);
+  assert.match(bad.stdout, /^MANAGED\t\.devcontainer\/firewall-presets line 1 is not a known firewall preset/m);
+});
 
 test('the CLI prints one TAB-separated finding per line and exits 0', () => {
   const clean = runCli(scenario());

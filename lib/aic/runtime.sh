@@ -170,7 +170,9 @@ docker_socket_bind_source () {
 }
 
 # AIC_DOCKER_SOCKET is the bind source for the daemon, not the host socket that
-# the Docker CLI talks to.
+# the Docker CLI talks to. AIC_PROJECT_NAME is the value of the managed Compose
+# name line (AIC_COMPOSE_NAME_LINE). aic exports it here, so the value that the
+# environment or a stale .env holds never wins for an aic command.
 export_runtime_environment () {
   local socket
   socket="$(resolve_docker_socket)" || return 1
@@ -185,8 +187,21 @@ export_runtime_environment () {
   AIC_STATUS_RELAY="$(status_relay_mode)" || return 1
   AIC_STATUS_PROJECT="$(expected_project_label)"
   AIC_STATUS_PROJECT_ID="$(expected_project_name)"
+  AIC_PROJECT_NAME="$AIC_STATUS_PROJECT_ID"
   export AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY \
-    AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID
+    AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID AIC_PROJECT_NAME
+}
+
+# Run the Dev Containers CLI without the .devcontainer/.env values that
+# export_runtime_environment() exported for aic's own Compose calls. Compose in
+# the CLI then reads them from .devcontainer/.env, and its initializeCommand
+# child (`aic initialize`) inherits none of them: that child refuses each one
+# it inherits (check_devcontainer_project_name()). AIC_PROJECT_NAME stays
+# pinned (pin_compose_project_name()).
+# shellcheck disable=SC2154 # aic_runtime_env_keys is set in aic
+without_runtime_environment () {
+  # shellcheck disable=SC2086 # the key list is split on purpose
+  ( unset $aic_runtime_env_keys; exec "$@" )
 }
 
 # A repository must not be able to opt itself into a host callback. The host
@@ -229,6 +244,10 @@ read_applied_status_relay () {
   if [ "${value:-0}" = 1 ]; then printf '1\n'; else printf '0\n'; fi
 }
 
+# .devcontainer/.env is generated host state: write_runtime_environment_file()
+# writes it, and validate_runtime_environment_file() compares its exact content.
+# It holds AIC_PROJECT_NAME, the path-unique name that the committed Compose
+# name line reads, so a clone at another path writes its own value.
 write_runtime_environment_file () {
   local file=".devcontainer/.env" tmp
   export_runtime_environment || die "could not generate the managed host runtime environment"
@@ -237,9 +256,9 @@ write_runtime_environment_file () {
     die "$file must be a regular file, not a symlink"
   fi
   tmp="$(mktemp ".devcontainer/.aic-env.XXXXXX")"
-  printf 'AIC_DOCKER_SOCKET=%s\nAIC_RUNTIME_USER=%s\nAIC_STATUS_RELAY=%s\nAIC_STATUS_PROJECT=%s\nAIC_STATUS_PROJECT_ID=%s\n' \
+  printf 'AIC_DOCKER_SOCKET=%s\nAIC_RUNTIME_USER=%s\nAIC_STATUS_RELAY=%s\nAIC_STATUS_PROJECT=%s\nAIC_STATUS_PROJECT_ID=%s\nAIC_PROJECT_NAME=%s\n' \
     "$AIC_DOCKER_SOCKET" "$AIC_RUNTIME_USER" "$AIC_STATUS_RELAY" \
-    "$AIC_STATUS_PROJECT" "$AIC_STATUS_PROJECT_ID" > "$tmp"
+    "$AIC_STATUS_PROJECT" "$AIC_STATUS_PROJECT_ID" "$AIC_PROJECT_NAME" > "$tmp"
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$file"
 }
@@ -252,7 +271,31 @@ validate_runtime_environment_file () {
 AIC_RUNTIME_USER=$AIC_RUNTIME_USER
 AIC_STATUS_RELAY=$AIC_STATUS_RELAY
 AIC_STATUS_PROJECT=$AIC_STATUS_PROJECT
-AIC_STATUS_PROJECT_ID=$AIC_STATUS_PROJECT_ID"
+AIC_STATUS_PROJECT_ID=$AIC_STATUS_PROJECT_ID
+AIC_PROJECT_NAME=$AIC_PROJECT_NAME"
   actual="$(cat "$file" 2>/dev/null || true)"
   [ "$actual" = "$expected" ]
+}
+
+# Return 0 when Git tracks .devcontainer/.env, 1 when it does not, and 2 when
+# the check cannot run. The file is host state, and the managed .gitignore
+# excludes it; a committed copy gives every other clone the host values and
+# the project name of this checkout. The pathspec ignores case: on a
+# case-insensitive volume, .devcontainer/.ENV is the same file. Without Git,
+# or without a .git directory, nothing is tracked. Any Git error is 2, so the
+# callers fail closed. ls-files exits 0 whether or not the pathspec matches
+# (only --error-unmatch makes no-match an error, and then a no-match and a
+# real error cannot be told apart), so the output decides. core.fsmonitor is
+# off, so the query cannot run a program that the Git config names. Call this
+# only when git_control_path_problems() is empty: a planted .git/commondir
+# would make Git read the config of another directory.
+runtime_environment_file_tracked () {
+  local out
+  command -v git >/dev/null 2>&1 || return 1
+  [ -e .git ] || [ -L .git ] || return 1
+  out="$(git --git-dir=.git --work-tree=. -c core.fsmonitor=false \
+      ls-files -z -- ':(icase).devcontainer/.env' 2>/dev/null | tr '\0' '\n'
+    exit "${PIPESTATUS[0]}")" || return 2
+  [ -n "$out" ] || return 1
+  return 0
 }

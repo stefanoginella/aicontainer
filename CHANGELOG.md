@@ -13,6 +13,173 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-14
+
+### Fixed
+
+- **The agent-status relay works with the firewall on.** `aic-firewall` read
+  the relay mode from the environment of PID 1, which root cannot read without
+  `SYS_PTRACE`, so it never added the TCP-8787 rule. It now reads the mode from
+  the generated `.devcontainer/.env` on the read-only mount. (aic-firewall)
+
+- **A firewalled container no longer waits about 90 s for the AI-tool
+  refresh.** With `firewall-enable`, Claude Code and Codex keep the baked
+  version: their updates need `downloads.claude.ai` and `releases.openai.com`,
+  which the allowlist does not hold. OpenCode still upgrades. (post-create.py)
+
+- **The managed `.devcontainer/README.md` no longer suggests `lefthook
+  install` in the container.** The container mounts `.git/hooks` read-only; the
+  README now links to "Git hooks on the host". (template)
+
+### Security
+
+- **Root processes in the container no longer search agent-writable
+  directories.** The image `PATH` starts with `~/.local/bin`, and Docker gives
+  it to root processes too. A root login or interactive shell now gets a PATH
+  with only system directories, so its startup no longer runs an `id`,
+  `mesg`, or `dircolors` that an agent put there. (Dockerfile, .zshrc,
+  post-create.py, aic-lock-user-config)
+
+- **A root shell no longer writes its history to the shared history
+  volume.** That volume is vscode-owned, so an agent symlink there made root
+  write to any file. Root history now stays in `/root`. (Dockerfile, .zshrc)
+
+- **A direct start refuses `AIC_DOCKER_SOCKET`, `AIC_RUNTIME_USER`, and
+  `AIC_STATUS_*` in the environment.** Each one wins over the host value in
+  `.devcontainer/.env`, so an editor that inherits one could mount another
+  socket or change the relay consent. `aic up` and `aic rebuild` no longer
+  pass them to Dev Containers. (aic)
+
+- **`aic status` calls sudo and the firewall helper by absolute path.** An
+  agent could put a `sudo` in `~/.local/bin` that reported the firewall as on.
+  Post-create calls its sudo helpers by absolute path too. (aic,
+  post-create.py)
+
+## [0.12.0] - 2026-10-14
+
+### Added
+
+- **`aic doctor`, `aic up`, and `aic rebuild` warn when host Git can run code
+  that the agent changes.** The new doctor check `git-hooks` warns when
+  `core.hooksPath`, a hook symlink, or the program of `core.fsmonitor` or
+  `core.sshCommand` is in the worktree. aic checks only where these files are,
+  never what they do, and it never runs a hook. The warning never stops a
+  start. See "Git hooks on the host" in the security guide. (aic)
+
+- **`doctor`, `status`, `validate`, and `version` take `--json`.** Each prints
+  one JSON object with a `schema` version on stdout; checks, findings, and
+  exit codes stay the same. `aic version` now refuses arguments other than
+  `--json`. (aic)
+
+- **A committed `.devcontainer/firewall-enable` turns the firewall on at every
+  start.** You no longer run `sudo aic-firewall enable` after each start. If
+  the firewall cannot be enabled, the container stops. (aic-firewall,
+  docker-compose.yml, devcontainer.json, post-create.py)
+
+- **Opt-in allowlist presets for crates.io, Go, RubyGems, Packagist, Maven
+  Central, Node.js, and Semgrep.** List preset names in
+  `.devcontainer/firewall-presets`; the hosts are fixed in the image, and the
+  default allowlist does not change. (aic-firewall, validate.mjs)
+
+- **A stability contract tells tools what stays the same across releases.**
+  It lists the stable commands, flags, exit codes, JSON ids, control files,
+  and in-container paths, and the 0.x release and breaking-change policy. A
+  test keeps it equal to the code. (docs)
+
+- **A stack reference lists the project-owned files for each stack.** It gives
+  copy-ready snippets for Node.js, Python, Go, Rust, Ruby, PHP, Java, and C and
+  C++, in a fixed structure that tools can read. The `/aicontainer:setup`
+  plugin now reads it. (docs, Claude Code plugin)
+
+### Changed
+
+- **Breaking: a usage error now exits 2, not 1.** An unknown command, flag, or
+  argument, or a missing or bad value, gives exit code 2; a refusal or a
+  blocker still gives 1. If a script reads exit code 1 as "bad call", read 2
+  instead. (aic)
+
+- **Breaking: every command refuses arguments that it does not take.** Before,
+  `down`, `upgrade`, `preflight`, `help`, and `shell` ignored them, and
+  `aic shell` gave them to the shell; use `aic run CMD ...` to run a command.
+  The command of `aic run` must come first and must not start with `-`. (aic)
+
+- **Breaking: `aic up` and `aic rebuild` pass options to `devcontainer up` only
+  after `--`, and only the log options.** Other options, such as `--mount`,
+  `--remote-env`, or `--override-config`, could weaken the sandbox and are now
+  refused. Write `aic up -- --log-level debug` instead of
+  `aic up --log-level debug`. (aic)
+
+- **`aic destroy` without `--yes` and a terminal says how to confirm.** It
+  still removes nothing and exits 1; the message now says to pass `--yes`.
+  (aic)
+
+- **Git in the container now shows shared `.claude/` and `.codex/` files.**
+  The global ignore list of the image ignored both directories, so
+  `.claude/settings.json`, `.claude/skills/`, `.codex/config.toml`, and the
+  agent's changes to them did not show in `git status`. Of the agent files, it
+  now ignores only `.claude/settings.local.json`,
+  `.claude/agent-memory-local/`, `.claude/worktrees/`, and `CLAUDE.local.md`.
+  Review these files before you commit them, or before you run an AI tool on
+  the host: they can hold hooks.
+  (Dockerfile)
+
+### Fixed
+
+- **`sudo aic-firewall enable` works in the devcontainer again.** It failed
+  with "Can't open socket to ipset", because its rules needed `NET_RAW`, which
+  the container drops. The rules no longer need it. `enable` also pins each
+  allowlist name to its allowed addresses in `/etc/hosts`: a CDN host such as
+  `index.crates.io` or `pypi.org` gives other addresses to other resolvers,
+  and a later lookup timed out on an address that the rules block.
+  (aic-firewall)
+
+- **`firewall-allowlist` refuses the host gateway and the managed services.**
+  `host.docker.internal`, other `*.internal` and `localhost` names,
+  `socket-proxy`, the other managed service names, and any entry that resolves
+  to the host gateway or a managed service now stop the enable. Before, such
+  an entry got the all-port allowlist rule. (aic-firewall)
+
+## [0.11.0] - 2026-10-13
+
+### Changed
+
+- **The committed Compose file no longer holds a path hash.** Its top-level
+  name is now a fixed line that reads `AIC_PROJECT_NAME` from the gitignored
+  `.devcontainer/.env`, so a teammate's `aic sync` does not change it. Run
+  `aic sync` one time and commit the result; until then, every start refuses
+  the old line. (aic, docker-compose.yml)
+
+- **A direct start refuses `AIC_PROJECT_NAME`, `COMPOSE_ENV_FILES`, and
+  `COMPOSE_DISABLE_ENV_FILE` in the environment.** Each one could replace the
+  project name that `.devcontainer/.env` holds. A Git-tracked
+  `.devcontainer/.env` is now a finding too. (aic)
+
+- **`docker-compose.override.yml` can no longer set the Compose project
+  name.** The project name is managed; validation refuses a top-level `name:`
+  in the override in any spelling. (aic, validate.mjs)
+
+### Fixed
+
+- **`git push` over HTTPS to GitHub now works with your container `gh` login.**
+  The managed Git config now sets the `gh` credential helper for `github.com`
+  and `gist.github.com`. Other hosts still get no helper. (post-create.py,
+  aic-lock-user-config)
+
+- **Hooks, MCP servers, and `docker exec` now find `node` without a shell.**
+  The default Node of fnm (`node`, `npm`, `npx`) is now the last entry on the
+  image `PATH`. A shell in the container still uses the `.nvmrc` version
+  first. (Dockerfile)
+
+- **`aic validate` passes in CI and in clones at other paths.** It no longer
+  needs a sync first, and it does not write `.devcontainer/.env`. (aic)
+
+- **`aic doctor` no longer runs host Git when the Git control paths are
+  unsafe.** It ran `git rev-parse` before it checked them, so a planted
+  `.git/commondir` made host Git read the config of another directory.
+  (aic)
+
+## [0.10.0] - 2026-10-12
+
 ### Security
 
 - **Planted Claude rules no longer survive a rebuild.** Each create empties
@@ -172,6 +339,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (post-create.py, aic)
 
 ### Fixed
+
+- **A `p10k.zsh` overlay no longer shows a `mkdir` error at the first prompt.**
+  A `p10k configure` config turns on instant prompt, which needs a writable
+  cache. The shell caches stay root-owned, so the managed zsh startup now turns
+  instant prompt off. (.zshrc)
 
 - **A project now keeps one identity whatever letter case you type in its path.**
   On macOS, typing `~/projects/app` for the folder `~/Projects/App` gave a
@@ -877,7 +1049,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Initial release: a sandboxed devcontainer for Claude Code and Codex.** Runs
   them in bypass / auto-approve mode.
 
-[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/stefanoginella/aicontainer/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/stefanoginella/aicontainer/compare/v0.12.0...v0.12.1
+[0.12.0]: https://github.com/stefanoginella/aicontainer/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/stefanoginella/aicontainer/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/stefanoginella/aicontainer/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/stefanoginella/aicontainer/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/stefanoginella/aicontainer/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/stefanoginella/aicontainer/compare/v0.8.0...v0.8.1

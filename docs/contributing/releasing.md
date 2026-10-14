@@ -70,7 +70,8 @@ gates fail it.
 - If a plain `npm version` already ran and the bump commit is still
   **local**, do these steps:
   1. Run `node scripts/promote-changelog.mjs` by hand.
-  2. Run `git commit --amend` to add the promoted `CHANGELOG.md` to the commit.
+  2. Run `git add CHANGELOG.md docs/user/stack-reference.md`, then
+     `git commit --amend`, to add the promoted files to the commit.
   3. Run `git tag -f -a vX.Y.Z -m X.Y.Z`.
   4. Push.
 
@@ -84,6 +85,10 @@ gates fail it.
 - **major**: you removed a flag, changed the default behavior, or changed the
   structure of the `.devcontainer/` files so that `aic sync` breaks for
   existing projects.
+
+While the version is 0.x, a breaking change takes a **minor** bump, as the
+earlier releases did. The [Stability contract](../user/stability.md) states
+this policy for tools. Keep the page and this section aligned.
 
 ## The changelog and its lifecycle scripts
 
@@ -102,7 +107,14 @@ lifecycle scripts, unless they are suppressed (see the warning above):
   - renames `[Unreleased]` to `## [X.Y.Z] - <date>`,
   - opens a new, empty `[Unreleased]`,
   - fixes the compare links,
-  - runs `git add` on `CHANGELOG.md`, so it goes into the bump commit.
+  - writes the new version into each `(since Unreleased)` marker in
+    `docs/user/stack-reference.md`,
+  - runs `git add` on `CHANGELOG.md` and the stack reference, so they go into
+    the bump commit.
+
+When a change adds a feature that a stack-reference snippet uses, mark the
+item `(since Unreleased)` in the same commit. Tools that read the page from
+`main` use the markers to skip items that the installed aic does not have.
 
 `promote-changelog.mjs` only relabels the notes that you wrote. It never
 generates content.
@@ -226,6 +238,13 @@ Write `[Unreleased]` bullets so that a reader can scan them quickly:
   parenthetical at the end, for example `(aic, post-create.py)`.
 - Released `## [X.Y.Z]` sections are immutable. Do not rewrite a shipped
   section, because the GitHub Release renders from it.
+- A breaking change to an item of the
+  [Stability contract](../user/stability.md) goes under `### Changed` (or
+  `### Security` for a security fix). Start its bold headline with
+  `Breaking:`, and give the step that the user does, for example "Run
+  `aic sync` one time and commit the result." Update the stability page in
+  the same commit. `tests/test-aic-stability-contract.mjs` checks its lists
+  against the code.
 
 ## Fix a bad release
 

@@ -42,6 +42,9 @@ unset _aic_path _aic_xdg_cache
 # Shell history → persistent global volume (shared across all aicontainer
 # projects on this host).
 export HISTFILE=/home/vscode/.shell-history/.zsh_history
+# A root shell keeps its history in /root: the history volume is vscode-owned,
+# and an agent symlink there would make root write to any file.
+(( EUID )) || HISTFILE=/root/.zsh_history
 export HISTSIZE=50000
 export SAVEHIST=50000
 setopt SHARE_HISTORY
@@ -51,6 +54,9 @@ setopt SHARE_HISTORY
 # cd hook on the root-owned binary, not on an fnm earlier in PATH.
 fnm() { /usr/local/bin/fnm "$@" }
 eval "$(/usr/local/bin/fnm env --use-on-cd --shell zsh)"
+# A root shell (docker exec -u root) searches only system directories: the
+# image PATH and the fnm Node directories are vscode-owned.
+(( EUID )) || PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # VS Code terminals open commit messages in the editor. This replaces the base
 # image's global zshrc snippet, which this shell does not read.
@@ -71,3 +77,8 @@ fi
 # auto-forwarded.
 [[ ! -r /etc/aic/user-config/shell/p10k.zsh ]] || source /etc/aic/user-config/shell/p10k.zsh
 [[ ! -r /etc/aic/user-config/shell/rc.zsh ]] || source /etc/aic/user-config/shell/rc.zsh
+# p10k instant prompt writes a cache that a later startup sources, so it needs
+# a writable cache directory. The startup caches stay root-owned (see above),
+# and the write fails with a mkdir error at the first prompt. p10k reads this
+# setting at the first prompt, so it wins over a `p10k configure` overlay.
+typeset -g POWERLEVEL9K_INSTANT_PROMPT=off

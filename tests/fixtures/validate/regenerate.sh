@@ -22,8 +22,9 @@ trap 'rm -rf "$TMP"' EXIT
 export DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
 export HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" XDG_CACHE_HOME="$TMP/cache"
 export XDG_CONFIG_HOME="$TMP/config" CI=1 AIC_NO_UPDATE_CHECK=1 AIC_HOME="$ROOT"
-unset COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_FILE TZ \
-  AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID
+unset COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_FILE COMPOSE_ENV_FILES \
+  COMPOSE_DISABLE_ENV_FILE TZ AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY \
+  AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID AIC_PROJECT_NAME
 mkdir -p "$HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
 
 NAME=aic-fixture-0123456789ab
@@ -32,8 +33,8 @@ mkdir -p "$project"
 git -C "$project" init -q
 (cd "$project" && "$ROOT/aic" init --with claude-code,codex,opencode --shell zsh >/dev/null)
 project=$(cd "$project" && /bin/pwd -P)
-generated=$(sed -n 's/^name: *//p' "$project/.devcontainer/docker-compose.yml")
-[ -n "$generated" ] || { echo "no Compose name in the generated project" >&2; exit 1; }
+generated=$(sed -n 's/^AIC_PROJECT_NAME=//p' "$project/.devcontainer/.env")
+[ -n "$generated" ] || { echo "no Compose name in the generated .env" >&2; exit 1; }
 
 # The constant host state that the fixtures encode (see .devcontainer/.env).
 cat > "$project/.devcontainer/.env" <<ENV
@@ -42,10 +43,12 @@ AIC_RUNTIME_USER=1000:1000
 AIC_STATUS_RELAY=0
 AIC_STATUS_PROJECT=fixture
 AIC_STATUS_PROJECT_ID=$NAME
+AIC_PROJECT_NAME=$NAME
 ENV
 
+# Like aic, export the name: the installed template has no .env next to it.
 compose() {
-  (cd "$project" && HOME=/home/fixture docker compose --profile '*' "$@")
+  (cd "$project" && HOME=/home/fixture AIC_PROJECT_NAME="$NAME" docker compose --profile '*' "$@")
 }
 compose -f .devcontainer/docker-compose.yml config --format json > "$TMP/base.json"
 compose -f "$ROOT/template/docker-compose.pull.yml" config --format json > "$TMP/expected.json"

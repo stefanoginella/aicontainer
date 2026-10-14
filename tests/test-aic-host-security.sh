@@ -13,7 +13,8 @@ mkdir -p "$HOME"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # A developer's exported name would make every direct-start check below refuse.
-unset COMPOSE_PROJECT_NAME
+unset COMPOSE_PROJECT_NAME AIC_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE \
+  AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID
 
 help=$(AIC_NO_UPDATE_CHECK=1 "$ROOT/aic" help)
 [ "$(printf '%s\n' "$help" | grep -c '^  AIC_NO_OVERRIDE_SCAN')" = "1" ] \
@@ -264,13 +265,146 @@ new_project() {
     "$ROOT/aic" init --with codex --shell zsh >/dev/null)
 }
 
+# The committed Compose file holds no path-specific value: its one top-level
+# name line reads AIC_PROJECT_NAME, which aic writes into the gitignored,
+# host-generated .devcontainer/.env. managed_name prints that value.
+# shellcheck disable=SC2016 # literal Compose text
+NAME_LINE='name: ${AIC_PROJECT_NAME:?run aic up or aic sync}'
+managed_name() {
+  sed -n 's/^AIC_PROJECT_NAME=//p' "$1/.devcontainer/.env"
+}
+
 # The managed project name is path-unique even for equal basenames.
 new_project "$TMP/one/api"
 new_project "$TMP/two/api"
-name1=$(sed -n 's/^name:[[:space:]]*//p' "$TMP/one/api/.devcontainer/docker-compose.yml")
-name2=$(sed -n 's/^name:[[:space:]]*//p' "$TMP/two/api/.devcontainer/docker-compose.yml")
+name1=$(managed_name "$TMP/one/api")
+name2=$(managed_name "$TMP/two/api")
 [ -n "$name1" ] && [ -n "$name2" ] && [ "$name1" != "$name2" ] \
   || fail "same-basename projects did not get unique Compose names"
+# The name is aic-<label>-<12 hex of sha256(canonical path)>, and it lives only
+# in the gitignored .env. The committed Compose file holds the exact managed
+# name line once, so two checkouts commit the same file.
+for dir in "$TMP/one/api" "$TMP/two/api"; do
+  hash=$(printf '%s' "$(cd "$dir" && /bin/pwd -P)" | shasum -a 256 | cut -c1-12)
+  [ "$(managed_name "$dir")" = "aic-api-$hash" ] \
+    || fail "the generated project name is not the path-unique hash of $dir"
+  [ "$(grep -cE '^name[[:space:]]*:' "$dir/.devcontainer/docker-compose.yml")" = "1" ] \
+    && grep -Fqx "$NAME_LINE" "$dir/.devcontainer/docker-compose.yml" \
+    || fail "the committed Compose file does not hold exactly the managed name line"
+  grep -Fq "$(managed_name "$dir")" "$dir/.devcontainer/docker-compose.yml" \
+    && fail "the committed Compose file holds the path-specific project name"
+done
+cmp -s "$TMP/one/api/.devcontainer/docker-compose.yml" "$TMP/two/api/.devcontainer/docker-compose.yml" \
+  || fail "the committed Compose file depends on the checkout path"
+for compose in "$ROOT/template/docker-compose.pull.yml" "$ROOT/template/docker-compose.build.yml"; do
+  [ "$(grep -cE '^name[[:space:]]*:' "$compose")" = "1" ] && grep -Fqx "$NAME_LINE" "$compose" \
+    || fail "$(basename "$compose") does not hold exactly the managed name line"
+done
+# The name line fails without the variable. -p alone does not help, so every
+# aic call on the trusted template must set AIC_PROJECT_NAME itself.
+(cd "$TMP" && env -u AIC_PROJECT_NAME docker compose -p "$name1" \
+    -f "$ROOT/template/docker-compose.pull.yml" config -q >/dev/null 2>&1) \
+  && fail "the managed name line resolved without AIC_PROJECT_NAME"
+(cd "$TMP" && AIC_PROJECT_NAME="$name1" docker compose -p "$name1" \
+    -f "$ROOT/template/docker-compose.pull.yml" config -q >/dev/null 2>&1) \
+  || fail "the trusted template did not resolve with AIC_PROJECT_NAME"
+(cd "$TMP/one/api" && docker compose -f .devcontainer/docker-compose.yml config --format json \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).name))' \
+    | grep -qx "$name1") \
+  || fail "Compose did not read the project name from the generated .devcontainer/.env"
+
+# A teammate's clone at another path: 'aic validate' passes with no sync and no
+# write, and 'aic sync' there changes no committed file. Git must not track the
+# host-generated .env.
+git -C "$TMP/one/api" add -A
+git -C "$TMP/one/api" -c user.name=aic-test -c user.email=aic-test@example.invalid \
+  commit -qm init
+git -C "$TMP/one/api" ls-files --error-unmatch .devcontainer/.env >/dev/null 2>&1 \
+  && fail "the managed .gitignore did not keep .devcontainer/.env out of the commit"
+git clone -q "$TMP/one/api" "$TMP/clone/api"
+[ ! -e "$TMP/clone/api/.devcontainer/.env" ] || fail "the clone received the host-generated .env"
+out=$(cd "$TMP/clone/api" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1) \
+  || fail "validate refused a clean clone at another path: $out"
+[ ! -e "$TMP/clone/api/.devcontainer/.env" ] || fail "validate wrote .devcontainer/.env"
+(cd "$TMP/clone/api" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1) \
+  || fail "sync failed in a clone at another path"
+[ -z "$(git -C "$TMP/clone/api" status --porcelain)" ] \
+  || fail "sync in a clone at another path changed a committed file: $(git -C "$TMP/clone/api" status --porcelain)"
+clone_name=$(managed_name "$TMP/clone/api")
+[ -n "$clone_name" ] && [ "$clone_name" != "$name1" ] \
+  || fail "the clone did not get its own path-unique project name"
+out=$(cd "$TMP/clone/api" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1) \
+  || fail "validate refused a synced clone: $out"
+# A tracked .env is a managed finding in validate and in doctor.
+git -C "$TMP/clone/api" add -f .devcontainer/.env
+set +e
+out=$(cd "$TMP/clone/api" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)
+tracked_rc=$?
+set -e
+[ "$tracked_rc" -ne 0 ] || fail "validate accepted a .devcontainer/.env that Git tracks"
+echo "$out" | grep -q '\.devcontainer/\.env is tracked by Git' \
+  || fail "validate did not name the tracked .devcontainer/.env"
+out=$(cd "$TMP/clone/api" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" doctor 2>&1) \
+  && fail "doctor reported ready with a tracked .devcontainer/.env"
+echo "$out" | grep -q '^FAIL  \.devcontainer/\.env is tracked by Git' \
+  || fail "doctor did not report the tracked .devcontainer/.env"
+git -C "$TMP/clone/api" rm -q --cached .devcontainer/.env
+(cd "$TMP/clone/api" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null 2>&1) \
+  || fail "validate still refused the .env after git rm --cached"
+clone_validate() {
+  (cd "$TMP/clone/api" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$@" "$ROOT/aic" validate 2>&1)
+}
+# Another spelling of the name is the same file on a case-insensitive volume
+# (macOS), and a commit from a case-sensitive host can track it under that
+# spelling. update-index makes that index entry on any volume.
+env_blob=$(git -C "$TMP/clone/api" hash-object -w .devcontainer/.env)
+git -C "$TMP/clone/api" update-index --add --cacheinfo "100644,$env_blob,.devcontainer/.ENV"
+git -C "$TMP/clone/api" ls-files --error-unmatch .devcontainer/.ENV >/dev/null \
+  || fail "the test could not track .devcontainer/.ENV"
+out=$(clone_validate) && fail "validate accepted a tracked .devcontainer/.ENV"
+echo "$out" | grep -q '\.devcontainer/\.env is tracked by Git' \
+  || fail "validate did not report a tracked .devcontainer/.ENV"
+git -C "$TMP/clone/api" update-index --force-remove .devcontainer/.ENV
+# A Git error is a finding, never "not tracked".
+cp "$TMP/clone/api/.git/index" "$TMP/clone-index.save"
+printf 'not an index' > "$TMP/clone/api/.git/index"
+out=$(clone_validate) && fail "validate passed when Git could not read the index"
+echo "$out" | grep -q 'could not check with Git whether .devcontainer/.env is tracked' \
+  || fail "validate did not fail closed on a Git error"
+out=$(cd "$TMP/clone/api" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" doctor 2>&1) \
+  && fail "doctor reported ready when Git could not read the index"
+echo "$out" | grep -q '^FAIL  could not check with Git whether .devcontainer/.env is tracked' \
+  || fail "doctor did not fail closed on a Git error"
+cp "$TMP/clone-index.save" "$TMP/clone/api/.git/index"
+# Host Git runs only after the control paths pass: a planted .git/commondir
+# would make it read another directory's config. A logging git wrapper shows
+# that validate and doctor never start Git then.
+git_wrap="$TMP/git-wrap"
+mkdir -p "$git_wrap"
+cat > "$git_wrap/git" <<SH
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/git-wrap.log"
+exec $(command -v git) "\$@"
+SH
+chmod +x "$git_wrap/git"
+: > "$TMP/git-wrap.log"
+clone_validate env PATH="$git_wrap:$PATH" >/dev/null \
+  || fail "validate refused the clean clone with the git wrapper"
+grep -q 'ls-files' "$TMP/git-wrap.log" || fail "the git wrapper did not see the tracked-.env check"
+mkdir -p "$TMP/elsewhere-git"
+printf '%s\n' "$TMP/elsewhere-git" > "$TMP/clone/api/.git/commondir"
+: > "$TMP/git-wrap.log"
+out=$(clone_validate env PATH="$git_wrap:$PATH") && fail "validate accepted a planted .git/commondir"
+echo "$out" | grep -q "\.git/commondir must contain only '\.'" \
+  || fail "validate did not report the planted .git/commondir"
+(cd "$TMP/clone/api" && PATH="$git_wrap:$PATH" XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" doctor >/dev/null 2>&1) && fail "doctor reported ready with a planted .git/commondir"
+grep -q 'ls-files' "$TMP/git-wrap.log" \
+  && fail "host Git ran the tracked-.env check with a planted .git/commondir"
+grep -q 'rev-parse' "$TMP/git-wrap.log" \
+  && fail "doctor ran host Git rev-parse with a planted .git/commondir"
+printf '.\n' > "$TMP/clone/api/.git/commondir"
+clone_validate >/dev/null || fail "validate refused the clone after the commondir was restored"
 version=$(node -p 'require(process.argv[1]).version' "$ROOT/package.json")
 [ "$(grep -c "^[[:space:]]*image: ghcr.io/stefanoginella/aicontainer:v$version" \
     "$TMP/one/api/.devcontainer/docker-compose.yml")" = "3" ] \
@@ -331,6 +465,14 @@ n=$(zshrc_line 'PATH=$_aic_path')
   || fail ".zshrc does not restore the full PATH after oh-my-zsh loads"
 grep -Fqx 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell zsh)"' "$zshrc" \
   || fail ".zshrc does not run the root-owned fnm"
+# p10k instant prompt writes a cache that a later startup sources. The cache
+# directory is root-owned, so the managed rc turns it off after the overlays.
+n=$(zshrc_line 'typeset -g POWERLEVEL9K_INSTANT_PROMPT=off')
+for overlay in p10k rc; do
+  o=$(grep -nF "source /etc/aic/user-config/shell/$overlay.zsh" "$zshrc" | head -n 1 | cut -d: -f1 || true)
+  [ -n "$n" ] && [ -n "$o" ] && [ "$n" -gt "$o" ] \
+    || fail ".zshrc does not turn off p10k instant prompt after the $overlay.zsh overlay"
+done
 # shellcheck disable=SC2088 # '~/' is a literal grep pattern, not a path to expand
 if grep -Ev '^[[:space:]]*#' "$zshrc" | grep -Eq '~/|\$HOME|\$\{HOME'; then
   fail ".zshrc reads a file in the vscode-owned home"
@@ -348,6 +490,89 @@ for line in 'COPY .zshrc /etc/aic/shell/zsh/.zshrc' \
 done
 grep -Fq "sed -e '/^if \\[ -f ~\\/\\.bash_aliases \\]; then\$/,/^fi\$/d'" "$dockerfile" \
   || fail "managed bashrc still sources ~/.bash_aliases"
+# A process that no managed shell starts (hooks, MCP servers, `docker exec`)
+# finds the fnm default Node through the image PATH. The vscode-owned entry
+# must come after the system directories, so it never shadows a system binary.
+# No system directory may link to that Node: the startup PATH of the managed
+# shells and the PATH of root processes search those directories.
+fnm_path_line='ENV PATH="$PATH:/home/vscode/.fnm/aliases/default/bin"'
+grep -Fqx -- "$fnm_path_line" "$dockerfile" \
+  || fail "Dockerfile does not append the fnm default Node to the end of the image PATH"
+[ "$(grep -E '^ENV PATH=' "$dockerfile" | tail -n 1)" = "$fnm_path_line" ] \
+  || fail "an ENV PATH after the fnm default Node entry can move it before the system directories"
+[ "$(grep -E '^ENV PATH=' "$dockerfile" | grep -c '\.fnm')" = 1 ] \
+  || fail "the fnm default Node is on the image PATH more than once"
+if grep -Ev '^[[:space:]]*#' "$dockerfile" | grep -Eq '(^|[^[:alnum:]_-])ln[[:space:]].*(\.fnm|/node([[:space:]]|$))'; then
+  fail "Dockerfile links the vscode-owned Node into another directory"
+fi
+# Docker gives the image PATH, which starts with vscode-owned directories, to
+# root processes too. Each root helper sets a system-only PATH before its first
+# command, the seed sanitizer sets one in post-create.py (its Python test), the
+# managed shells keep one for root, and every sudo call names sudo and the
+# helper by absolute path. The runtime check is the "root processes never
+# search the vscode-owned PATH" smoke.
+for helper in aic-firewall aic-chown-volumes; do
+  [ "$(grep -Ev '^[[:space:]]*(#|$)' "$ROOT/template/$helper" | sed -n '1,2p')" = "set -euo pipefail
+readonly PATH=/usr/sbin:/usr/bin:/sbin:/bin" ] \
+    || fail "$helper runs a command before it sets a system-only PATH"
+done
+root_path='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+[ "$(grep -Fcx "[ \"\$EUID\" -ne 0 ] || PATH=$root_path" "$dockerfile")" = 2 ] \
+  || fail "/etc/bash.bashrc and the managed bashrc do not give a root bash a system-only PATH"
+n=$(grep -nFx "[ \"\$EUID\" -ne 0 ] || PATH=$root_path" "$dockerfile" | tail -n 1 | cut -d: -f1)
+f=$(grep -nFx 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell bash)"' "$dockerfile" | cut -d: -f1)
+[ -n "$f" ] && [ "$n" -gt "$f" ] \
+  || fail "the managed bashrc does not keep a root PATH system-only after fnm loads"
+grep -Fqx "test \"\$EUID\" != 0; or set -gx PATH ${root_path//:/ }" "$dockerfile" \
+  || fail "the managed fish config does not give a root fish a system-only PATH"
+n=$(zshrc_line "(( EUID )) || PATH=$root_path")
+f=$(zshrc_line 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell zsh)"')
+[ -n "$n" ] && [ -n "$f" ] && [ "$n" -gt "$f" ] \
+  || fail ".zshrc does not give a root zsh a system-only PATH after fnm loads"
+# A root login shell runs /etc/profile first; the reset there must survive the
+# Dev Containers CLI rewrite of `PATH=` lines (the image build checks that).
+for line in "        'if [ \"\$(/usr/bin/id -u)\" = 0 ]; then' \\" \
+  "        '  _aic_root_path=$root_path' \\" \
+  "        '  PATH=\$_aic_root_path' \\" \
+  "    && sed -i 's#^mesg n #/usr/bin/mesg n #' /root/.profile \\" \
+  "    && cmp -s /etc/profile /tmp/aic-profile-check \\"; do
+  grep -Fqx -- "$line" "$dockerfile" || fail "Dockerfile lost the root login-shell PATH reset: $line"
+done
+# A root shell keeps its history out of the vscode-owned history volume.
+grep -Fqx '[ "$EUID" -ne 0 ] || HISTFILE=/root/.bash_history' "$dockerfile" \
+  || fail "the managed bashrc writes root history to the vscode-owned volume"
+n=$(zshrc_line '(( EUID )) || HISTFILE=/root/.zsh_history')
+h=$(zshrc_line 'export HISTFILE=/home/vscode/.shell-history/.zsh_history')
+[ -n "$n" ] && [ -n "$h" ] && [ "$n" -gt "$h" ] \
+  || fail ".zshrc writes root history to the vscode-owned volume"
+if grep -n '"sudo"' "$ROOT"/template/*.py; then
+  fail "post-create runs sudo through PATH; use /usr/bin/sudo"
+fi
+if grep -nE 'exec --workspace-folder \. sudo' "$ROOT/aic" "$ROOT"/lib/aic/*.sh; then
+  fail "aic runs sudo through the container PATH; use /usr/bin/sudo and the helper's absolute path"
+fi
+# The global Git excludes must not hide shared agent config. An agent can put
+# hooks in .claude/settings.json or .codex/config.toml, and a host AI tool runs
+# them, so `git status` must show each change. Only the files that Claude Code
+# documents as personal or machine-local stay ignored.
+sed -n "/^RUN cat > \/etc\/aic\/gitignore <<'GITIGNORE_EOF'\$/,/^GITIGNORE_EOF\$/p" "$dockerfile" \
+  | sed '1d;$d' > "$TMP/aic-gitignore"
+[ -s "$TMP/aic-gitignore" ] || fail "Dockerfile no longer writes /etc/aic/gitignore; update this test"
+git init -q "$TMP/excludes-repo"
+excluded() { git -C "$TMP/excludes-repo" -c core.excludesFile="$TMP/aic-gitignore" check-ignore -q --no-index -- "$1"; }
+for path in .claude/settings.json .claude/skills/s/SKILL.md .claude/agents/a.md \
+  .claude/commands/c.md .claude/hooks/h.sh .codex/config.toml .codex/hooks.json \
+  .codex/rules/default.rules .mcp.json CLAUDE.md AGENTS.md; do
+  ! excluded "$path" || fail "container global gitignore hides shared agent config: $path"
+done
+for path in .claude/settings.local.json sub/.claude/settings.local.json \
+  .claude/agent-memory-local/a/MEMORY.md .claude/worktrees/w/file CLAUDE.local.md \
+  .env node_modules/x __pycache__/x.pyc; do
+  excluded "$path" || fail "container global gitignore no longer ignores local file: $path"
+done
+if grep -Eq '^/?(\*\*/)?\.(claude|codex)/?(\*\*?)?$' "$TMP/aic-gitignore"; then
+  fail "container global gitignore ignores a whole .claude/ or .codex/ directory"
+fi
 # Image download integrity (docs/contributing/image-integrity.md). `sh -c "$(curl …)"` exits 0 when curl
 # fails, and a pipe into a shell or an unpacker runs whatever arrived. Every
 # curl or git fetch must start with `set -eu`, use no `||` or `set +e`, and be
@@ -750,6 +975,8 @@ grep -Fq 'FAIL: shell startup ran vscode-writable code' "$smoke_workflow" \
   || fail "smoke.yml lost the shell-startup plant smoke"
 grep -Fq 'OK: managed zsh loads powerlevel10k, both plugins, node, fnm, fzf, and delta' "$smoke_workflow" \
   || fail "smoke.yml lost the pinned zsh theme/plugins/tools smoke"
+grep -Fq 'OK: a plain /bin/sh finds the fnm default Node last on PATH; system directories hold no node' "$smoke_workflow" \
+  || fail "smoke.yml lost the fnm default Node without shell startup smoke"
 grep -Fq '"$GITHUB_WORKSPACE/aic" init --build --force' "$smoke_workflow" \
   || fail "workflow pre-created override is not passed through explicit init --force"
 grep -Fq 'CODEX_NON_INTERACTIVE=1' "$smoke_workflow" \
@@ -843,6 +1070,8 @@ grep -q '^AIC_STATUS_PROJECT=api$' "$TMP/one/api/.devcontainer/.env" \
   || fail "agent status relay omitted the path-free project label"
 grep -q "^AIC_STATUS_PROJECT_ID=$name1$" "$TMP/one/api/.devcontainer/.env" \
   || fail "agent status relay omitted the path-unique project identity"
+grep -q "^AIC_PROJECT_NAME=$name1$" "$TMP/one/api/.devcontainer/.env" \
+  || fail "init did not generate the path-unique Compose project name"
 grep -q '^\.env$' "$TMP/one/api/.devcontainer/.gitignore" \
   || fail "host-specific Compose environment is not gitignored"
 for key in CONTAINERS EVENTS IMAGES INFO NETWORKS VOLUMES POST BUILD; do
@@ -873,8 +1102,7 @@ git -C "$TMP/relay-project" init -q
 # XDG-derived root would read a directory nothing else in aic ever uses.
 (cd "$TMP/relay-project" && HOME="$relay_home" XDG_CONFIG_HOME="$TMP/decoy-config" \
   AIC_HOME="$ROOT" "$ROOT/aic" init --with codex --shell zsh >/dev/null)
-relay_name=$(sed -n 's/^name:[[:space:]]*//p' \
-  "$TMP/relay-project/.devcontainer/docker-compose.yml")
+relay_name=$(managed_name "$TMP/relay-project")
 grep -q '^AIC_STATUS_RELAY=1$' "$TMP/relay-project/.devcontainer/.env" \
   || fail "exact host status-relay marker did not enable the relay"
 grep -q "^AIC_STATUS_PROJECT_ID=$relay_name$" \
@@ -1165,11 +1393,12 @@ if (cd "$TMP/profiles" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
   fail "validate accepted an untrusted profile-gated service"
 fi
 # waitFor is managed: VS Code must not open a terminal (and start an agent)
-# before post-create has reset the managed memory files and locked config.
+# before post-create has reset the managed memory files and locked config, and
+# before post-start has waited for a declared firewall.
 sed -e 's|^  "customizations": {|  "runServices": ["devcontainer", "hidden"],\
   "shutdownAction": "none",\
   "customizations": {|' \
-  -e 's|^  "waitFor": "postCreateCommand"|  "waitFor": "onCreateCommand"|' \
+  -e 's|^  "waitFor": "postStartCommand"|  "waitFor": "onCreateCommand"|' \
   "$TMP/profiles/.devcontainer/devcontainer.json" \
   > "$TMP/profiles/.devcontainer/devcontainer.json.tmp"
 mv "$TMP/profiles/.devcontainer/devcontainer.json.tmp" \
@@ -1834,6 +2063,39 @@ if (cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
 fi
 rm "$TMP/project-code/.devcontainer/post-create.project.sh"
 
+# The declarative firewall files only restrict egress, or add fixed preset
+# hosts to the opt-in allowlist, like firewall-allowlist. They need no trust.
+# A preset name outside the fixed table is refused, and trust cannot approve it.
+# A symlink in their place is refused like every other control file.
+printf '' > "$TMP/project-code/.devcontainer/firewall-enable"
+printf '# registries\ncrates\ngo\n' > "$TMP/project-code/.devcontainer/firewall-presets"
+(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" validate </dev/null >/dev/null 2>&1) \
+  || fail "validate refused the declarative firewall files of a clean project"
+printf 'crates\nevil.example.com\n' > "$TMP/project-code/.devcontainer/firewall-presets"
+if out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+    "$ROOT/aic" validate </dev/null 2>&1); then
+  fail "validate accepted a host in firewall-presets"
+fi
+echo "$out" | grep -qF '.devcontainer/firewall-presets line 2 is not a known firewall preset' \
+  || { printf '%s\n' "$out" >&2; fail "an unknown firewall preset was not named"; }
+if (cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+    "$ROOT/aic" up --allow-unsafe </dev/null >/dev/null 2>&1); then
+  fail "--allow-unsafe started a project with an unknown firewall preset"
+fi
+rm "$TMP/project-code/.devcontainer/firewall-presets"
+for name in firewall-enable firewall-presets; do
+  rm -f "$TMP/project-code/.devcontainer/$name"
+  ln -s /etc/hostname "$TMP/project-code/.devcontainer/$name"
+  if out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+      "$ROOT/aic" validate </dev/null 2>&1); then
+    fail "validate accepted a symlinked .devcontainer/$name"
+  fi
+  echo "$out" | grep -qF ".devcontainer/$name must be a regular file, not a symlink" \
+    || { printf '%s\n' "$out" >&2; fail "a symlinked .devcontainer/$name was not refused"; }
+  rm "$TMP/project-code/.devcontainer/$name"
+done
+
 printf 'ms-python.python\n' > "$TMP/project-code/.devcontainer/vscode-extensions"
 (cd "$TMP/project-code" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1)
 out=$(cd "$TMP/project-code" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
@@ -1975,11 +2237,13 @@ out=$(cd "$TMP/project-build" && AIC_HOME="$ROOT" "$ROOT/aic" check-drift 2>&1)
 echo "$out" | grep -q 'service app: build executes a project-owned Dockerfile as root' \
   || fail "added service build was not trust-gated"
 
-# Destructive automation must spell out --yes.
+# Destructive automation must spell out --yes. A refused confirmation exits 1
+# (not 2, the usage-error code) and names the fix.
 new_project "$TMP/destroy"
-if (cd "$TMP/destroy" && AIC_HOME="$ROOT" "$ROOT/aic" destroy </dev/null >/dev/null 2>&1); then
-  fail "non-interactive destroy proceeded without --yes"
-fi
+rc=0
+out=$(cd "$TMP/destroy" && AIC_HOME="$ROOT" "$ROOT/aic" destroy </dev/null 2>&1) || rc=$?
+[ "$rc" = 1 ] || fail "non-interactive destroy without --yes exited $rc, not 1: $out"
+echo "$out" | grep -Fq 'pass --yes to confirm' || fail "destroy without --yes did not name --yes: $out"
 
 # Cleanup parses only the installed trusted template, while shell entry points
 # use root-owned managed startup files rather than writable login profiles.
@@ -2103,9 +2367,32 @@ if [ "$tool" = docker ]; then
 fi
 if [ "$tool" = devcontainer ] && [ -n "${AIC_TEST_ENV_LOG:-}" ]; then
   printf 'COMPOSE_PROJECT_NAME=%s\n' "${COMPOSE_PROJECT_NAME-<unset>}" >> "$AIC_TEST_ENV_LOG"
+  printf 'AIC_PROJECT_NAME=%s\n' "${AIC_PROJECT_NAME-<unset>}" >> "$AIC_TEST_ENV_LOG"
+  # devcontainer up runs `aic initialize`, which refuses these host values
+  # from the environment; aic must not pass them on.
+  if [ "${1:-}" = up ]; then
+    for key in AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID; do
+      [ -z "${!key+set}" ] || printf '%s is set\n' "$key" >> "$AIC_TEST_ENV_LOG"
+    done
+  fi
+fi
+# The trusted template's name line needs AIC_PROJECT_NAME even with -p.
+if [ "$tool" = docker ] && [ "${1:-}" = compose ] && [ -n "${AIC_TEST_COMPOSE_ENV_LOG:-}" ]; then
+  printf '%s %s\n' "${3:-}" "${AIC_PROJECT_NAME-<unset>}" >> "$AIC_TEST_COMPOSE_ENV_LOG"
+fi
+# A declared firewall that cannot be enabled in the container.
+if [ "$tool" = devcontainer ] && [ "${AIC_FAKE_FIREWALL_FAIL:-}" = 1 ] \
+    && [ "${4:-}" = /usr/bin/sudo ] && [ "${6:-}" = /usr/local/bin/aic-firewall ]; then
+  log_call "$@"
+  exit 1
 fi
 if [ "$tool" = devcontainer ] && [ -n "${AIC_TEST_ONCE_LOG:-}" ]; then
   printf '%s\n' "${AIC_UNSAFE_ONCE_HASH-<unset>}" >> "$AIC_TEST_ONCE_LOG"
+fi
+# A devcontainer up that fails with a chosen exit code.
+if [ "$tool" = devcontainer ] && [ "${1:-}" = up ] && [ -n "${AIC_FAKE_UP_EXIT:-}" ]; then
+  log_call "$@"
+  exit "$AIC_FAKE_UP_EXIT"
 fi
 log_call "$@"
 SH
@@ -2130,6 +2417,152 @@ grep -q '_aic-sanitized-seed>' "$log" || fail "destroy did not explicitly remove
 grep -q '<aic-auth-global>' "$log" && fail "destroy attempted to remove global auth"
 grep -q '<aic-shell-history>' "$log" && fail "destroy attempted to remove global shell history"
 
+# down, destroy, the status probe of preflight, and the running-container
+# probe of signing target the path-unique name with -p, and give the trusted
+# template's name line the same value. An inherited AIC_PROJECT_NAME never
+# reaches Compose. signing needs a project that passes the gate (this one has
+# an untrusted override), and then stops: the fake has no running container.
+new_project "$TMP/signing-name"
+compose_env_log="$TMP/compose-env.log"
+for target in "cleanup down" "cleanup destroy --yes" "cleanup preflight" \
+    "signing-name signing disable"; do
+  dir="$TMP/${target%% *}"; command=${target#* }
+  target_name=$(managed_name "$dir")
+  : > "$log"; : > "$compose_env_log"
+  # shellcheck disable=SC2086 # word splitting builds each argv on purpose
+  if ! (cd "$dir" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
+      AIC_TEST_COMPOSE_ENV_LOG="$compose_env_log" AIC_PROJECT_NAME=inherited-other \
+      AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+      AIC_HOME="$ROOT" "$ROOT/aic" $command >/dev/null 2>&1); then
+    [ "$command" = "signing disable" ] || fail "$command failed on a project with the managed name line"
+  fi
+  grep -q "<compose> <-p> <$target_name> <-f> <$ROOT/template/docker-compose.pull.yml>" "$log" \
+    || fail "$command did not target the path-unique project name with the trusted template"
+  [ -s "$compose_env_log" ] || fail "$command ran no Compose call on the trusted template"
+  grep -qvx "$target_name $target_name" "$compose_env_log" \
+    && fail "$command ran Compose without the path-unique AIC_PROJECT_NAME: $(cat "$compose_env_log")"
+done
+# signing wrote the fake Docker context into .devcontainer/.env; restore it.
+(cd "$TMP/signing-name" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+name_project="$TMP/signing-name"
+name_project_name=$(managed_name "$name_project")
+
+# The committed name line has exactly one accepted form. Every other form is
+# refused before Docker by down and destroy, and by validate; sync repairs it.
+# shellcheck disable=SC2016 # literal Compose text
+for bad in 'name: ${AIC_PROJECT_NAME:-victim}' 'name: ${AIC_PROJECT_NAME}' \
+    'name: victim' 'name:  ${AIC_PROJECT_NAME:?run aic up or aic sync}' \
+    'name: ${AIC_PROJECT_NAME:?run aic up or aic sync} ' \
+    'name : ${AIC_PROJECT_NAME:?run aic up or aic sync}' \
+    "$NAME_LINE"$'\r' \
+    "$NAME_LINE"$'\n''name: victim' "name: $name_project_name"$'\n'"$NAME_LINE"; do
+  BAD="$bad" awk '/^name:/ { print ENVIRON["BAD"]; next } { print }' \
+    "$name_project/.devcontainer/docker-compose.yml" > "$name_project/.devcontainer/docker-compose.yml.tmp"
+  mv "$name_project/.devcontainer/docker-compose.yml.tmp" "$name_project/.devcontainer/docker-compose.yml"
+  : > "$log"
+  for command in down "destroy --yes"; do
+    # shellcheck disable=SC2086 # word splitting builds each argv on purpose
+    if (cd "$name_project" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
+        AIC_HOME="$ROOT" "$ROOT/aic" $command >/dev/null 2>&1); then
+      fail "$command accepted the Compose name line '$bad'"
+    fi
+  done
+  [ ! -s "$log" ] || fail "the Compose name line '$bad' reached Docker"
+  (cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null 2>&1) \
+    && fail "validate accepted the Compose name line '$bad'"
+  (cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1) \
+    || fail "sync did not repair the Compose name line '$bad'"
+  [ "$(grep -cE '^name[[:space:]]*:' "$name_project/.devcontainer/docker-compose.yml")" = "1" ] \
+    && grep -Fqx "$NAME_LINE" "$name_project/.devcontainer/docker-compose.yml" \
+    || fail "sync did not restore the managed name line after '$bad'"
+done
+# YAML spellings that a line check cannot read as the name: a quoted key, and
+# a second document that sets the name again. Compose honors both; the gate
+# allows only plain keys at column 0.
+cp "$name_project/.devcontainer/docker-compose.yml" "$TMP/name-project-compose.yml"
+# shellcheck disable=SC2016 # literal Compose text
+sed 's/^name:.*/"name": ${AIC_PROJECT_NAME:-victim}/' "$TMP/name-project-compose.yml" \
+  > "$name_project/.devcontainer/docker-compose.yml"
+(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null 2>&1) \
+  && fail "validate accepted a quoted top-level name key"
+# shellcheck disable=SC2016 # literal Compose text
+{ cat "$TMP/name-project-compose.yml"; printf '%s\n' '---' '"name": ${AIC_PROJECT_NAME:-victim}'; } \
+  > "$name_project/.devcontainer/docker-compose.yml"
+set +e
+out=$(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)
+yaml_rc=$?
+set -e
+[ "$yaml_rc" -ne 0 ] || fail "validate accepted a second YAML document that sets the name"
+echo "$out" | grep -q 'top-level YAML that is not a plain key' \
+  || fail "validate did not explain the second YAML document"
+# An indented root mapping: the fixed line hides in a multi-line quoted
+# scalar, and the real, indented name key has a fallback value.
+{
+  printf '%s\n' ' version: "3'
+  printf '%s\n' "$NAME_LINE"
+  printf '%s\n' ' "'
+  # shellcheck disable=SC2016 # literal Compose text
+  printf '%s\n' ' name: ${AIC_PROJECT_NAME:-aic-victim-000000000000}'
+  grep -v '^name:' "$TMP/name-project-compose.yml" | sed 's/^\(.\)/ \1/'
+} > "$name_project/.devcontainer/docker-compose.yml"
+set +e
+out=$(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)
+yaml_rc=$?
+set -e
+[ "$yaml_rc" -ne 0 ] || fail "validate accepted an indented root mapping that hides the name"
+echo "$out" | grep -q 'must start its top-level mapping with a plain key at column 0' \
+  || fail "validate did not explain the indented root mapping"
+cp "$TMP/name-project-compose.yml" "$name_project/.devcontainer/docker-compose.yml"
+(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null 2>&1) \
+  || fail "validate refused the restored managed Compose file"
+# The override must not set a top-level name in any spelling. Compose
+# normalizes this one to the same raw name as the managed line.
+# shellcheck disable=SC2016 # literal Compose text
+printf '%s\n' 'name: ${AIC_PROJECT_NAME?run}${AIC:+}${UP:+}${OR:+}${AIC:+}${SYNC:+}' 'services: {}' \
+  > "$name_project/.devcontainer/docker-compose.override.yml"
+(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1)
+set +e
+out=$(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)
+override_rc=$?
+set -e
+[ "$override_rc" -ne 0 ] || fail "validate accepted an override that sets the Compose name"
+echo "$out" | grep -q 'override.yml must not set a top-level Compose name' \
+  || fail "validate did not name the override's top-level name"
+rm "$name_project/.devcontainer/docker-compose.override.yml"
+(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1)
+(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null 2>&1) \
+  || fail "validate refused the project after the override was removed"
+
+# Migration: the earlier literal that aic wrote, `name: <expected>`, still
+# resolves this checkout for cleanup, but every start refuses it until sync
+# writes the managed line. A literal for another path never resolves.
+sed "s/^name:.*/name: $name_project_name/" "$TMP/name-project-compose.yml" \
+  > "$name_project/.devcontainer/docker-compose.yml"
+: > "$log"
+(cd "$name_project" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
+  AIC_HOME="$ROOT" "$ROOT/aic" down >/dev/null 2>&1) \
+  || fail "down refused the earlier literal of this checkout's own name"
+grep -q "<compose> <-p> <$name_project_name> <-f>" "$log" \
+  || fail "down did not target this checkout's name from the earlier literal"
+set +e
+out=$(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)
+literal_rc=$?
+set -e
+[ "$literal_rc" -ne 0 ] || fail "validate accepted the earlier path-specific literal"
+echo "$out" | grep -q 'must have exactly one top-level name line' \
+  || fail "validate did not ask to migrate the earlier literal"
+out=$(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" doctor 2>&1) \
+  && fail "doctor reported ready for the earlier path-specific literal"
+echo "$out" | grep -q '^FAIL  managed project identity blocks verified startup' \
+  || fail "doctor did not report the earlier path-specific literal"
+(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+grep -Fqx "$NAME_LINE" "$name_project/.devcontainer/docker-compose.yml" \
+  || fail "sync did not migrate the earlier literal to the managed name line"
+grep -Fq "$name_project_name" "$name_project/.devcontainer/docker-compose.yml" \
+  && fail "sync kept the path-specific name in the committed Compose file"
+(cd "$name_project" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null 2>&1) \
+  || fail "validate refused the migrated managed name line"
+
 # A repository-controlled top-level name can never steer cleanup at another
 # Compose project. Sync remains the recovery path.
 sed -E 's/^name:.*/name: victim/' "$TMP/cleanup/.devcontainer/docker-compose.yml" \
@@ -2150,6 +2583,8 @@ fi
 (cd "$TMP/cleanup" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
 grep -q '^name: victim$' "$TMP/cleanup/.devcontainer/docker-compose.yml" \
   && fail "sync did not repair a tampered Compose project name"
+grep -Fqx "$NAME_LINE" "$TMP/cleanup/.devcontainer/docker-compose.yml" \
+  || fail "sync did not restore the managed name line"
 
 # Old no-name projects may stop only a stack whose Docker labels prove exact
 # workspace ownership; destroy requires migration to the hashed identity.
@@ -2303,8 +2738,7 @@ grep -q '<inspect> <--format> <{{json .}}> <owned-legacy-container>' "$log" \
   || fail "legacy ownership did not inspect the candidate container"
 grep -q "<$owned_volume:/from:ro>" "$log" \
   || fail "owned legacy volume was not mounted read-only for copying"
-hashed_owned_volume=$(sed -n 's/^name:[[:space:]]*//p' \
-  "$TMP/legacy-owned/.devcontainer/docker-compose.yml")_aic-sessions
+hashed_owned_volume=$(managed_name "$TMP/legacy-owned")_aic-sessions
 grep -Fqx "$hashed_owned_volume" "$owned_state" \
   || fail "legacy migration did not create the path-unique destination volume"
 
@@ -2358,8 +2792,10 @@ grep -q "<--filter> <label=devcontainer.local_folder=$prev_workspace> <--format>
   || fail "earlier-identity discovery omitted the canonical workspace label"
 grep -q "<$prev_volume:/from:ro>" "$log" \
   || fail "earlier-identity volume was not mounted read-only for copying"
-prev_new_name=$(sed -n 's/^name:[[:space:]]*//p' "$TMP/prev-name/.devcontainer/docker-compose.yml")
+prev_new_name=$(managed_name "$TMP/prev-name")
 [ "$prev_new_name" != "$prev_project" ] || fail "sync kept the earlier project name"
+grep -Fqx "$NAME_LINE" "$TMP/prev-name/.devcontainer/docker-compose.yml" \
+  || fail "sync did not replace the earlier project name with the managed name line"
 grep -Fqx "${prev_new_name}_aic-sessions" "$prev_state" \
   || fail "earlier-identity migration did not create the current sessions volume"
 # The old stack goes down only on the same proof, never by name alone.
@@ -2390,15 +2826,22 @@ if grep -hv '^[[:space:]]*#' "$ROOT/aic" "$ROOT"/lib/aic/*.sh | grep 'pwd -P' \
     | grep -vF '/bin/pwd -P; else pwd -P'; then
   fail "aic uses the builtin pwd -P, which keeps the typed letter case"
 fi
+# A `grep ... | head` pipe makes grep print "write error: Broken pipe" when
+# SIGPIPE is ignored (GitHub runners do this), and the check-drift smoke then
+# sees output. Stop at the first match with sed, awk, or grep -m instead.
+if grep -hv '^[[:space:]]*#' "$ROOT/aic" "$ROOT"/lib/aic/*.sh \
+    | grep -E 'grep .*\|[[:space:]]*head'; then
+  fail "aic pipes grep into head; this prints a broken-pipe error where SIGPIPE is ignored"
+fi
 mkdir -p "$TMP/CaseProbe/Repo"
 if [ -d "$TMP/caseprobe/repo" ]; then
   new_project "$TMP/CaseProbe/Repo"
-  real_name=$(sed -n 's/^name:[[:space:]]*//p' "$TMP/CaseProbe/Repo/.devcontainer/docker-compose.yml")
+  real_name=$(managed_name "$TMP/CaseProbe/Repo")
   [ -n "$real_name" ] || fail "case probe project has no Compose name"
   out=$(cd "$TMP/caseprobe/repo" && AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1) \
     || fail "validate rejected the project when started from a wrong-case path: $out"
   (cd "$TMP/caseprobe/repo" && AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null 2>&1)
-  [ "$(sed -n 's/^name:[[:space:]]*//p' "$TMP/CaseProbe/Repo/.devcontainer/docker-compose.yml")" = "$real_name" ] \
+  [ "$(managed_name "$TMP/CaseProbe/Repo")" = "$real_name" ] \
     || fail "sync from a wrong-case path changed the project identity"
   grep -qx "AIC_STATUS_PROJECT_ID=$real_name" "$TMP/CaseProbe/Repo/.devcontainer/.env" \
     || fail "the runtime environment file did not keep the stored-case identity"
@@ -2462,6 +2905,35 @@ grep -q '<bash> <--noprofile> <--rcfile> </etc/aic/shell/bashrc> <-i>' "$log" \
   AIC_HOME="$ROOT" "$ROOT/aic" shell)
 grep -q "<fish> <--no-config> <-C> <source /etc/fish/conf.d/aic.fish>" "$log" \
   || fail "fish shell did not use the managed root-owned config"
+grep -q 'aic-firewall' "$log" && fail "aic shell ran aic-firewall without .devcontainer/firewall-enable"
+
+# devcontainer exec does not run postStartCommand. With the firewall-enable
+# marker, aic shell and aic run first wait for the start-time enable through
+# `aic-firewall auto`, and they stop when it fails: no session with open egress.
+fw_auto='^devcontainer <exec> <--workspace-folder> <\.> </usr/bin/sudo> <-n> </usr/local/bin/aic-firewall> <auto>$'
+: > "$TMP/cleanup/.devcontainer/firewall-enable"
+# aic shell takes no arguments; aic run takes the command.
+# shellcheck disable=SC2086
+for cmd in shell "run true"; do
+  : > "$log"
+  (cd "$TMP/cleanup" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
+    AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+    AIC_HOME="$ROOT" "$ROOT/aic" $cmd >/dev/null) \
+    || fail "aic $cmd failed with a working declared firewall"
+  [ "$(grep -c '^devcontainer <exec>' "$log")" = 2 ] && head -n 1 "$log" | grep -q "$fw_auto" \
+    || { cat "$log" >&2; fail "aic $cmd did not wait for the declared firewall before the session"; }
+  : > "$log"
+  if out=$(cd "$TMP/cleanup" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
+      AIC_FAKE_FIREWALL_FAIL=1 AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
+      AIC_HOME="$ROOT" "$ROOT/aic" $cmd 2>&1); then
+    fail "aic $cmd started a session although the declared firewall is not on"
+  fi
+  echo "$out" | grep -q 'firewall-enable is set, but the firewall is not on' \
+    || fail "aic $cmd did not explain the failed declared firewall"
+  [ "$(grep -c '^devcontainer <exec>' "$log")" = 1 ] \
+    || { cat "$log" >&2; fail "aic $cmd ran the session after a failed declared firewall"; }
+done
+rm "$TMP/cleanup/.devcontainer/firewall-enable"
 
 new_project "$TMP/initialize"
 seed_home="$TMP/seed-home"; mkdir "$seed_home"
@@ -2515,7 +2987,7 @@ grep -q '<run>' "$log" && fail "root helper ran after unsafe volume detection"
 # pin the managed name; a direct start that cannot pin it is refused before
 # Docker is touched, and the refusal never prints the value it read.
 new_project "$TMP/root-env"
-root_env_name=$(sed -n 's/^name:[[:space:]]*//p' "$TMP/root-env/.devcontainer/docker-compose.yml")
+root_env_name=$(managed_name "$TMP/root-env")
 printf 'APP_PORT=3000\nCOMPOSE_PROJECT_NAME="Root-Env-Value"\n' > "$TMP/root-env/.env"
 env_log="$TMP/devcontainer-env.log"
 for command in up rebuild shell run; do
@@ -2526,11 +2998,13 @@ for command in up rebuild shell run; do
   : > "$env_log"
   (cd "$TMP/root-env" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
     AIC_TEST_ENV_LOG="$env_log" COMPOSE_PROJECT_NAME=inherited-other \
+    AIC_PROJECT_NAME=inherited-other AIC_DOCKER_SOCKET=/inherited.sock AIC_STATUS_RELAY=1 \
     AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
     AIC_HOME="$ROOT" "$ROOT/aic" "${args[@]}" >/dev/null 2>&1) \
     || fail "$command refused a project whose root .env sets COMPOSE_PROJECT_NAME"
-  [ "$(cat "$env_log")" = "COMPOSE_PROJECT_NAME=$root_env_name" ] \
-    || fail "$command did not pin the managed Compose name for the Dev Containers CLI"
+  [ "$(cat "$env_log")" = "COMPOSE_PROJECT_NAME=$root_env_name
+AIC_PROJECT_NAME=$root_env_name" ] \
+    || fail "$command did not pin the managed Compose name for the Dev Containers CLI, or passed it a host value of .devcontainer/.env"
 done
 
 : > "$log"
@@ -2597,6 +3071,48 @@ echo "$out" | grep -q 'COMPOSE_PROJECT_NAME in the environment' \
   || fail "validate did not report the inherited COMPOSE_PROJECT_NAME"
 (cd "$TMP/root-env" && AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null) \
   || fail "validate refused a project without a root .env project name"
+
+# The managed name line reads AIC_PROJECT_NAME from the environment first, then
+# from .devcontainer/.env. A direct start refuses an inherited value that is not
+# this checkout's name, and a variable that makes Compose skip or replace that
+# .env. Each refusal names the variable, never its value, and comes before Docker.
+# doctor exports aic's own AIC_PROJECT_NAME before its identity check; it must
+# still judge the inherited one.
+# Every other key of the generated .devcontainer/.env is a host value that
+# Compose substitutes (the socket, the sidecar user, the status relay), and an
+# inherited value wins over the file. A direct start refuses each one, an
+# empty one too: a repository cannot set them, but a host shell can.
+runtime_keys=$(sed -n 's/^\(AIC_[A-Z_]*\)=.*/\1/p' "$TMP/root-env/.devcontainer/.env" | grep -vx AIC_PROJECT_NAME)
+[ "$(printf '%s\n' "$runtime_keys" | grep -c .)" = 5 ] \
+  || fail "the generated .devcontainer/.env does not hold the five expected host keys"
+runtime_cases=()
+for key in $runtime_keys; do runtime_cases+=("$key=Leaked-Value-$key"); done
+for case in "AIC_PROJECT_NAME=Leaked-Value-1" "AIC_PROJECT_NAME=" \
+    "COMPOSE_ENV_FILES=../Leaked-Value-2.env" "COMPOSE_DISABLE_ENV_FILE=Leaked-Value-3" \
+    "${runtime_cases[@]}" "AIC_STATUS_RELAY="; do
+  variable=${case%%=*}
+  set +e
+  out=$(cd "$TMP/root-env" && env "$case" AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)
+  conflict_rc=$?
+  set -e
+  [ "$conflict_rc" -ne 0 ] || fail "validate accepted $variable in the environment"
+  echo "$out" | grep -q "^aic: $variable in the environment would" \
+    || fail "validate did not name $variable in the environment"
+  echo "$out" | grep -qi 'leaked-value' && fail "validate printed the value of $variable"
+  out=$(cd "$TMP/root-env" && env "$case" AIC_HOME="$ROOT" "$ROOT/aic" doctor 2>&1) \
+    && fail "doctor reported ready with $variable in the environment"
+  echo "$out" | grep -q "^FAIL  a direct Dev Containers start (VS Code) would be refused: $variable" \
+    || fail "doctor did not report $variable in the environment"
+  : > "$log"
+  (cd "$TMP/root-env" && env "$case" PATH="$fakebin:$PATH" HOME="$seed_home" \
+    DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" \
+    AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" initialize >/dev/null 2>&1) \
+    && fail "initialize accepted $variable in the environment"
+  [ ! -s "$log" ] || fail "initialize reached Docker before refusing $variable"
+done
+# The exact managed value, as 'aic up' exports it to its initialize child.
+(cd "$TMP/root-env" && AIC_PROJECT_NAME="$root_env_name" AIC_HOME="$ROOT" "$ROOT/aic" validate >/dev/null) \
+  || fail "validate refused the exact managed AIC_PROJECT_NAME in the environment"
 
 # Host Git runs code named in .git/config, config.worktree, and hooks, and it
 # loads them from the directory .git/commondir names. These paths are mounted
@@ -2744,6 +3260,104 @@ for target in /workspace/.git /workspace/.git/commondir; do
 done
 rm "$TMP/git-paths/.devcontainer/docker-compose.override.yml"
 git_paths_check "$TMP/git-paths" sync >/dev/null
+
+# Host Git runs hooks from core.hooksPath, through hook symlinks, and the
+# programs that core.fsmonitor and core.sshCommand name. doctor, up, and
+# rebuild warn when one of these is in the worktree. They check only paths,
+# and they never run a hook.
+new_project "$TMP/git-hooks"
+hooks_doctor() { git_paths_check "$TMP/git-hooks" doctor || true; }
+hooks_warns() {
+  local out; out=$(hooks_doctor)
+  echo "$out" | grep '^WARN  ' | grep -Fq "$1" || { printf '%s\n' "$out" >&2; fail "doctor did not warn: $1"; }
+}
+hooks_clean() {
+  local out; out=$(hooks_doctor)
+  echo "$out" | grep -q '^OK    host Git hooks and hook programs are outside the worktree$' \
+    || { printf '%s\n' "$out" >&2; fail "doctor warned about safe Git hooks ($1)"; }
+}
+marker="$TMP/git-hook-ran"
+hook_body="#!/bin/sh
+touch '$marker'
+"
+for hook in pre-commit post-checkout pre-push fsmonitor-watchman; do
+  printf '%s' "$hook_body" > "$TMP/git-hooks/.git/hooks/$hook.sample"
+done
+chmod +x "$TMP/git-hooks/.git/hooks/"*
+hooks_clean "default .git/hooks with only samples"
+mkdir -p "$TMP/host-hooks"
+printf '%s' "$hook_body" > "$TMP/host-hooks/pre-commit"; chmod +x "$TMP/host-hooks/pre-commit"
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/host-hooks"
+hooks_clean "core.hooksPath outside the worktree"
+git -C "$TMP/git-hooks" config core.hooksPath .git/hooks
+hooks_clean "core.hooksPath set to .git/hooks"
+mkdir -p "$TMP/git-hooks/.githooks"
+for hook in pre-commit post-checkout post-index-change reference-transaction; do
+  printf '%s' "$hook_body" > "$TMP/git-hooks/.githooks/$hook"
+done
+chmod +x "$TMP/git-hooks/.githooks/"*
+git -C "$TMP/git-hooks" config core.hooksPath .githooks
+hooks_warns 'core.hooksPath is in the worktree (.githooks)'
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/git-hooks/.git/../.githooks"
+hooks_warns 'core.hooksPath is in the worktree'
+ln -s "$TMP/git-hooks/.githooks" "$TMP/linked-hooks"
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/linked-hooks"
+hooks_warns 'core.hooksPath is in the worktree'
+git -C "$TMP/git-hooks" config --unset core.hooksPath
+ln -s ../../.githooks/pre-commit "$TMP/git-hooks/.git/hooks/pre-commit"
+hooks_warns 'the Git hook .git/hooks/pre-commit is a symlink into the worktree'
+rm "$TMP/git-hooks/.git/hooks/pre-commit"
+ln -s "$TMP/git-hooks/.githooks/pre-commit" "$TMP/host-hooks/pre-push"
+git -C "$TMP/git-hooks" config core.hooksPath "$TMP/host-hooks"
+hooks_warns 'host-hooks/pre-push is a symlink into the worktree'
+rm "$TMP/host-hooks/pre-push"
+chmod 000 "$TMP/host-hooks"
+if [ ! -r "$TMP/host-hooks" ]; then
+  hooks_warns 'the Git hooks directory'
+fi
+chmod 755 "$TMP/host-hooks"
+git -C "$TMP/git-hooks" config core.fsmonitor true
+git -C "$TMP/git-hooks" config core.sshCommand 'ssh -o BatchMode=yes'
+hooks_clean "core.fsmonitor true and an ssh on PATH"
+git -C "$TMP/git-hooks" config core.fsmonitor .githooks/pre-commit
+hooks_warns 'core.fsmonitor runs a relative path (.githooks/pre-commit)'
+git -C "$TMP/git-hooks" config core.fsmonitor "$TMP/git-hooks/.githooks/pre-commit"
+hooks_warns 'core.fsmonitor runs a program in the worktree'
+git -C "$TMP/git-hooks" config --unset core.fsmonitor
+git -C "$TMP/git-hooks" config core.sshCommand "$TMP/git-hooks/.githooks/pre-commit -v"
+hooks_warns 'core.sshCommand runs a program in the worktree'
+# up and rebuild print the same problems as one stderr line, and still start
+# with the same exit code.
+git -C "$TMP/git-hooks" config core.hooksPath .githooks
+ln -s ../../.githooks/pre-commit "$TMP/git-hooks/.git/hooks/pre-commit"
+for command in up rebuild; do
+  : > "$log"
+  out=$(git_paths_run "$TMP/git-hooks" "$command") || fail "$command failed when it only had to warn about Git hooks"
+  [ "$(echo "$out" | grep -c 'warning: host Git can run code that the agent changes')" = 1 ] \
+    || { printf '%s\n' "$out" >&2; fail "$command did not print one Git hooks warning line"; }
+  echo "$out" | grep 'warning: host Git can run' | grep -Fq 'core.hooksPath is in the worktree (.githooks)' \
+    || fail "$command did not name core.hooksPath"
+  echo "$out" | grep 'warning: host Git can run' | grep -Fq 'core.sshCommand runs a program in the worktree' \
+    || fail "$command did not join the problems into its one warning line"
+  grep -Fq 'devcontainer <up>' "$log" || fail "$command did not start after the Git hooks warning: $(cat "$log")"
+done
+git -C "$TMP/git-hooks" config --unset core.sshCommand
+git -C "$TMP/git-hooks" config --unset core.hooksPath
+rm "$TMP/git-hooks/.git/hooks/pre-commit"
+out=$(git_paths_run "$TMP/git-hooks" up) || fail "up failed with safe Git hooks"
+echo "$out" | grep -q 'Git can run code' && fail "up warned about safe Git hooks"
+# A core.hooksPath that Git cannot read (an unknown ~user exits 128) gives a
+# warning, and up still starts. Under bash 4+ an unset variable here once
+# stopped the start with exit 1.
+git -C "$TMP/git-hooks" config core.hooksPath '~aic-no-such-user/hooks'
+hooks_warns 'could not read core.hooksPath'
+: > "$log"
+out=$(git_paths_run "$TMP/git-hooks" up) || fail "up failed when Git could not read core.hooksPath"
+grep -Fq 'devcontainer <up>' "$log" || fail "up did not start when Git could not read core.hooksPath"
+# git -C cannot run with this value set, so edit the file directly.
+git config --file "$TMP/git-hooks/.git/config" --unset core.hooksPath
+[ ! -e "$marker" ] || fail "a Git hook check ran a hook"
+git_paths_check "$TMP/git-hooks" sync >/dev/null
 
 # `aic signing` creates the signing/ dir as vscode (0700, owned by the runtime
 # UID) inside the container. The host-side signing_state probe runs busybox as
@@ -2949,5 +3563,44 @@ done
 grep -qE '^[[:space:]]*CONTAINERS:[[:space:]]*0[[:space:]]*$' \
   "$TMP/sync-phases/.devcontainer/docker-compose.yml" \
   || fail "sync kept an inconsistent Docker toggle"
+
+# Arguments of up, rebuild, run, and shell. aic gives devcontainer up only the
+# log options after `--`; every other option is a refusal (exit 1) and starts
+# nothing. A bad call exits 2 and starts nothing. devcontainer exec never gets
+# an option from the arguments of aic run.
+gate_project "$TMP/args"
+args_rc() { local rc=0; gate_run "$TMP/args" "$ROOT/aic" "$@" </dev/null >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+: > "$log"
+[ "$(args_rc up -- --log-level debug --log-format=json --terminal-columns 120 --terminal-rows=40)" = 0 ] \
+  || fail "up refused the allowed devcontainer up options"
+grep -Fq 'devcontainer <up> <--workspace-folder> <.> <--log-level> <debug> <--log-format> <json> <--terminal-columns> <120> <--terminal-rows> <40>' "$log" \
+  || fail "up did not pass the allowed options to devcontainer up: $(cat "$log")"
+: > "$log"
+[ "$(args_rc rebuild --allow-unsafe -- --log-level=trace)" = 0 ] || fail "rebuild refused --log-level=trace"
+grep -Fq '<--remove-existing-container> <--build-no-cache> <--log-level> <trace>' "$log" \
+  || fail "rebuild did not pass --log-level to devcontainer up: $(cat "$log")"
+for option in --mount --remote-env --override-config --config --workspace-folder --docker-path \
+    --additional-features --id-label --skip-post-create --dotfiles-repository --secrets-file; do
+  for cmd in up rebuild; do
+    : > "$log"
+    [ "$(args_rc "$cmd" -- "$option" x)" = 1 ] || fail "$cmd did not refuse '$option' after -- with exit 1"
+    [ ! -s "$log" ] || fail "$cmd ran a program after it refused '$option': $(cat "$log")"
+  done
+done
+for args in "up --bogus" "up --log-level debug" "rebuild extra" "up -- --log-level=loud" "shell extra" \
+    "run --container-id x ls" "run -- --remote-env A=b ls" "run" "down extra" "destroy --no"; do
+  : > "$log"
+  # shellcheck disable=SC2086
+  [ "$(args_rc $args)" = 2 ] || fail "aic $args did not exit 2"
+  [ ! -s "$log" ] || fail "aic $args ran a program after a usage error: $(cat "$log")"
+done
+: > "$log"
+[ "$(args_rc run -- ls -la)" = 0 ] || fail "run -- ls -la failed"
+grep -Fq 'devcontainer <exec> <--workspace-folder> <.> <ls> <-la>' "$log" \
+  || fail "run did not give the command right after --workspace-folder: $(cat "$log")"
+# A failed devcontainer up is a failure (1), never the usage-error code.
+rc=0
+gate_run "$TMP/args" env AIC_FAKE_UP_EXIT=2 "$ROOT/aic" up </dev/null >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "up gave exit $rc when devcontainer up exited 2"
 
 echo "OK: host CLI symlink, merge, provenance, naming, and fail-closed checks passed"

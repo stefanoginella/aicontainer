@@ -1,8 +1,8 @@
 {
-  "name": "aic-project",
+  "name": "aic-fixture-0123456789ab",
   "networks": {
     "default": {
-      "name": "aic-project_default",
+      "name": "aic-fixture-0123456789ab_default",
       "ipam": {}
     }
   },
@@ -182,8 +182,9 @@
         "ALL"
       ],
       "command": [
-        "sleep",
-        "infinity"
+        "/bin/sh",
+        "-c",
+        "if [ -e /workspace/.devcontainer/firewall-enable ] || [ -L /workspace/.devcontainer/firewall-enable ]; then\n  /usr/bin/sudo -n /usr/local/bin/aic-firewall auto || {\n    echo \"aic: .devcontainer/firewall-enable is set, but the firewall could not be enabled. The container stops.\" >&2\n    exit 1\n  }\nfi\nexec sleep infinity\n"
       ],
       "depends_on": {
         "aic-auth-sync": {
@@ -374,10 +375,10 @@
       "external": true
     },
     "aic-sanitized-seed": {
-      "name": "aic-project_aic-sanitized-seed"
+      "name": "aic-fixture-0123456789ab_aic-sanitized-seed"
     },
     "aic-sessions": {
-      "name": "aic-project_aic-sessions"
+      "name": "aic-fixture-0123456789ab_aic-sessions"
     },
     "aic-shell-history": {
       "name": "aic-shell-history",

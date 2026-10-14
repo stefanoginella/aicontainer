@@ -29,6 +29,7 @@ SCRIPTS=(
   aic
   install.sh
   .githooks/pre-push
+  lib/aic/json.sh
   lib/aic/runtime.sh
   lib/aic/identity.sh
   lib/aic/selection.sh
@@ -48,6 +49,8 @@ SCRIPTS=(
   tests/fixtures/validate/regenerate.sh
   tests/test-aic-chown-volume-validation.sh
   tests/test-aic-docker-runtime.sh
+  tests/test-aic-firewall-presets.sh
+  tests/test-aic-firewall-relay.sh
   tests/test-aic-host-security.sh
   tests/test-aic-package.sh
   tests/test-aic-shellcheck.sh

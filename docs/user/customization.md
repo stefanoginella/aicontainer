@@ -1,7 +1,9 @@
 # Customize a project
 
 This page explains how to customize the devcontainer of one project with
-project-owned files. These files survive `aic sync`.
+project-owned files. These files survive `aic sync`. For the files that each
+stack needs (Node.js, Python, Go, Rust, and more), see the
+[Stack reference](stack-reference.md).
 
 ## Managed files and project-owned files
 
@@ -191,8 +193,7 @@ Keep tool caches under `~/.cache/` so that they fit this boundary.
 ## Add project steps after create
 
 Use this section to run a step on every container creation. Examples are
-`lefthook install`, `pre-commit install`, `npm ci`, or data for a local
-database. Do not edit these files:
+`npm ci`, `uv sync`, or data for a local database. Do not edit these files:
 
 - The `postCreateCommand` in `devcontainer.json`. Each sync overwrites it.
 - `post-create.py` and its `post_create_*.py` modules. They are in the
@@ -205,8 +206,19 @@ Use a **`.devcontainer/post-create.project.sh`** file:
 # .devcontainer/post-create.project.sh — runs as `vscode`, cwd /workspace,
 # after all aic setup, on every container create. Opt-in by presence.
 set -euo pipefail
-lefthook install
+if [ -f package-lock.json ]; then
+  npm ci --no-audit || echo "[post-create] npm ci failed"
+fi
 ```
+
+> **Note:** Do not run a Git hook installer here, for example
+> `lefthook install`, `husky install`, or `pre-commit install`. The container
+> mounts `.git/hooks` read-only, so the installer fails. An installer on the
+> host writes hooks that run project files, and the agent can change those
+> files. To keep hooks safe on the host, follow
+> [Git hooks on the host](security.md#git-hooks-on-the-host). For a form that
+> skips the install when `.git/hooks` is read-only, see
+> [Start `post-create.project.sh`](stack-reference.md#start-post-createprojectsh).
 
 The base `post-create.py` runs this script last. At that time, the AI tools,
 the Git config, and the volume ownership are ready. So your steps see a fully

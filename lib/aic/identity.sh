@@ -57,28 +57,72 @@ expected_project_label () {
   printf '%s\n' "$base"
 }
 
-# Resolve the name encoded by the current managed Compose file. Only accept the
-# exact value aic computes for this path; a repository-controlled arbitrary
-# `name:` must never make `aic down` / `destroy` target somebody else's stack.
-# Old files without the managed name retain the legacy resolution until sync.
+# The one top-level name line of the managed Compose file, byte for byte. The
+# committed file holds no path-specific value: Compose interpolates the name
+# from AIC_PROJECT_NAME, which aic exports itself and writes into the
+# gitignored .devcontainer/.env (write_runtime_environment_file). A missing
+# value fails, never falls back. Both templates must contain this exact line.
+# shellcheck disable=SC2016 # the line is literal Compose text, not shell
+AIC_COMPOSE_NAME_LINE='name: ${AIC_PROJECT_NAME:?run aic up or aic sync}'
+
+# Resolve the project name of the current managed Compose file. Never take a
+# name from the repository: return expected_project_name() only when the file
+# has the exact managed line, or the exact earlier literal `name: <expected>`
+# that aic wrote before the line existed ('aic sync' migrates it). A
+# repository-controlled `name:` must never make `aic down` / `destroy` target
+# somebody else's stack. Old files without a top-level name keep the legacy
+# resolution until sync. Every other form fails.
 project_name () {
-  local expected encoded=""
+  local expected file=.devcontainer/docker-compose.yml
   expected="$(expected_project_name)"
-  if [ -f .devcontainer/docker-compose.yml ] && [ ! -L .devcontainer/docker-compose.yml ]; then
-    if ! grep -qE '^name[[:space:]]*:' .devcontainer/docker-compose.yml; then
+  if [ -f "$file" ] && [ ! -L "$file" ]; then
+    if ! grep -qE '^name[[:space:]]*:' "$file"; then
       legacy_project_name
       return 0
     fi
-    encoded="$(sed -n 's/^name[[:space:]]*:[[:space:]]*\([a-z0-9][a-z0-9_-]*\)[[:space:]]*$/\1/p' \
-      .devcontainer/docker-compose.yml | head -n1)"
-    [ "$encoded" = "$expected" ] || \
-      die "managed Compose name is missing, malformed, or belongs to another path — run 'aic sync'"
-    [ "$(grep -cE '^name[[:space:]]*:' .devcontainer/docker-compose.yml)" = "1" ] || \
+    [ "$(grep -cE '^name[[:space:]]*:' "$file")" = "1" ] || \
       die "managed Compose file has multiple top-level names — run 'aic sync'"
-    printf '%s\n' "$expected"
-    return 0
+    if grep -Fqx -- "$AIC_COMPOSE_NAME_LINE" "$file" \
+        || grep -Fqx -- "name: $expected" "$file"; then
+      printf '%s\n' "$expected"
+      return 0
+    fi
+    die "managed Compose name is missing, malformed, or belongs to another path — run 'aic sync'"
   fi
   legacy_project_name
+}
+
+# Print why the managed Compose file is not in the managed name form, or
+# nothing. The gate (validate_project_security) and doctor run it, so validate,
+# initialize, and every start require the form:
+#   - the first line that is not blank or a comment is a plain key at
+#     column 0, so the root mapping starts at column 0 and every top-level
+#     key is at column 0;
+#   - exactly one line at column 0 starts with `name:` (spaces before the
+#     colon count too), and it equals AIC_COMPOSE_NAME_LINE;
+#   - every other line at column 0 is blank, a comment, or a plain key.
+# The first rule stops an indented root mapping, where the real name key is
+# indented and the fixed line hides inside a multi-line quoted scalar. With
+# the root at column 0, a real name key is at column 0 too, so the hidden copy
+# makes the count go above one. The third rule closes the YAML spellings that
+# a line check cannot read as the name: a quoted or escaped key, an explicit
+# `?` key, a merge key, a flow mapping, a tag, or a second document (`---`).
+# The resolved name check in lib/validate.mjs cannot see these, because with
+# AIC_PROJECT_NAME set, `${AIC_PROJECT_NAME:-x}` resolves to the same name.
+compose_name_line_problem () {
+  local file=.devcontainer/docker-compose.yml first
+  [ -f "$file" ] && [ ! -L "$file" ] || return 0
+  # sed stops at the first line itself. A `grep | head` pipe here wrote
+  # "grep: write error: Broken pipe" where SIGPIPE is ignored (CI runners).
+  first="$(sed -n -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' -e p -e q "$file")"
+  if ! printf '%s\n' "$first" | grep -qE '^[A-Za-z][A-Za-z0-9_-]*:'; then
+    printf '%s\n' ".devcontainer/docker-compose.yml must start its top-level mapping with a plain key at column 0; run aic sync"
+  elif [ "$(grep -cE '^name[[:space:]]*:' "$file")" != "1" ] \
+      || ! grep -Fqx -- "$AIC_COMPOSE_NAME_LINE" "$file"; then
+    printf '%s\n' ".devcontainer/docker-compose.yml must have exactly one top-level name line, '$AIC_COMPOSE_NAME_LINE'; run aic sync"
+  elif grep -qvE '^([[:space:]]|#|$|[A-Za-z][A-Za-z0-9_-]*:)' "$file"; then
+    printf '%s\n' ".devcontainer/docker-compose.yml has top-level YAML that is not a plain key; run aic sync"
+  fi
 }
 
 # True when the Compose file declares any top-level project name. A missing
@@ -90,6 +134,16 @@ compose_has_project_name () {
     grep -qE '^name[[:space:]]*:' .devcontainer/docker-compose.yml
 }
 
+# Run Docker Compose on aic's installed trusted template ($TEMPLATE_DIR). The
+# caller passes -p. The template's name line still needs AIC_PROJECT_NAME: -p
+# sets the project, but Compose interpolates the name first and fails when the
+# variable is missing. The value comes from aic, never from the environment.
+trusted_template_compose () {
+  local name
+  name="$(expected_project_name)" || return 1
+  AIC_PROJECT_NAME="$name" docker compose "$@"
+}
+
 # The Dev Containers CLI does not always use the Compose `name:` validated
 # above. It takes the first non-empty name from:
 #   1. COMPOSE_PROJECT_NAME in its own environment;
@@ -99,10 +153,12 @@ compose_has_project_name () {
 # Sources 1 and 2 would move this checkout into another Compose project: the
 # containers and session volumes of another checkout, or the user's own app
 # stack. aic's own CLI calls pin the managed name (source 1), so the root .env
-# never takes effect there.
+# never takes effect there. They also pin AIC_PROJECT_NAME, the value of the
+# managed name line, so an inherited value cannot win over .devcontainer/.env.
 pin_compose_project_name () {
   COMPOSE_PROJECT_NAME="$(project_name)" || exit 1
-  export COMPOSE_PROJECT_NAME
+  AIC_PROJECT_NAME="$(expected_project_name)" || exit 1
+  export COMPOSE_PROJECT_NAME AIC_PROJECT_NAME
 }
 
 # Return 1, with an actionable message, when a direct Dev Containers start
@@ -110,10 +166,30 @@ pin_compose_project_name () {
 # not use this project's managed name. composeNameConflict() in
 # lib/project-identity.mjs mirrors the CLI's lookup; it prints only the source
 # that conflicts. A helper that cannot run fails the check with its own message.
+# The helper sees the AIC_PROJECT_NAME that this process inherited (saved at
+# the top of aic), not the value that aic exports itself, because a direct
+# start has only the inherited one.
+# The other keys of .devcontainer/.env (AIC_DOCKER_SOCKET, AIC_RUNTIME_USER,
+# AIC_STATUS_*) are host values: an inherited one would replace the socket,
+# the sidecar user, or the status relay consent. Any inherited value is
+# refused, an empty one too. `aic up` never passes them on
+# (without_runtime_environment()).
+# shellcheck disable=SC2154 # aic_inherited_* are set in aic
 check_devcontainer_project_name () {
-  local expected conflict
+  local expected managed conflict key
+  for key in $aic_inherited_runtime_keys; do
+    err "$key in the environment would replace the host value in .devcontainer/.env — unset it, or start with 'aic up'"
+    return 1
+  done
   expected="$(project_name)" || return 1
-  if ! conflict="$(aic_helper compose-name-conflict "$expected")"; then
+  managed="$(expected_project_name)" || return 1
+  if ! conflict="$(
+      if [ "$aic_inherited_project_name_set" = 1 ]; then
+        AIC_PROJECT_NAME="$aic_inherited_project_name"; export AIC_PROJECT_NAME
+      else
+        unset AIC_PROJECT_NAME
+      fi
+      aic_helper compose-name-conflict "$expected" "$managed")"; then
     err "could not check COMPOSE_PROJECT_NAME for a direct Dev Containers start"
     return 1
   fi
@@ -121,6 +197,15 @@ check_devcontainer_project_name () {
     "") return 0 ;;
     environment)
       err "COMPOSE_PROJECT_NAME in the environment would replace this project's Compose name ($expected) — unset it, or start with 'aic up'"
+      ;;
+    managed-environment)
+      err "AIC_PROJECT_NAME in the environment would replace this project's Compose name ($managed) — unset it, or start with 'aic up'"
+      ;;
+    env-files)
+      err "COMPOSE_ENV_FILES in the environment would make Compose skip .devcontainer/.env, which holds this project's Compose name — unset it"
+      ;;
+    env-disabled)
+      err "COMPOSE_DISABLE_ENV_FILE in the environment would make Compose skip .devcontainer/.env, which holds this project's Compose name — unset it"
       ;;
     dotenv)
       err "the repository-root .env sets COMPOSE_PROJECT_NAME, which would replace this project's Compose name ($expected) — remove that line (an app stack can set a top-level 'name:' in its own Compose file), or start with 'aic up'"
@@ -153,7 +238,7 @@ AIC_POST_CREATE_MODULES="post_create_common.py post_create_claude_reset.py post_
 # tests/test-aic-hook-files.py checks this. template.sh and validation.sh read it.
 # shellcheck disable=SC2034
 AIC_HOOK_FILES="agent-status.py claude-settings.json opencode-guardrail.js pre-tool-use.sh"
-AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py $AIC_POST_CREATE_MODULES aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh statusline.sh statusline.mjs statusline.js statusline.py"
+AIC_CONTROL_FILES="devcontainer.json README.md docker-compose.yml .env .gitignore Dockerfile post-create.py $AIC_POST_CREATE_MODULES aic-firewall aic-chown-volumes aic-lock-user-config .zshrc Dockerfile.project firewall-allowlist firewall-enable firewall-presets chown-paths post-create.project.sh docker-compose.override.yml vscode-extensions vscode-settings.json shell-rc.zsh p10k.zsh statusline.sh statusline.mjs statusline.js statusline.py"
 
 validate_devcontainer_paths () {
   local require_dir="${1:-optional}" path name linked
@@ -255,6 +340,112 @@ git_control_path_problems () {
       printf '%s\n' ".git/commondir must contain only '.' — Git takes this checkout's config and hooks from the directory it names; inspect it before you run Git here, then remove it"
     fi
   fi
+}
+
+# Print the physical path of the absolute path $1. Follow every symlink, also
+# in a missing tail, and read nothing but link targets. Return 1 after 40
+# links or when a directory cannot be entered. $2 counts the links so far.
+git_hooks_resolve () {
+  local path="$1" links="${2:-0}" dir link
+  while :; do
+    if [ -d "$path" ]; then
+      (cd -P -- "$path" 2>/dev/null && canonical_root)
+      return
+    fi
+    if [ -L "$path" ]; then
+      links=$((links + 1))
+      [ "$links" -le 40 ] || return 1
+      link="$(readlink -- "$path")" || return 1
+      case "$link" in /*) path="$link" ;; *) path="$(dirname -- "$path")/$link" ;; esac
+      continue
+    fi
+    dir="$(git_hooks_resolve "$(dirname -- "$path")" "$((links + 1))")" || return 1
+    printf '%s/%s\n' "${dir%/}" "$(basename -- "$path")"
+    return 0
+  done
+}
+
+# The container mounts .git/hooks and .git/config read-only, but host Git also
+# runs hooks from core.hooksPath, through hook symlinks, and the programs that
+# core.fsmonitor and core.sshCommand name. When one of these lives in the
+# worktree, the agent can change it, and the next host commit or push runs
+# agent code. Print one problem per line. This checks only where these files
+# live, never what they do, and it never runs a hook. Call it only when
+# git_control_path_problems() is empty: a planted .git/commondir would make
+# Git read the config of another directory.
+git_hooks_problems () {
+  local root dir resolved="" hook target key value word rc
+  command -v git >/dev/null 2>&1 || return 0
+  root="$(canonical_root)"
+  rc=0
+  value="$(git --git-dir=.git config --type=path --get core.hooksPath 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0) case "$value" in /*) dir="$value" ;; *) dir="$root/$value" ;; esac ;;
+    1) dir="$root/.git/hooks" ;;
+    *) printf '%s\n' "could not read core.hooksPath with Git"; dir="" ;;
+  esac
+  if [ -n "$dir" ] && ! resolved="$(git_hooks_resolve "$dir")"; then
+    printf 'could not resolve the Git hooks directory %s\n' "$dir"
+  elif [ -n "$dir" ] && [ "$resolved" != "$root/.git/hooks" ] \
+      && case "$resolved/" in "$root/"*) true ;; *) false ;; esac; then
+    printf 'core.hooksPath is in the worktree (%s): the agent can change the hooks that host Git runs\n' "$value"
+  elif [ -d "$resolved" ] && { [ ! -r "$resolved" ] || [ ! -x "$resolved" ]; }; then
+    printf 'could not read the Git hooks directory %s\n' "$resolved"
+  elif [ -d "$resolved" ]; then
+    for hook in "$resolved"/*; do
+      [ -L "$hook" ] || continue
+      case "$hook" in *.sample) continue ;; esac
+      if ! target="$(git_hooks_resolve "$hook")"; then
+        printf 'could not resolve the Git hook symlink %s\n' "${hook#"$root/"}"
+      else
+        case "$target/" in
+          "$root/.git/hooks/"*) ;;
+          "$root/"*) printf 'the Git hook %s is a symlink into the worktree: the agent can change it\n' "${hook#"$root/"}" ;;
+        esac
+      fi
+    done
+  fi
+  for key in core.fsmonitor core.sshCommand; do
+    rc=0
+    value="$(git --git-dir=.git config --get "$key" 2>/dev/null)" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) continue ;;
+      *) printf 'could not read %s with Git\n' "$key"; continue ;;
+    esac
+    if [ "$key" = core.fsmonitor ]; then
+      case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+        true|false|yes|no|on|off|1|0|'') continue ;;
+      esac
+    fi
+    # Only the first word: aic checks where the program is, not what it does.
+    word="${value#"${value%%[![:space:]]*}"}"
+    word="${word%%[[:space:]]*}"
+    case "$word" in \~/*) word="$HOME/${word#\~/}" ;; esac
+    case "$word" in
+      /*) ;;
+      */*) printf '%s runs a relative path (%s): host Git runs it from the worktree\n' "$key" "$word"; continue ;;
+      *) continue ;;
+    esac
+    if ! target="$(git_hooks_resolve "$word")"; then
+      printf 'could not resolve the %s program %s\n' "$key" "$word"
+    else
+      case "$target/" in
+        "$root/"*) printf '%s runs a program in the worktree (%s): the agent can change it\n' "$key" "$word" ;;
+      esac
+    fi
+  done
+  return 0
+}
+
+# aic up and aic rebuild: print the git_hooks_problems() lines as one warning.
+# It never blocks a start.
+warn_git_hooks () {
+  local problems
+  problems="$(git_hooks_problems | tr '\n' '\t')"
+  problems="${problems%$'\t'}"
+  [ -z "$problems" ] \
+    || err "warning: host Git can run code that the agent changes: ${problems//$'\t'/; } — see 'Git hooks on the host' in docs/user/security.md"
 }
 
 # Create the control files that Git does not make for a main checkout, so the

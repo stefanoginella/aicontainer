@@ -110,6 +110,32 @@ These rules do not cover apt steps and uv steps.
    - `uv python install`. uv checks the sha256 that is built into the
      digest-pinned uv image.
 
+## Why Renovate, not Dependabot
+
+`renovate.json` keeps the pins current. Dependabot cannot do these tasks:
+
+- **Bump an `ARG *_VERSION` pin.** In a Dockerfile, Dependabot updates only
+  `FROM` lines. A custom regex manager reads the `# renovate:` comment above
+  each `ARG` (git-delta, fzf, fnm, Node).
+- **Bump an `ARG *_COMMIT` pin.** The `git-refs` datasource proposes the next
+  commit on the upstream branch of the zsh theme, the zsh plugins, and the
+  Node release keyring. Dependabot has no datasource for a commit on a branch.
+- **Bump a digest in a file that is not a manifest.** `smoke.yml` asserts the
+  exact digest-pinned `docker-socket-proxy` image. A regex manager keeps it
+  equal to the Compose files. Without it, each proxy bump fails the smoke test.
+- **Bump both Dockerfiles in one PR.** `template/Dockerfile` and
+  `.devcontainer/Dockerfile` change together, so the dogfood copy does not
+  drift.
+- **Tell the reviewer what to do by hand.** `prBodyNotes` asks for the new
+  `*_SHA256` checksums or a keyring review. The build fails closed until the
+  maintainer does this (rule 2).
+- **Pin a GitHub Action to a SHA.** `helpers:pinGitHubActionDigests` changes a
+  tag to a full commit SHA and writes the `# vX.Y.Z` comment. Dependabot bumps
+  an action that is already pinned, but it does not pin a tag.
+
+Do not add a Dependabot version-update config next to Renovate. Two bots open
+conflicting PRs for the same pins.
+
 ## Update a pin
 
 ### A release checksum

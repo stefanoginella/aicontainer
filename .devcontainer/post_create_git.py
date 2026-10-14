@@ -27,6 +27,23 @@ SIGNING_KEY = SIGNING / "id_ed25519"             # private key (0600, vscode-own
 SIGNING_MODE = SIGNING / "mode"                  # "auto" | "byok" | "disabled"
 SIGNING_ALLOWED = SIGNING / "allowed_signers"    # for in-container verification
 
+# HTTPS push/fetch credentials for GitHub, through the gh login made inside the
+# container. This is the block that `gh auth setup-git` writes; gh cannot write
+# it here, because the managed global config is root-owned 0444. The empty
+# `helper =` resets helpers from earlier config scopes, so only gh answers for
+# these URLs. The helper names the apt-installed, root-owned /usr/bin/gh by
+# absolute path, never a bare `gh`: ~/.local/bin is agent-writable and comes
+# first on PATH. It gives the agent no new power, because the agent already
+# can read the gh token in ~/.config/gh/hosts.yml. aic-lock-user-config accepts
+# only this exact block (REQUIRED_EXACT_VALUE_LISTS); keep the two aligned.
+# There is no helper for other hosts (GitHub Enterprise, GitLab).
+GH_CREDENTIAL_HELPER = "!/usr/bin/gh auth git-credential"
+GH_CREDENTIAL_URLS = ("https://github.com", "https://gist.github.com")
+GH_CREDENTIAL_CONFIG = "".join(
+    f'[credential "{url}"]\n    helper =\n    helper = {GH_CREDENTIAL_HELPER}\n'
+    for url in GH_CREDENTIAL_URLS
+)
+
 
 def _host_git_config(key: str) -> str:
     """Read one value from the fixed-key JSON git seed."""
@@ -140,6 +157,8 @@ def setup_gitconfig() -> None:
             log(f"warning: could not seed git preference {key}: {e}")
 
     # Container settings and signing go last so they override seeded values.
+    # The GitHub credential helper is the last block. The seed never holds a
+    # credential.* key, and the validator accepts only its exact value list.
     signing = setup_commit_signing()
     with GITCONFIG_STAGING.open("a") as local:
         local.write(
@@ -152,6 +171,7 @@ def setup_gitconfig() -> None:
             f"[merge]\n    conflictstyle = diff3\n"
             f"[diff]\n    colorMoved = default\n"
             f"{signing}"
+            f"{GH_CREDENTIAL_CONFIG}"
         )
     # The staging config contains only the sanitizer's non-secret fixed-key
     # preferences plus aic-owned constants. Root intentionally lacks broad
@@ -169,7 +189,7 @@ def lock_config() -> None:
     DAC_OVERRIDE, so the unprivileged owner removes its own staging files after
     the atomic install."""
     try:
-        subprocess.run(["sudo", "/usr/local/bin/aic-lock-user-config"], check=True)
+        subprocess.run(["/usr/bin/sudo", "-n", "/usr/local/bin/aic-lock-user-config"], check=True)
         log(f"installed root-owned user config under {GITCONFIG_MANAGED.parent}")
     except (OSError, subprocess.CalledProcessError) as e:
         log(f"warning: aic-lock-user-config failed: {e}")

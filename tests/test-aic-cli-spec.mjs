@@ -225,8 +225,10 @@ test('bash completion offers the right words', () => {
     return res.stdout.split('\n').filter(Boolean).sort();
   };
   assert.deepEqual(complete('aic destroy -'), ['--yes', '-y']);
-  assert.deepEqual(complete('aic up --'), ['--allow-unsafe']);
-  assert.deepEqual(complete('aic rebuild --'), ['--allow-unsafe']);
+  assert.deepEqual(complete('aic up --'), ['--', '--allow-unsafe']);
+  assert.deepEqual(complete('aic rebuild --'), ['--', '--allow-unsafe']);
+  assert.deepEqual(complete('aic up -- --'), ['--log-format', '--log-level', '--terminal-columns', '--terminal-rows']);
+  assert.deepEqual(complete('aic rebuild --allow-unsafe -- --log-'), ['--log-format', '--log-level']);
   assert.deepEqual(complete('aic trust --'), ['--revoke']);
   assert.deepEqual(complete('aic init --with '), ['claude-code', 'claude-code,codex,opencode', 'codex', 'opencode']);
   assert.deepEqual(complete('aic sync --shell '), ['bash', 'fish', 'zsh']);
@@ -236,18 +238,24 @@ test('bash completion offers the right words', () => {
   assert.deepEqual(complete('aic signing '), ['--register', 'auto', 'byok', 'disable', 'status']);
   assert.deepEqual(complete('aic signing --register '), ['--register', 'auto', 'byok', 'disable', 'status']);
   assert.deepEqual(complete('aic signing auto '), ['--register']);
-  assert.deepEqual(complete('aic doctor '), []);
+  assert.deepEqual(complete('aic doctor '), ['--json']);
+  assert.deepEqual(complete('aic status --'), ['--json']);
+  assert.deepEqual(complete('aic validate --'), ['--json']);
+  assert.deepEqual(complete('aic version --'), ['--json']);
   assert.deepEqual(complete('aic __'), []);
   assert.deepEqual(complete('aic va'), ['validate']);
 });
 
 test('completion keeps its errors for a missing or unknown shell', () => {
   let res = aic('completion');
-  assert.equal(res.status, 1);
+  assert.equal(res.status, 2);
   assert.equal(res.stdout, '');
   assert.equal(res.stderr, 'aic: usage: aic completion <bash|zsh|fish>\n');
+  res = aic('completion', 'zsh', 'extra');
+  assert.equal(res.status, 2);
+  assert.equal(res.stdout, '');
   res = aic('completion', 'tcsh');
-  assert.equal(res.status, 1);
+  assert.equal(res.status, 2);
   assert.equal(res.stdout, '');
   assert.equal(res.stderr, 'aic: unsupported shell: tcsh (supported: bash, zsh, fish)\n');
   res = run(process.execPath, [SPEC, 'completion', 'tcsh']);
@@ -262,4 +270,92 @@ test('importing the table prints nothing', () => {
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.stdout, '');
   assert.equal(res.stderr, '');
+});
+
+// --- usage errors -------------------------------------------------------------
+
+// Every bad call exits 2 and prints nothing on stdout. Each case runs outside a
+// project, so a usage error must come before any project check (that is exit
+// 1). An empty argument is a bad call too.
+test('each usage error exits 2 with no stdout', () => {
+  const cases = [
+    // unknown command
+    ['bogus'], ['--bogus'],
+    // unknown flag
+    ['init', '--bogus'], ['sync', '--bogus'], ['doctor', '--bogus'], ['status', '--bogus'],
+    ['validate', '--bogus'], ['up', '--bogus'], ['rebuild', '--bogus'], ['trust', '--bogus'],
+    ['signing', '--bogus'], ['destroy', '--bogus'], ['version', '--bogus'],
+    // extra argument
+    ['doctor', '--json', 'extra'], ['status', 'extra'], ['validate', 'extra'], ['version', '--json', 'x'],
+    ['preflight', 'extra'], ['shell', 'extra'], ['shell', '-c', 'ls'], ['down', 'extra'], ['upgrade', 'extra'],
+    ['help', 'extra'], ['--help', 'extra'], ['completion', 'zsh', 'extra'], ['signing', 'auto', 'byok'],
+    ['up', 'extra'], ['rebuild', 'extra'], ['destroy', '--yes', 'extra'], ['trust', ''], ['initialize', 'extra'],
+    // missing argument
+    ['init', '--with'], ['init', '--shell'], ['sync', '--with'], ['sync', '--shell'], ['completion'], ['run'],
+    ['run', '--'], ['up', '--', '--log-level'], ['rebuild', '--', '--terminal-rows'],
+    // bad value
+    ['init', '--with', 'nope'], ['init', '--with='], ['init', '--shell', 'tcsh'], ['sync', '--with=codex,x'],
+    ['sync', '--shell=csh'], ['completion', 'tcsh'], ['signing', 'status', '--register'],
+    ['up', '--', '--log-level=loud'], ['up', '--', '--log-format', 'xml'], ['rebuild', '--', '--terminal-columns=0'],
+    ['up', '--', '--terminal-rows', '1000'],
+    // aic run: the command must come first, so it cannot set devcontainer exec options
+    ['run', '--container-id', 'x', 'ls'], ['run', '--remote-env', 'A=b', 'ls'], ['run', '--', '--config', 'x', 'ls'],
+  ];
+  for (const args of cases) {
+    const res = aic(...args);
+    assert.equal(res.status, 2, `aic ${args.join(' ')}: ${res.stderr}`);
+    assert.equal(res.stdout, '', `aic ${args.join(' ')} printed on stdout`);
+    assert.match(res.stderr, /aic: /, `aic ${args.join(' ')} gave no message`);
+  }
+});
+
+test('a refusal outside a project exits 1, not 2', () => {
+  for (const args of [['status'], ['validate'], ['up'], ['up', '--', '--log-level', 'debug'], ['shell'],
+    ['run', 'ls'], ['run', '--', 'ls'], ['down'], ['destroy', '--yes'], ['trust'], ['preflight'], ['signing']]) {
+    const res = aic(...args);
+    assert.equal(res.status, 1, `aic ${args.join(' ')}: ${res.stderr}`);
+  }
+});
+
+test('up and rebuild refuse every devcontainer up option that is not on the list, with exit 1', () => {
+  const up = COMMANDS.find(c => c.name === 'up');
+  const lifecycle = fs.readFileSync(path.join(REPO, 'lib', 'aic', 'lifecycle.sh'), 'utf8');
+  const m = /^AIC_UP_PASSTHROUGH="([^"]+)"$/m.exec(lifecycle);
+  assert.ok(m, 'lib/aic/lifecycle.sh has no AIC_UP_PASSTHROUGH list');
+  assert.deepEqual(m[1].split(' '), up.passthrough, 'AIC_UP_PASSTHROUGH and the passthrough of the table differ');
+  for (const cmd of COMMANDS.filter(c => c.passthrough)) {
+    assert.deepEqual(cmd.passthrough, up.passthrough, `${cmd.name} has another passthrough list`);
+  }
+  const dangerous = ['--mount', 'type=bind,source=/,target=/host', '--remote-env', '--override-config', '--config',
+    '--workspace-folder', '--docker-path', '--docker-compose-path', '--additional-features', '--id-label',
+    '--mount-workspace-git-root', '--skip-post-create', '--skip-non-blocking-commands', '--dotfiles-repository',
+    '--secrets-file', '--cache-from', '--gpu-availability', '--user-data-folder', '--container-data-folder',
+    '--update-remote-user-uid-default', '--prebuild', '--allow-unsafe', '--', 'extra', '--log-level-x'];
+  for (const name of ['up', 'rebuild']) {
+    for (const option of dangerous) {
+      const asValue = option.startsWith('-') ? [[name, '--', '--log-level', option], [name, '--', '--terminal-rows', option]] : [];
+      for (const args of [[name, '--', option], [name, '--', `${option}=x`], [name, '--', '--log-level', 'debug', option], ...asValue]) {
+        const res = aic(...args);
+        assert.equal(res.status, 1, `aic ${args.join(' ')}: ${res.stderr}`);
+        assert.match(res.stderr, /refusing to pass .* to devcontainer up/, `aic ${args.join(' ')}: ${res.stderr}`);
+      }
+    }
+  }
+});
+
+test('a bare aic prints the help and exits 0', () => {
+  const res = aic();
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /aic up/);
+});
+
+test('help names the passthrough options and the exit codes', () => {
+  const { text, blocks } = helpBlocks();
+  for (const cmd of COMMANDS.filter(c => c.passthrough)) {
+    assert.ok(hasWord(blocks.get(cmd.name), '--'), `aic help for ${cmd.name} does not name --`);
+  }
+  for (const option of COMMANDS.find(c => c.name === 'up').passthrough) {
+    assert.ok(hasWord(blocks.get('up'), option), `aic help for up does not name ${option}`);
+  }
+  assert.match(text, /^Exit codes:\n {2}0 .*\n {2}1 .*\n {2}2 /m);
 });

@@ -115,7 +115,8 @@ fetch_latest_version () {
 # Tier 2. Nudge (to stderr) when a newer aicontainer is published. Result cached
 # for 24h under $XDG_CACHE_HOME so it hits the network at most once a day; the CI
 # skip keeps the workflow CLI tests offline. Confined to `aic version`/`aic
-# upgrade` — deliberately off the `up`/`shell` hot path.
+# upgrade` — deliberately off the `up`/`shell` hot path. Sets aic_update_latest
+# to the latest version it knows (semver only) for `aic version --json`.
 check_for_update () {
   [ -n "${AIC_NO_UPDATE_CHECK:-}" ] && return 0
   [ -n "${CI:-}" ] && return 0
@@ -146,6 +147,9 @@ check_for_update () {
   fi
 
   is_semver "$latest" || return 0
+  # cmd_version_json (lifecycle.sh) reads it.
+  # shellcheck disable=SC2034
+  aic_update_latest="$latest"
   version_gt "$latest" "$cur" || return 0
 
   local y rst
@@ -165,7 +169,10 @@ check_for_update () {
 # Compose commonly add a leading "v" or a vendor suffix; diagnostics only need
 # the numeric compatibility floor.
 diagnostic_version () {
-  printf '%s\n' "$1" | grep -Eo '[0-9]+(\.[0-9]+){0,2}' | head -n1 || true
+  # A bash match, not `grep -o | head`: that pipe prints a broken-pipe error
+  # where SIGPIPE is ignored. Both take the leftmost, longest match.
+  [[ "$1" =~ [0-9]+(\.[0-9]+){0,2} ]] && printf '%s\n' "${BASH_REMATCH[0]}"
+  return 0
 }
 
 version_at_least () {

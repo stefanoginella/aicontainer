@@ -20,9 +20,11 @@ The host CLI makes every decision before Docker starts a container. The layout i
 - `aic` sets the bind-source cache of `export_runtime_environment()` at the top. Keep that assignment above the module load list, so that a value from the environment never seeds the cache.
 - `lib/aic/validation.sh` holds the pre-Docker gate (`validate_project_security()`), the exact-trust store, and Docker consent. The rules are in [Validation](validation.md).
 - The commands in `lifecycle.sh` and `signing.sh` call the gate before they give the project configuration to Dev Containers. The list of commands is in [Validation](validation.md). Do not remove a gate call, and do not move it after a Docker call.
+- Exit 1 (`die`) is a refusal, a blocker, or a failure. Exit 2 (`usage_die`) is only a bad call while a command parses its arguments, before it reads or changes any state. Never use `usage_die` for a security refusal. The codes are a public contract: see [Stability contract](../user/stability.md#exit-codes).
+- `aic up` and `aic rebuild` give `devcontainer up` only the options after `--` that `AIC_UP_PASSTHROUGH` (`lib/aic/lifecycle.sh`) and `passthrough` (`lib/cli-spec.mjs`) list: the log options. Other `devcontainer up` options can add mounts, environment, features, or another configuration, change the container or the Docker binary, or skip post-create. Do not widen the list. `aic run` refuses a command that starts with `-`, because `devcontainer exec` reads options up to the first argument that is not an option.
 - The other modules hold boundary checks too: the control-path and `.git` checks and the Compose name (`identity.sh`, see [Project identity](project-identity.md)), the socket and the status relay marker (`runtime.sh`, see [Host state](host-state.md)), the volume checks and ownership proofs (`volumes.sh`, see [Project identity](project-identity.md)), the Docker consent reset in `aic sync` (`init-sync.sh`), and the `is_semver()` gate on registry output (`versions.sh`, see [Version drift](version-drift.md)).
 
-Guarded by the broken-install cases in `tests/test-aic-host-security.sh` and the load-list checks in `tests/test-aic-package.sh`.
+Guarded by the broken-install cases in `tests/test-aic-host-security.sh` and the load-list checks in `tests/test-aic-package.sh`. The argument rules are guarded by the usage-error and pass-through cases in `tests/test-aic-cli-spec.mjs` and the "Arguments of up, rebuild, run, and shell" cases in `tests/test-aic-host-security.sh`.
 
 ## `lib/trust-hash.mjs`
 
@@ -91,14 +93,20 @@ This file sets the outbound allowlist and the unconditional metadata chains. The
 - A zero-IP result also aborts the change, and the active policy stays the same.
 - Never flush a live chain or a metadata chain.
 - Never set the policy to ACCEPT.
+- Never use `-m set` in a rule. It needs `CAP_NET_RAW`, which the devcontainer drops, so `enable` fails there. `accept_set_members_v4()` writes one exact `-d` rule for each member of the inactive set.
 - Never silently ignore configured IPv6 that cannot be filtered.
-- The host status relay uses its own ipset and an exact TCP-8787 rule. Never put `host.docker.internal` in the general all-port allowlist.
+- The host status relay uses its own ipset and an exact TCP-8787 rule. Never put `host.docker.internal` in the general all-port allowlist. The relay mode comes only from the read-only `.devcontainer/.env`, never from an environment. See [Host state](host-state.md#the-firewall-exception).
+- `is_internal_name()` refuses `localhost`, `*.localhost`, `*.internal`, and the managed service names in `firewall-allowlist` and in the presets. `refuse_internal_addresses_v4()` aborts the enable when the allowlist set holds the default gateway or an address of a host-gateway name or a managed service. Thus a raw address or a name that resolves there also fails.
+- A preset host comes only from the fixed `preset_domains()` table. A project file selects names, never hosts. Keep the names equal to `FIREWALL_PRESETS` in `lib/validate.mjs`.
+- `auto` only enables, and only when `.devcontainer/firewall-enable` exists. Keep the fail-closed start command in both Compose templates. See "Declarative enable and presets" in [Runtime policy](runtime-policy.md#declarative-enable-and-presets).
+- There is no `disable` or `flush` subcommand.
+- `enable` pins each allowlist name to its allowed addresses in a managed block in `/etc/hosts`. A CDN name (Fastly, CloudFront) gives other valid addresses to other resolvers, with a TTL of seconds. Without the pins, a later lookup in the container gets an address that the rules block. Pin only names of the allowlist set and only addresses in that set: never the socket proxy or the status relay. Remove the old block before the lookups (`getent` reads `/etc/hosts`), and write the new block after the IPv4 switch. A failed write is a warning: the rules stay on. `write_hosts_file()` never truncates first (it opens without `O_TRUNC`, writes, then cuts the tail) and ignores the signals that sudo relays while it writes.
 
 The OUTPUT chains accept `ESTABLISHED,RELATED` only with `--ctdir REPLY`. This matches replies to sessions that started from outside.
 
 > **Warning:** Do not use a blanket `ESTABLISHED,RELATED` accept. It keeps an outbound session alive that the container opened before `enable`, to a host that is not on the list.
 
-Guarded by the static check in `tests/test-aic-host-security.sh` and the "allowlist enable cuts a connection opened before it" smoke. The smoke uses throwaway containers, because you cannot undo `enable` in a running container.
+Guarded by the static check in `tests/test-aic-host-security.sh`, `tests/test-aic-firewall-presets.sh`, `tests/test-aic-firewall-relay.sh`, the "allowlist enable cuts a connection opened before it" smoke, the "firewall allows the opted-in status relay on its port only" smoke, and the "declared firewall is on at every start" smoke. The smoke uses throwaway containers, because you cannot undo `enable` in a running container.
 
 ## `template/hooks/pre-tool-use.sh`
 
@@ -169,7 +177,7 @@ The overlay rules are in "Personal config overlay" in [Shell startup and overlay
 - It installs a fixed `TARGETS` table, never argv.
 - It opens each `vscode`-owned staging inode without following links.
 - It atomically creates (never replaces) a `root:root 0444` destination under `/etc/aic/user-config/`.
-- The **required** `gitconfig` target is parsed with Git `--no-includes` under a minimal environment. It allows only fixed safe keys and exact aic values.
+- The **required** `gitconfig` target is parsed with Git `--no-includes` under a minimal environment. It allows only fixed safe keys and exact aic values. The only `credential.*` keys are the two required GitHub helper keys, each with an exact value list. See "GitHub credential helper" in [Host seeds, tool homes, and reusable auth](seeds-and-auth.md#github-credential-helper).
 - The **optional** personal overlay targets are `shell/rc.zsh`, `shell/p10k.zsh`, and `statusline/statusline.{sh,mjs,js,py}`. The helper installs them **without** content validation, because zsh and a statusline script cannot be allowlisted.
 
 The unvalidated install is safe only when all three of these conditions are true:

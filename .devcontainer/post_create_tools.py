@@ -38,6 +38,7 @@ from .post_create_common import (
     _safe_write_text,
     log,
 )
+from .post_create_container import FIREWALL_ENABLE_MARKER
 
 CODEX_RUNTIME_HOME = HOME / ".local" / "share" / "aic-tools" / "codex"
 CODEX_INSTALLER_URL = "https://chatgpt.com/codex/install.sh"
@@ -311,6 +312,17 @@ def _refresh_codex(env: dict[str, str]) -> None:
         log(f"codex refresh skipped ({error}); keeping baked version")
 
 
+def _firewall_declared() -> bool:
+    """The project declared the outbound allowlist. main() runs this step only
+    after apply_declared_firewall() turned it on."""
+    return FIREWALL_ENABLE_MARKER.exists() or FIREWALL_ENABLE_MARKER.is_symlink()
+
+
+def _keep_baked_behind_firewall(name: str) -> None:
+    log(f"firewall on: keeping the baked {name} version; run `aic rebuild` with "
+        "the firewall off, or update the image, to get a newer one")
+
+
 def refresh_ai_tools() -> None:
     """Float Claude Code, Codex and OpenCode to their latest release on every
     container (re)create. The image bakes a working copy of each (Dockerfile) as
@@ -330,11 +342,21 @@ def refresh_ai_tools() -> None:
 
     The updaters run in parallel: each one writes only its own binary and
     package directory, so the wait is the slowest updater, not the sum of
-    their time limits."""
+    their time limits.
+
+    With a declared firewall, Claude and Codex keep the baked version. Their
+    updaters need a host that only the update uses and that the default
+    allowlist does not hold: downloads.claude.ai for `claude update`, and
+    releases.openai.com for Codex (chatgpt.com/codex/install.sh redirects
+    there). They would wait for their time limits (about 90 s) and fail. Do
+    not add these hosts to the default allowlist for an update. OpenCode still
+    upgrades: `opencode upgrade` uses opencode.ai, which OpenCode needs to
+    run, and GitHub hosts of the default allowlist (raw, API, releases)."""
     freeze = os.environ.get("AIC_FREEZE_TOOLS", "").strip().lower()
     if freeze not in ("", "0", "false", "no"):
         log("AIC_FREEZE_TOOLS set — keeping the baked Claude/Codex versions")
         return
+    firewall = _firewall_declared()
     env = {**os.environ, "PATH": f"{HOME / '.local' / 'bin'}:{HOME / '.opencode' / 'bin'}:{os.environ.get('PATH', '')}"}
     updaters = []
     if "claude-code" in ENABLED_TOOLS:
@@ -353,8 +375,13 @@ def refresh_ai_tools() -> None:
                 )
             except OSError as error:
                 log(f"warning: could not initialize Claude updater state: {error}")
-        updaters.append(lambda: _refresh_command("claude", ["claude", "update"], 180, env))
-    if "codex" in ENABLED_TOOLS:
+        if firewall:
+            _keep_baked_behind_firewall("claude")
+        else:
+            updaters.append(lambda: _refresh_command("claude", ["claude", "update"], 180, env))
+    if "codex" in ENABLED_TOOLS and firewall:
+        _keep_baked_behind_firewall("codex")
+    elif "codex" in ENABLED_TOOLS:
         codex_update_env = {
             **env,
             "CODEX_NON_INTERACTIVE": "1",

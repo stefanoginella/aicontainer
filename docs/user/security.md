@@ -23,7 +23,7 @@ in a project. `aic up` also shows it automatically at the end of every run.
 | `.env*` files | **Best-effort only.** The `.env` file of your project is physically in `/workspace`. The [PreToolUse hook](whats-in-the-box.md) refuses the obvious reads. But the hook matches file names in the tool call, so it is not a boundary. Keep secrets that you cannot lose out of the project directory. |
 | Session transcripts, prompt history, auto memory, user-level skills/plugins | They persist in a **path-unique per-project volume**. aic never writes them back to your host home or shares them with another checkout. aic resets user-level instructions, settings, Claude rules, and Claude MCP servers on each create. See [Multi-project model](multi-project.md). |
 | Host Docker daemon | **Object APIs are off by default.** Only proxy ping/version stay available. `--docker-read` opts into sensitive object/inspect/log/file APIs. `--docker` opts into read-write control of the host daemon for testcontainers / in-container Compose. See [Threat model](#threat-model). |
-| **Outbound network** | **Mostly open by default.** The container can reach the internet, your LAN, and services on your host machine. This includes services bound to `127.0.0.1`, through `host.docker.internal` on Docker Desktop and OrbStack. aic blocks IPv4/IPv6 link-local and common cloud-provider metadata endpoints on every create. To restrict the rest, opt in to the [network allowlist](network-allowlist.md). |
+| **Outbound network** | **Mostly open by default.** The container can reach the internet, your LAN, and services on your host machine. This includes services bound to `127.0.0.1`, through `host.docker.internal` on Docker Desktop and OrbStack. aic blocks IPv4/IPv6 link-local and common cloud-provider metadata endpoints on every create. To restrict the rest, opt in to the [network allowlist](network-allowlist.md). A committed `.devcontainer/firewall-enable` turns it on at every start. |
 
 The full reasons are in [Threat model](#threat-model). Give the most attention
 to the network row.
@@ -139,12 +139,19 @@ to the network row.
   - *Hook scripts kept in the repository.* Some hooks run project files:
     husky's `.husky/`, `lefthook.yml`, `.pre-commit-config.yaml`, or a
     `core.hooksPath` inside the worktree. Such a hook runs what the agent
-    wrote on your next host commit. Review those files first, or commit with
-    `--no-verify`.
+    wrote on your next host commit. See
+    [Git hooks on the host](#git-hooks-on-the-host).
   - *Earlier versions.* Up to 0.9.1, the agent could replace `.git` fully and
     write `.git/config.worktree`. If an agent in a checkout possibly was
     compromised, review `.git/config` and `.git/config.worktree` on the host
     one time.
+- **Project agent config that a host AI tool reads.** The agent can write
+  `.claude/settings.json`, `.claude/settings.local.json`, and
+  `.codex/config.toml` in the project. These files can hold hooks. Claude Code
+  or Codex on the host reads them and runs those hooks. So review these files
+  before you run an AI tool on the host in this project. `git status` shows
+  changes to the shared files. `.claude/settings.local.json` stays ignored, so
+  read it directly.
 - **Planted text in project tool state.** Each create resets the parts of the
   tool homes that load before your first prompt:
   - user-level `CLAUDE.md`/`AGENTS.md`
@@ -169,8 +176,18 @@ to the network row.
   because the AI CLIs update themselves there. A command that you type, or a
   prompt helper, can run a binary that the agent replaced. VS Code terminals
   also run through the VS Code server in the container, which the agent can
-  change. Think of a shell in the container as a shell with the authority of
-  the agent. Do not type secrets there that the agent must not see.
+  change. The image `PATH` also ends with the default Node of fnm, so a
+  process that does not start from a shell can run that Node too. Think of a
+  shell in the container as a shell with the authority of the agent. Do not
+  type secrets there that the agent must not see.
+- **Root commands in the container.** Docker gives the image `PATH`, which
+  starts with `~/.local/bin`, to root processes too. The sudo helpers, the
+  seed sanitizer, and a root login or interactive bash, sh, zsh, or fish
+  shell use a `PATH` with only system directories, and a root shell keeps its
+  history in `/root`. A command that you start with `docker exec -u root`
+  without one of these shells (for example `bash -c`) still gets the image
+  `PATH`. Give it an absolute path, or add
+  `-e PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.
 - **Network.** All other outbound traffic is open by default. Anything inside
   the container can reach `api.openai.com`, `api.anthropic.com`, and your LAN
   (cloud metadata is blocked, see above).
@@ -188,11 +205,25 @@ to the network row.
     [iptables allowlist](network-allowlist.md). When the allowlist is on, the
     container can reach the host only on TCP 8787, and only when the
     [status relay](status-relay.md) is enabled.
+  - To keep the allowlist on, commit `.devcontainer/firewall-enable`. Then
+    every start enables it before post-create and before a shell opens, or
+    the container stops. Registry presets
+    (`.devcontainer/firewall-presets`) add fixed hosts from the image, never
+    hosts from the repository. The agent cannot change these files, because
+    `.devcontainer/` is read-only in the container. They need no `aic trust`:
+    with them, egress is never wider than the open default.
 - **Git identity.** aic copies safe identity/workflow preferences from the
-  host. Thus the agent can commit as that identity. It can push with the
-  credentials that you log in with inside the container. aic does not forward
+  host. Thus the agent can commit as that identity. aic does not forward
   host credential helpers and signing keys. For a sandbox-only key, use
   [`aic signing`](signing.md).
+- **Git push to GitHub.** The managed Git config sets one credential helper:
+  the root-owned `/usr/bin/gh`, for `https://github.com` and
+  `https://gist.github.com` only. Thus the agent can push over HTTPS with the
+  `gh` login that you make inside the container. This gives the agent no new
+  power: it can already read the `gh` token in `~/.config/gh/hosts.yml`.
+  Other hosts (GitHub Enterprise, GitLab, and others) get no helper, and the
+  container has no SSH key. See
+  [Push to GitHub from the container](install.md#push-to-github-from-the-container).
 - **Sandbox signing key.** The agent in every project can read the key that
   `aic signing` creates. See [Commit signing](signing.md).
 - **Secrets in the project directory.** The `.env*` check is a best-effort
@@ -221,6 +252,45 @@ to the network row.
 > **Warning:** Do not use aicontainer on a network where access to internal
 > services is a concern, or enable the
 > [network allowlist](network-allowlist.md) there.
+
+### Git hooks on the host
+
+The container mounts `.git/hooks` and `.git/config` read-only, so the agent
+cannot install a Git hook. But you run Git on the host. When a hook, or a
+program that Git runs, is in the worktree, the agent can change it. Your next
+host `git commit` or `git push` then runs that code on the host.
+
+Use this pattern:
+
+1. Keep the hooks in a host folder that no container mounts, for example
+   `~/.config/aic-hooks/<project>`.
+2. Set `core.hooksPath` to that folder on the host.
+3. Make each hook call only tools that you installed outside all projects.
+4. Run the checks of the repository in the container with `aic run -- <cmd>`.
+
+```bash
+mkdir -p ~/.config/aic-hooks/myapp
+cat > ~/.config/aic-hooks/myapp/pre-commit <<'SH'
+#!/bin/sh
+exec aic run -- npm test
+SH
+chmod +x ~/.config/aic-hooks/myapp/pre-commit
+git config core.hooksPath ~/.config/aic-hooks/myapp
+```
+
+`aic doctor` (check `git-hooks`), `aic up`, and `aic rebuild` warn when one of
+these is in the worktree:
+
+- the hooks folder (`core.hooksPath`, or `.git/hooks` when it is not set),
+  other than `.git/hooks`
+- a hook that is a symlink into the worktree
+- the program of `core.fsmonitor` or `core.sshCommand`, or a relative path
+  there
+
+The warning never stops a start. aic checks where hooks live, not what they
+do. A hook in a safe folder that runs a project file (for example
+`npx lefthook`) still runs code that the agent can change. Read each hook
+before you trust it, or commit with `--no-verify`.
 
 ## Hardening the host daemon
 

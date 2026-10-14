@@ -359,6 +359,9 @@ validate_project_security () {
     printf 'aic: managed devcontainer validation failed:\n' >&2
     printf '%s\n%s\n' "$compose_problem" "$managed" | sed -e '/^$/d' \
       -e 's/^COMPOSE[[:space:]]*/  ! /' -e 's/^MANAGED[[:space:]]*/  ! /' >&2
+    # aic validate --json only: the same findings as items (lib/aic/json.sh).
+    json_findings fail "$compose_problem"
+    json_findings fail "$managed"
     rm -f "$findings"
     [ "$mode" = "warn" ] && return 1
     validation_refuse_managed "$mode" "$compose_problem"
@@ -375,6 +378,8 @@ validate_project_security () {
   printf 'aic: resolved project configuration requests extra host access or runs project code:\n' >&2
   printf '%s\n%s\n' "$unsafe" "$volatile" | sed -e '/^$/d' -e 's/^UNSAFE[[:space:]]*/  ! /' \
     -e 's/^DOCKER[[:space:]]*/  ! /' -e 's/^VOLATILE[[:space:]]*/  ! /' >&2
+  json_findings warn "$unsafe"
+  json_findings warn "$volatile"
   rm -f "$findings"
 
   if [ "$mode" = "warn" ]; then
@@ -384,8 +389,10 @@ validate_project_security () {
 }
 
 # Phase 1 of the gate: append to findings file $1 the host-state findings. They
-# are the runtime environment and .devcontainer/.env, the managed build files,
-# the project code files, and the Git control paths.
+# are the runtime environment and .devcontainer/.env (its content, and that Git
+# does not track it), the managed Compose name line, the managed build files,
+# the project code files, and the Git control paths. The runtime environment
+# export also sets AIC_PROJECT_NAME, which every Compose model of phase 2 needs.
 validation_check_host_state () {
   local findings="$1"
   if ! export_runtime_environment; then
@@ -394,17 +401,38 @@ validation_check_host_state () {
     AIC_STATUS_RELAY=0
     AIC_STATUS_PROJECT="$(expected_project_label)"
     AIC_STATUS_PROJECT_ID="$(expected_project_name)"
-    export AIC_DOCKER_SOCKET AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID
+    AIC_PROJECT_NAME="$AIC_STATUS_PROJECT_ID"
+    export AIC_DOCKER_SOCKET AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID \
+      AIC_PROJECT_NAME
   elif ! validate_runtime_environment_file; then
     printf 'MANAGED\t%s\n' '.devcontainer/.env does not match this host runtime state; run aic sync or aic initialize' >> "$findings"
   fi
+  # The resolved name check of lib/validate.mjs cannot see how the managed
+  # file spells its name, because aic sets AIC_PROJECT_NAME. Check the line.
+  local name_problem
+  name_problem="$(compose_name_line_problem)"
+  [ -z "$name_problem" ] || printf 'MANAGED\t%s\n' "$name_problem" >> "$findings"
   validate_managed_build_files "$findings"
   validate_project_code_files "$findings"
   # Startup paths create a missing commondir/config.worktree/hooks first, so
   # only a path that cannot be mounted safely is a finding here.
-  git_control_path_problems | while IFS= read -r line; do
-    printf 'MANAGED\t%s\n' "$line"
-  done >> "$findings"
+  local git_problems tracked=0
+  git_problems="$(git_control_path_problems)"
+  if [ -n "$git_problems" ]; then
+    printf '%s\n' "$git_problems" | while IFS= read -r line; do
+      printf 'MANAGED\t%s\n' "$line"
+    done >> "$findings"
+  else
+    # Host Git runs only on safe control paths: a planted .git/commondir
+    # would make it read the config of another directory. With a problem,
+    # that problem is already a finding.
+    runtime_environment_file_tracked || tracked=$?
+    case "$tracked" in
+      0) printf 'MANAGED\t%s\n' ".devcontainer/.env is tracked by Git, but it is host state; run 'git rm --cached .devcontainer/.env'" >> "$findings" ;;
+      1) ;;
+      *) printf 'MANAGED\t%s\n' "could not check with Git whether .devcontainer/.env is tracked; fix the Git checkout" >> "$findings" ;;
+    esac
+  fi
 }
 
 # Phase 2 of the gate: resolve the Compose models into the six JSON files
@@ -540,15 +568,16 @@ validation_prompt_trust () {
 }
 
 cmd_trust () {
-  require_in_project
   local revoke=0
+  # Parse first: a bad call exits 2 before aic reads or changes anything.
   while [ $# -gt 0 ]; do
     case "$1" in
       --revoke) revoke=1 ;;
-      *) die "unknown trust flag: $1 (try --revoke)" ;;
+      *) usage_die "unknown trust flag: $1 (try --revoke)" ;;
     esac
     shift
   done
+  require_in_project
   if [ "$revoke" = "1" ]; then
     rm -f "$(trust_state_file)"
     echo "aic: revoked this project's host-access trust."

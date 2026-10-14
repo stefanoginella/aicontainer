@@ -111,12 +111,16 @@ contributor guide. Common pages:
   the Claude Code plugin.
 - [Customization](docs/user/customization.md) — project-owned overrides that
   survive `aic sync`.
+- [Stack reference](docs/user/stack-reference.md) — the project-owned files
+  for each stack, with copy-ready snippets.
 - [Installing extra tools](docs/user/extra-tools.md) — `Dockerfile.project`
   and the Playwright recipe.
 - [Updating](docs/user/updating.md) — update the AI tools and aicontainer.
 - [Security](docs/user/security.md) — what crosses the boundary and the threat
   model.
 - [Troubleshooting](docs/user/troubleshooting.md) — FAQ and known problems.
+- [Stability contract](docs/user/stability.md) — what tools that build on
+  aicontainer can rely on across releases.
 
 ## Contributing and security
 

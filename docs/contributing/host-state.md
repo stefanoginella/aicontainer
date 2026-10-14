@@ -14,9 +14,45 @@ The selected local Docker socket is generated host state. `aic init`, `aic sync`
 
 The managed `template/gitignore` is copied as `.devcontainer/.gitignore`, and it excludes that file. So rootless Docker, Docker Desktop, Colima, and OrbStack work without flags and without machine-specific diffs.
 
+### The project name in `.env`
+
+`.devcontainer/.env` also holds `AIC_PROJECT_NAME`, the path-unique Compose project name. The committed name line of the Compose file reads it (see [Project identity](project-identity.md#path-unique-project-name)). The same writes create it, and the same exact-content check covers it:
+
+- `write_runtime_environment_file()` writes one fixed set of keys in one fixed order.
+- `validate_runtime_environment_file()` compares the whole file with the expected content. A changed value, an added key, or a duplicate key (Compose takes the last one) is a finding.
+- `aic validate` is read-only. It does not write `.env`: it exports `AIC_PROJECT_NAME` for its own Compose calls. A missing `.env` is not a finding.
+- A `.devcontainer/.env` that Git tracks is a MANAGED finding in the gate and a failure in `doctor` (`runtime_environment_file_tracked()`). Rules for that query:
+  - It matches every letter case (`:(icase)` pathspec), because `.devcontainer/.ENV` is the same file on a case-insensitive volume.
+  - It fails closed. `git ls-files` exits 0 for a match and for no match, so the output decides. Any other exit status is a finding.
+  - It runs only when `git_control_path_problems()` reports nothing. A planted `.git/commondir` would make host Git read the config of another directory. That problem is already a finding.
+  - It runs host Git with `core.fsmonitor` off.
+
+### Host values in the environment
+
+Compose substitutes every key of `.devcontainer/.env`, and a value in the
+environment wins over the file. `aic` commands export their own values
+(`export_runtime_environment()`). A direct Dev Containers start has only the
+environment of the editor. So:
+
+- The `aic` entry script records which of `AIC_DOCKER_SOCKET`,
+  `AIC_RUNTIME_USER`, `AIC_STATUS_RELAY`, `AIC_STATUS_PROJECT`, and
+  `AIC_STATUS_PROJECT_ID` it inherited (`aic_runtime_env_keys`). Keep that
+  list equal to the keys of `write_runtime_environment_file()`.
+- `check_devcontainer_project_name()` refuses each inherited key, an empty one
+  too. It names the key, never the value. The callers are the same as for
+  `AIC_PROJECT_NAME` (see [Project identity](project-identity.md)).
+- `aic up` and `aic rebuild` run `devcontainer up` through
+  `without_runtime_environment()`. Thus the `aic initialize` child inherits
+  none of these keys, and Compose reads them from `.devcontainer/.env`.
+
+Guarded by the inherited-variable cases in `tests/test-aic-host-security.sh`.
+They read the keys from a generated `.env`, so a new key without a refusal
+fails the test.
+
 Hard rules:
 
 - Do not trust `AIC_DOCKER_SOCKET` from the environment or from the repository.
+- Do not trust `AIC_PROJECT_NAME` from the environment or from the repository. `aic` exports its own value, and a direct start refuses a different one.
 - Do not accept a remote TCP/SSH endpoint.
 - Do not make the dotenv grammar wider.
 - Keep `.env`/`.gitignore` in the control-path checks and in the template copies.
@@ -72,6 +108,12 @@ Its label validation must continue to accept the full `expected_project_label()`
 ### The firewall exception
 
 Keep the strict firewall exception as an exact TCP-8787 status ipset rule. It must never give general reachability to the host gateway.
+
+`aic-firewall` reads the relay mode only from `/workspace/.devcontainer/.env`. The pre-Docker gate checks that file against the host state, and the agent cannot write the read-only mount. The value only turns the fixed host and port rule on or off.
+
+> **Warning:** Do not read the mode from the environment. sudo resets it, and `/proc/1/environ` needs `CAP_SYS_PTRACE`, because PID 1 runs as `vscode`. Without that capability the rule is never added.
+
+Guarded by `tests/test-aic-firewall-relay.sh` and the "firewall allows the opted-in status relay on its port only" smoke.
 
 The exception must also stay strengthen-only in the other direction. `host.docker.internal` sometimes does not resolve (plain Docker Engine, rootless Docker), or it resolves into a prohibited range. Then `enable` warns and omits that one rule.
 

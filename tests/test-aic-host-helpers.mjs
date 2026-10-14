@@ -90,6 +90,37 @@ test('composeNameConflict: a .env that is not a plausible file is unreadable', (
   });
 });
 
+test('composeNameConflict: the variables that move the managed name line', () => {
+  const dir = newDir();
+  inDir(dir, () => {
+    const managed = 'aic-api-0123456789ab';
+    // The managed name line reads AIC_PROJECT_NAME. aic exports the exact
+    // value itself; any other value in the environment beats .devcontainer/.env.
+    assert.equal(composeNameConflict(managed, { AIC_PROJECT_NAME: managed }, managed), '');
+    for (const value of ['', 'other', 'AIC-api-0123456789ab', ` ${managed}`, `${managed}x`]) {
+      assert.equal(composeNameConflict(managed, { AIC_PROJECT_NAME: value }, managed),
+        'managed-environment', JSON.stringify(value));
+    }
+    // A matching COMPOSE_PROJECT_NAME does not hide a foreign AIC_PROJECT_NAME.
+    assert.equal(composeNameConflict(managed,
+      { COMPOSE_PROJECT_NAME: managed, AIC_PROJECT_NAME: 'other' }, managed), 'managed-environment');
+    // A legacy project resolves to its basename name until sync, but the
+    // managed name is still the only accepted AIC_PROJECT_NAME.
+    assert.equal(composeNameConflict('api_devcontainer', { AIC_PROJECT_NAME: managed }, managed), '');
+    assert.equal(composeNameConflict('api_devcontainer', { AIC_PROJECT_NAME: 'api_devcontainer' }, managed),
+      'managed-environment');
+    // Compose then skips or replaces .devcontainer/.env, which holds the name.
+    // Any value counts, an empty one included.
+    for (const value of ['', '0', '../evil.env']) {
+      assert.equal(composeNameConflict(managed, { COMPOSE_ENV_FILES: value }, managed), 'env-files');
+      assert.equal(composeNameConflict(managed, { COMPOSE_DISABLE_ENV_FILE: value }, managed), 'env-disabled');
+      assert.equal(composeNameConflict(managed,
+        { COMPOSE_PROJECT_NAME: managed, AIC_PROJECT_NAME: managed, COMPOSE_ENV_FILES: value }, managed),
+      'env-files', 'a matching name does not hide COMPOSE_ENV_FILES');
+    }
+  });
+});
+
 test('createGitControlFiles: creates missing files, never follows or replaces', () => {
   const dir = newDir();
   fs.mkdirSync(path.join(dir, '.git'));
@@ -367,11 +398,25 @@ test('the compose-name-conflict and vscode-settings subcommands print what aic r
   fs.writeFileSync(path.join(dir, '.env'), 'COMPOSE_PROJECT_NAME=app\n');
   const env = { ...process.env };
   delete env.COMPOSE_PROJECT_NAME;
-  let result = runCli(['compose-name-conflict', 'aic-api-0123'], { cwd: dir, env });
+  delete env.AIC_PROJECT_NAME;
+  delete env.COMPOSE_ENV_FILES;
+  delete env.COMPOSE_DISABLE_ENV_FILE;
+  const names = ['aic-api-0123', 'aic-api-0123'];
+  let result = runCli(['compose-name-conflict', ...names], { cwd: dir, env });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'dotenv');
-  result = runCli(['compose-name-conflict', 'aic-api-0123'], { cwd: dir, env: { ...env, COMPOSE_PROJECT_NAME: 'x' } });
+  result = runCli(['compose-name-conflict', ...names], { cwd: dir, env: { ...env, COMPOSE_PROJECT_NAME: 'x' } });
   assert.equal(result.stdout, 'environment');
+  result = runCli(['compose-name-conflict', ...names], { cwd: dir, env: { ...env, AIC_PROJECT_NAME: 'x' } });
+  assert.equal(result.stdout, 'managed-environment');
+  result = runCli(['compose-name-conflict', ...names], { cwd: dir, env: { ...env, COMPOSE_ENV_FILES: 'x' } });
+  assert.equal(result.stdout, 'env-files');
+  result = runCli(['compose-name-conflict', ...names], { cwd: dir, env: { ...env, COMPOSE_DISABLE_ENV_FILE: '1' } });
+  assert.equal(result.stdout, 'env-disabled');
+  // The managed name is a required argument.
+  result = runCli(['compose-name-conflict', 'aic-api-0123'], { cwd: dir, env });
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, '');
 
   const file = path.join(dir, 'vscode-settings.json');
   fs.writeFileSync(file, '{"terminal.integrated.defaultProfile.linux": "bash", "a": 1}');

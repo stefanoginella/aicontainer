@@ -10,7 +10,7 @@
 // wired to `preversion` so an empty release fails before the bump, leaving the
 // tree untouched. Zero dependencies on purpose. See AGENTS.md → "Releasing".
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -99,3 +99,17 @@ if (linkLines.length) {
 
 writeFileSync(changelogPath, `${trimEnd(out).join('\n')}\n\n${link.join('\n')}\n`);
 console.log(`promote-changelog: promoted [Unreleased] -> [${version}] - ${date}.`);
+
+// The stack reference marks items that need a newer aic with
+// "(since Unreleased)". Write the released version into each marker, so the
+// page at the tag and on main says which release added the item. The
+// `version` script stages this file with CHANGELOG.md.
+const stackRefPath = join(root, 'docs', 'user', 'stack-reference.md');
+if (existsSync(stackRefPath)) {
+  const before = readFileSync(stackRefPath, 'utf8');
+  const after = before.replaceAll('(since Unreleased)', `(since v${version})`);
+  if (after !== before) {
+    writeFileSync(stackRefPath, after);
+    console.log(`promote-changelog: set the "(since Unreleased)" markers in docs/user/stack-reference.md to v${version}.`);
+  }
+}

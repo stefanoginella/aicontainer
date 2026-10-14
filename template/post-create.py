@@ -42,6 +42,20 @@ PACKAGE = "aic_post_create"
 # Root-owned and read-only in the image (template/Dockerfile). It holds only
 # the package directory, so no other module name resolves from it.
 PACKAGE_PARENT = "/opt/aic-post-create"
+# The PATH of a root run (the seed sanitizer). The image PATH starts with the
+# vscode-owned ~/.local/bin, so a root run never searches it.
+ROOT_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _use_system_path_as_root() -> None:
+    """Give a root run a PATH with only root-owned system directories.
+
+    Docker gives the image PATH to every process, root ones too. A
+    subprocess with a bare name would otherwise run what an agent put in a
+    vscode-owned directory. Runs before anything else in the entry.
+    """
+    if os.geteuid() == 0:
+        os.environ["PATH"] = ROOT_PATH
 
 
 def _load_package(parent: str = PACKAGE_PARENT):
@@ -67,6 +81,7 @@ def _load_package(parent: str = PACKAGE_PARENT):
 
 
 if __name__ == "__main__":
+    _use_system_path_as_root()
     try:
         _load_package()
     except ImportError as error:

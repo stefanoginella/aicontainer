@@ -61,7 +61,7 @@ signing_container_running () {
   local project template cid
   project="$(project_name)"
   template="$(trusted_compose_template)"
-  cid="$(docker compose -p "$project" -f "$template" ps -q devcontainer 2>/dev/null)" || return 1
+  cid="$(trusted_template_compose -p "$project" -f "$template" ps -q devcontainer 2>/dev/null)" || return 1
   [ -n "$cid" ] || return 1
   [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ]
 }
@@ -202,16 +202,23 @@ signing_do_disable () {
 }
 
 cmd_signing () {
-  require_in_project
   local action="" register=0
+  # Parse first: a bad call exits 2 before aic reads or changes anything.
   while [ $# -gt 0 ]; do
     case "$1" in
-      auto|byok|disable|status) action="$1" ;;
+      auto|byok|disable|status)
+        [ -z "$action" ] || usage_die "aic signing takes one action (got: $action and $1)"
+        action="$1"
+        ;;
       --register) register=1 ;;
-      *) die "unknown signing argument: $1 (try: auto, byok, disable, status [--register])" ;;
+      *) usage_die "unknown signing argument: $1 (try: auto, byok, disable, status [--register])" ;;
     esac
     shift
   done
+  case "$register:$action" in
+    1:byok|1:disable|1:status) usage_die "--register works only with 'aic signing auto'" ;;
+  esac
+  require_in_project
 
   # No explicit action: print status, then offer the chooser on a TTY.
   if [ -z "$action" ]; then

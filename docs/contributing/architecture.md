@@ -24,7 +24,8 @@ code of the commands is in the bash modules in `lib/aic/`.
 - The `aic` file keeps only these items:
   - `set -euo pipefail` and the `$AIC_HOME` resolution,
   - the globals that must overwrite a value from the environment (the
-    bind-source cache of `export_runtime_environment()`),
+    bind-source cache of `export_runtime_environment()`, the JSON mode
+    `aic_json_dir`, and `aic_update_latest`),
   - `err()`, `die()`, and `aic_helper()`,
   - the module load list,
   - the `case "${1:-help}"` dispatcher at the end. `tests/test-aic-cli-spec.mjs`
@@ -52,6 +53,7 @@ The modules, in load order:
 
 | Module | Contents |
 |---|---|
+| `json.sh` | The `--json` output of `doctor`, `status`, `validate`, and `version`: the bash JSON string encoder and `json_run()`. See [Validation](validation.md#json-output). |
 | `runtime.sh` | The Dev Containers CLI lookup, the Docker context socket, the runtime kind and bind source, the runtime user, the status relay marker, and the managed `.devcontainer/.env`. See [Host state](host-state.md). |
 | `identity.sh` | The path-unique Compose project name, `canonical_root()`, the `.devcontainer/` control-path checks, and the `.git` control paths. See [Project identity](project-identity.md). |
 | `selection.sh` | The tool and shell selection: the known values, the checks, the prompts, and the reads from `devcontainer.json`. |
@@ -112,6 +114,9 @@ modules use only `node:` built-ins and have no dependencies.
   - `aic completion <shell>` runs `node lib/cli-spec.mjs completion <shell>`.
     The bash, zsh, and fish scripts come only from the table. To change a
     completion, change the table.
+  - `passthrough` lists the `devcontainer up` options that `aic up` and
+    `aic rebuild` pass after `--`. It must equal `AIC_UP_PASSTHROUGH` in
+    `lib/aic/lifecycle.sh`. See [Security review](security-review.md).
   - `aic help` is hand-written prose. `tests/test-aic-cli-spec.mjs` checks
     that the help, the `case "${1:-help}"` dispatcher at the end of `aic`,
     and the table name the same commands and flags. When you add a command
@@ -298,3 +303,15 @@ helpers. They run before the real-devcontainer smoke suite.
   - Bump the `version` in its `plugin.json` when the skill changes.
   - Validate both with `claude plugin validate .` and `claude plugin validate
     tools/claude-plugin`.
+  - The skill gets the stack-to-files mapping from
+    `docs/user/stack-reference.md`. Do not copy the mapping into the skill.
+- `docs/user/stack-reference.md` is also a contract for other tools. Keep
+  its structure: one `## Stack: <name>` section for each stack, with the same
+  seven level-3 headings in the same order, and a target-file line before
+  each code block. When a change to a preset, a mount rule, or the image
+  affects a snippet, update the page. Mark an item that needs a new aic
+  feature `(since Unreleased)`; the release fills in the version (see
+  [Releasing](releasing.md)). The skill reads the page from the tag of the
+  installed aic. Guarded by
+  `tests/test-aic-stack-reference.mjs`. With Docker Compose, it runs the
+  merged snippets through `aic validate`.

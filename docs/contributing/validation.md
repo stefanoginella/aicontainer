@@ -69,6 +69,14 @@ The trust hash covers the whole `.devcontainer/` tree. So any edit asks for trus
 
 Keep the file list aligned with `AIC_CONTROL_FILES` and with the post-create and lock-helper tables.
 
+### Firewall files
+
+`firewall-allowlist`, `firewall-enable`, and `firewall-presets` are not trust
+findings: they can only restrict the open default egress. The validator checks
+each line of `firewall-presets` against `FIREWALL_PRESETS`. An unknown name is
+a MANAGED finding, so trust cannot approve it. The rules are in
+[Runtime policy](runtime-policy.md#declarative-enable-and-presets).
+
 Guarded by the project-code cases in `tests/test-aic-host-security.sh` and the "Bring up the devcontainer" step in `smoke.yml` (a direct start is refused, then trusted).
 
 ## Rules that keep the validated model equal to the started model
@@ -141,3 +149,18 @@ Warnings exit 0. Blockers exit nonzero.
 `aic validate` runs the full gate noninteractively. It honors existing exact trust. It never prompts and never writes trust.
 
 Keep help, completions, and tests in sync. Do not turn diagnostics into implicit repair.
+
+## JSON output
+
+`doctor`, `status`, `validate`, and `version` take `--json`. The user shape is in [Use aicontainer in a project](../user/usage.md#json-output---json). `lib/aic/json.sh` holds the code.
+
+- `json_run()` runs the same command function in a subshell with errexit on. The subshell is not in an `&&` or `||` list, because bash turns errexit off there. Its stdout goes to stderr. Only the JSON object goes to stdout.
+- `error` holds the message of a `die` at the level of that subshell only. A `die` in a nested subshell (a probe in `$(...)` that the caller catches) must not set it. Thus a `doctor` blocker gives `"error": null`.
+- `--json` changes only the output. The checks, the gate decision, and the exit status stay the same. Never skip or weaken a check in JSON mode.
+- The record helpers (`json_item`, `json_findings`, `json_field`) do nothing outside JSON mode. `validate_project_security()` calls `json_findings` next to the text output of its findings. Do not move the call after a `die`.
+- `json_string()` encodes every string. It escapes quotes, backslashes, and control characters. A value that is not valid UTF-8 gets `?` for each byte above 0x7f. Never build JSON from a raw value.
+- The encoder is pure bash, so `doctor --json` works on a host with no Node.js.
+- `aic` sets `aic_json_dir` to `""` before it loads the modules. Thus a value in the environment never selects JSON mode.
+- The doctor `id`, the validate finding types, and the member names are an interface. Keep them stable. A change that is not compatible increments `AIC_JSON_SCHEMA`. The [Stability contract](../user/stability.md) lists them, and `tests/test-aic-stability-contract.mjs` checks that list against the code. A new id or member also goes on that page.
+
+Guarded by `tests/test-aic-json-output.mjs`. It compares the text mode and the JSON mode of each command: the exit status, the doctor checks, and the validate findings.

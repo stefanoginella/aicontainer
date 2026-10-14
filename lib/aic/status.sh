@@ -10,32 +10,37 @@
 
 # Best-effort detection of whether the opt-in outbound firewall is currently
 # active inside the running container. Echoes on|off|unknown and never fails.
-# The firewall is enable-only, never auto-applied, and does not survive
-# container recreation, so "off"/"unknown" is the safe (network-open) default.
+# The firewall is enable-only and does not survive a restart. Only a project
+# with .devcontainer/firewall-enable gets it on every start, so "off"/"unknown"
+# is the safe (network-open) default.
 # `sudo aic-firewall status` is one of the three scoped-sudo scripts, so this
-# read is allowed; when enabled the OUTPUT chain shows `policy DROP`.
+# read is allowed; when enabled the OUTPUT chain shows `policy DROP`. Both
+# paths are absolute: the container PATH starts with the vscode-owned
+# ~/.local/bin, where an agent could put a `sudo` that prints `policy DROP`.
 firewall_live_state () {
   local project template cid devcontainer out
   project="$(project_name)"
   template="$(trusted_compose_template)"
-  cid="$(docker compose -p "$project" -f "$template" ps -q devcontainer 2>/dev/null)" || { echo unknown; return; }
+  cid="$(trusted_template_compose -p "$project" -f "$template" ps -q devcontainer 2>/dev/null)" || { echo unknown; return; }
   [ -n "$cid" ] || { echo unknown; return; }
   [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] || { echo unknown; return; }
   devcontainer="$(resolve_devcontainer 2>/dev/null)" || { echo unknown; return; }
-  out="$(COMPOSE_PROJECT_NAME="$project" "$devcontainer" exec --workspace-folder . sudo aic-firewall status 2>/dev/null)" || { echo unknown; return; }
+  out="$(COMPOSE_PROJECT_NAME="$project" AIC_PROJECT_NAME="$(expected_project_name)" "$devcontainer" exec --workspace-folder . /usr/bin/sudo -n /usr/local/bin/aic-firewall status 2>/dev/null)" || { echo unknown; return; }
   if grep -q 'policy DROP' <<<"$out"; then echo on; else echo off; fi
 }
 
 # Print the trust boundary for the current project: what the agent can read,
-# write, and reach. Folded into `aic up` (mode=up always reports network OPEN,
-# since a freshly (re)created container never has the opt-in firewall applied)
-# and exposed standalone as `aic preflight` (live-detects the firewall state).
+# write, and reach. Folded into `aic up` (mode=up reports network OPEN without
+# .devcontainer/firewall-enable, since a freshly (re)created container then
+# never has the opt-in firewall applied; with the marker it live-detects) and
+# exposed standalone as `aic preflight` (live-detects the firewall state).
 # The protections are real but otherwise invisible — this makes them auditable.
 # See docs/user/security.md "What crosses the boundary" for the canonical table.
 print_boundary_summary () {
-  local mode="${1:-preflight}" project net
+  local mode="${1:-preflight}" project net declared=0
   project="$(project_name)"
-  if [ "$mode" = "up" ]; then net="open"; else net="$(firewall_live_state)"; fi
+  [ -f .devcontainer/firewall-enable ] && declared=1
+  if [ "$mode" = "up" ] && [ "$declared" -eq 0 ]; then net="open"; else net="$(firewall_live_state)"; fi
 
   local b r y dim rst
   if [ -t 1 ]; then
@@ -107,6 +112,9 @@ print_boundary_summary () {
 
   printf "\n  %sNetwork%s\n" "$b" "$rst"
   printf "    %scloud metadata / link-local (169.254.0.0/16) blocked by default on every create%s\n" "$dim" "$rst"
+  if [ "$declared" -eq 1 ]; then
+    printf "    firewall declared by .devcontainer/firewall-enable: enabled on every container start\n"
+  fi
   case "$net" in
     on)
       printf "    %s* firewall ENABLED%s  (default DROP + curated allowlist active)\n" "$b" "$rst"
@@ -119,10 +127,12 @@ print_boundary_summary () {
     *)
       printf "    %s! FULL OUTBOUND%s: reaches the internet and your LAN (metadata excepted, see above)\n" "$r" "$rst"
       printf "    lock down per-project:  aic shell  ->  sudo aic-firewall enable\n"
+      printf "    or on every start:      touch .devcontainer/firewall-enable && aic rebuild\n"
       ;;
   esac
 
-  if [ -f .devcontainer/docker-compose.override.yml ] || [ -f .devcontainer/firewall-allowlist ]; then
+  if [ -f .devcontainer/docker-compose.override.yml ] || [ -f .devcontainer/firewall-allowlist ] \
+      || [ -f .devcontainer/firewall-presets ]; then
     printf "\n  %sProject overrides%s\n" "$b" "$rst"
     if [ -f .devcontainer/docker-compose.override.yml ]; then
       printf "    %s! docker-compose.override.yml present%s: may add mounts/env/hosts; review it.\n" "$y" "$rst"
@@ -130,6 +140,12 @@ print_boundary_summary () {
     if [ -f .devcontainer/firewall-allowlist ]; then
       local fwcount; fwcount="$(grep -cvE '^[[:space:]]*(#|$)' .devcontainer/firewall-allowlist 2>/dev/null)" || fwcount=0
       printf "    firewall-allowlist present (%s domains): applied when you enable the firewall.\n" "$fwcount"
+    fi
+    if [ -f .devcontainer/firewall-presets ]; then
+      local presets
+      presets="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' .devcontainer/firewall-presets 2>/dev/null \
+        | LC_ALL=C tr -cd 'a-z0-9-\n' | paste -sd ' ' -)" || presets=""
+      printf "    firewall-presets present (%s): applied when the firewall is enabled.\n" "${presets:-none}"
     fi
   fi
 
@@ -147,10 +163,22 @@ status_volume_state () {
   fi
 }
 
+# aic status [--json]. --json reports the same reads as one JSON object
+# (lib/aic/json.sh); the reads do not change.
 cmd_status () {
-  [ "$#" -eq 0 ] || die "usage: aic status"
+  if [ "$#" -eq 0 ]; then
+    cmd_status_run
+  elif [ "$#" -eq 1 ] && [ "$1" = --json ]; then
+    json_run status "" cmd_status_run
+  else
+    usage_die "usage: aic status [--json]"
+  fi
+}
+
+cmd_status_run () {
   require_in_project
-  local project mode tools shell docker_mode relay_mode relay_applied
+  local project mode tools shell docker_mode docker_raw relay_mode relay_raw relay_applied=""
+  local image_state
   local consent="n/a" cli_version pinned image_summary
   local daemon=0 cid="" auth_cid="" runtime_state="unavailable" running_image=""
   local auth_state sessions_state bridge_state="unknown (Docker unavailable)" bridge_health=""
@@ -167,6 +195,7 @@ cmd_status () {
     host_socket="unavailable"
   fi
   docker_mode="$(read_compose_docker_mode)"
+  docker_raw="$docker_mode"
   case "$docker_mode" in
     none) docker_mode="none (ping/version only)" ;;
     ro) docker_consent_matches ro && consent="present" || consent="missing"; docker_mode="read-only (consent: $consent)" ;;
@@ -174,6 +203,7 @@ cmd_status () {
     *) docker_mode="invalid — run aic sync --no-docker" ;;
   esac
   if relay_mode="$(status_relay_mode 2>/dev/null)"; then
+    relay_raw="$relay_mode"
     # The marker is host consent; the generated .env is what this project runs
     # with. Report both, so the line never claims a relay that only starts
     # after the next rebuild (which rewrites .env and recreates the container).
@@ -188,18 +218,23 @@ cmd_status () {
       relay_mode="disabled"
     fi
   else
+    relay_raw=invalid
     relay_mode="invalid host marker"
   fi
 
   cli_version="$(read_aic_version)"
   pinned="$(read_pinned_compose_version)"
   if [ "$mode" = "build" ]; then
+    image_state="build"
     image_summary="local build (CLI v$cli_version)"
   elif [ -z "$pinned" ]; then
+    image_state="unrecognized"
     image_summary="unrecognized pull image (CLI v$cli_version; run aic sync)"
   elif [ "$pinned" = "$cli_version" ]; then
+    image_state="match"
     image_summary="pinned v$pinned (matches CLI)"
   else
+    image_state="drift"
     image_summary="pinned v$pinned (CLI v$cli_version; run aic sync && aic rebuild)"
   fi
 
@@ -235,6 +270,10 @@ cmd_status () {
     sessions_state="unknown (Docker unavailable)"
   fi
 
+  if json_mode; then
+    status_json_fields
+    return 0
+  fi
   printf 'aic status\n'
   printf '  project:  %s\n' "$project"
   printf '  mode:     %s; tools: %s; shell: %s\n' "$mode" "$tools" "$shell"
@@ -250,4 +289,56 @@ cmd_status () {
   printf '  auth:     credential bridge %s\n' "$bridge_state"
   printf '  volumes:  auth %s; project sessions %s\n' "$auth_state" "$sessions_state"
   [ "$daemon" = "1" ] || printf '  hint:     start Docker to inspect runtime and volume state\n'
+}
+
+# Record the values of cmd_status_run as JSON fields. It reads the locals of
+# cmd_status_run (bash dynamic scope), so call it only from there. Each text
+# value maps to one fixed token; the paths and names are strings.
+status_json_fields () {
+  local tool rest="$tools," tools_json="" sep=""
+  # Split on commas without word splitting or globbing: the value comes from
+  # devcontainer.json.
+  while [ -n "$rest" ]; do
+    tool="${rest%%,*}"
+    rest="${rest#*,}"
+    [ -n "$tool" ] || continue
+    tools_json="$tools_json$sep$(json_string "$tool")"
+    sep=","
+  done
+  json_field_string project "$project"
+  json_field_string mode "$mode"
+  json_field tools "[$tools_json]"
+  json_field_string shell "$shell"
+  case "$docker_raw" in none|ro|rw) ;; *) docker_raw=invalid ;; esac
+  json_field_string docker "$docker_raw"
+  case "$docker_raw" in ro|rw) json_field_string docker_consent "$consent" ;; *) json_field docker_consent null ;; esac
+  case "$relay_raw" in 1) relay_raw=enabled ;; 0) relay_raw=disabled ;; *) relay_raw=invalid ;; esac
+  json_field_string relay "$relay_raw"
+  case "$relay_applied" in 1) relay_applied=enabled ;; 0) relay_applied=disabled ;; *) relay_applied="" ;; esac
+  json_field_string relay_applied "$relay_applied"
+  [ "$host_socket" != unavailable ] || host_socket=""
+  json_field_string socket "$host_socket"
+  json_field_string runtime_kind "$host_runtime"
+  json_field_string bind_source "$bind_source"
+  json_field_string runtime_uid_gid "$runtime_identity"
+  json_field_string cli_version "$cli_version"
+  json_field_string image "$image_state"
+  json_field_string image_pinned "$pinned"
+  if [ "$daemon" = 1 ]; then json_field docker_available true; else json_field docker_available false; fi
+  json_field_string container "$(status_json_token "$runtime_state")"
+  json_field_string container_image "$running_image"
+  json_field_string auth_bridge "$(status_json_token "$bridge_state")"
+  json_field_string auth_volume "$(status_json_token "$auth_state")"
+  json_field_string sessions_volume "$(status_json_token "$sessions_state")"
+}
+
+# Map a text state of cmd_status_run to its JSON token: lower case, and one
+# fixed word for each text with spaces.
+status_json_token () {
+  case "$1" in
+    "not created") printf 'not-created' ;;
+    "UNSAFE metadata") printf 'unsafe' ;;
+    "unknown (Docker unavailable)") printf 'unavailable' ;;
+    *) printf '%s' "$1" | tr '[:upper:]' '[:lower:]' ;;
+  esac
 }

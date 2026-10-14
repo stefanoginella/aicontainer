@@ -28,7 +28,8 @@ changes them:
   aliases, functions, exports, and prompt changes.
 - **`.devcontainer/p10k.zsh`**: a
   [powerlevel10k](https://github.com/romkatv/powerlevel10k) config. This is
-  the output of `p10k configure`.
+  the output of `p10k configure`. The managed zsh startup turns off p10k
+  instant prompt, also when this file turns it on.
 
 ```zsh
 # .devcontainer/shell-rc.zsh

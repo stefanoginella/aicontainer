@@ -380,6 +380,11 @@ RUN printf '%s\n' \
 
 USER vscode
 
+# Docker gives this PATH to every process in the container, root ones too, and
+# its first entries are vscode-owned. So no root process may search it: the
+# sudo helpers run with sudo's secure_path and set their own system-only PATH,
+# the seed sanitizer sets one in post-create.py, and the managed shells set one
+# for root (docs/contributing/shell-and-overlays.md, "Root processes").
 ENV PATH="/home/vscode/.local/bin:/home/vscode/.opencode/bin:$PATH"
 # Build-time mirror of devcontainer.json's containerEnv: skip npm lifecycle
 # scripts for any `npm install`/`npx` (MCP servers, a downstream
@@ -503,6 +508,14 @@ RUN set -eu; \
     rm -rf "$tmp"; \
     "$FNM_DIR/fnm" default "$node_version"; \
     test "$("$FNM_DIR/aliases/default/bin/node" --version)" = "v${node_version}"
+# A process that no managed shell starts (Claude Code hooks, MCP servers, the
+# VS Code server, `docker exec`) never runs `fnm env`. Put the fnm default
+# Node (node, npm, npx) LAST on the image PATH: it never shadows a system
+# binary, and `fnm env` in a managed shell still puts the per-directory Node
+# first. Do not link this vscode-owned Node into a system directory: the
+# startup PATH of the managed shells and the PATH of root processes search
+# those directories (docs/contributing/shell-and-overlays.md).
+ENV PATH="$PATH:/home/vscode/.fnm/aliases/default/bin"
 
 # Semgrep (used by Claude Code's semgrep plugin; installed into ~/.local/bin
 # via uv tool so the binary is on PATH for the vscode user). Its settings path
@@ -609,6 +622,10 @@ RUN cat > /etc/bash.bashrc <<'BASHBASHRC_EOF'
 # Managed by aicontainer (root-owned). Interactive Bash reads this before
 # /etc/aic/shell/bashrc: run no PATH-resolved command and read no $HOME file.
 [ -z "${PS1-}" ] && return
+# A root shell (docker exec -u root) searches only system directories. The
+# image PATH starts with the vscode-owned ~/.local/bin, and root's ~/.bashrc
+# runs lesspipe and dircolors through PATH.
+[ "$EUID" -ne 0 ] || PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 shopt -s checkwinsize
 if [ -x /usr/lib/command-not-found ]; then
   command_not_found_handle() {
@@ -641,6 +658,9 @@ RUN { printf '%s\n' \
 
 # aicontainer additions
 export HISTFILE=/home/vscode/.shell-history/.bash_history
+# A root shell keeps its history in /root: the history volume is vscode-owned,
+# and an agent symlink there would make root write to any file.
+[ "$EUID" -ne 0 ] || HISTFILE=/root/.bash_history
 export HISTSIZE=50000
 export HISTFILESIZE=50000
 shopt -s histappend
@@ -649,6 +669,9 @@ unset _aic_path
 # fnm: root-owned binary; the function keeps fnm's cd hook on it.
 fnm() { /usr/local/bin/fnm "$@"; }
 eval "$(/usr/local/bin/fnm env --use-on-cd --shell bash)"
+# A root shell keeps the system-only PATH of /etc/bash.bashrc: the fnm Node
+# directories are vscode-owned.
+[ "$EUID" -ne 0 ] || PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # VS Code terminals open commit messages in the editor (replaces the base
 # image's /etc/bash.bashrc snippet).
 if [ -z "${GIT_EDITOR-}" ] && [ "${TERM_PROGRAM-}" = vscode ] \
@@ -672,6 +695,32 @@ if [ -n "${BASH_VERSION:-}" ] && [[ $- == *i* ]]; then
 fi
 PROFILE_EOF
 
+# A root login shell (docker exec -u root ... bash -l, sh -l) runs /etc/profile
+# and root's ~/.profile, which run id and mesg through PATH. The image PATH
+# starts with the vscode-owned ~/.local/bin, so /etc/profile first sets a
+# system-only PATH for root. The value goes through a variable: on the first
+# start, the Dev Containers CLI rewrites each `PATH=<no $>` line of
+# /etc/profile to `PATH=${PATH:-...}`, which would keep the image PATH.
+RUN { printf '%s\n' \
+        '# aicontainer: a root login shell searches only system directories.' \
+        'if [ "$(/usr/bin/id -u)" = 0 ]; then' \
+        '  _aic_root_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+        '  PATH=$_aic_root_path' \
+        '  export PATH' \
+        '  unset _aic_root_path' \
+        'fi' \
+        ''; \
+      cat /etc/profile; \
+    } > /tmp/aic-profile \
+    && install -o root -g root -m 0644 /tmp/aic-profile /etc/profile \
+    && rm -f /tmp/aic-profile \
+    && sed -i 's#^mesg n #/usr/bin/mesg n #' /root/.profile \
+    && grep -qx '/usr/bin/mesg n 2> /dev/null || true' /root/.profile \
+    && cp /etc/profile /tmp/aic-profile-check \
+    && sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1${PATH:-\3}/g' /tmp/aic-profile-check \
+    && cmp -s /etc/profile /tmp/aic-profile-check \
+    && rm -f /tmp/aic-profile-check
+
 RUN mkdir -p /etc/fish/conf.d \
     && cat > /etc/fish/conf.d/aic.fish <<'FISH_EOF'
 # Managed aicontainer fish config (baked at image build). fnm is root-owned;
@@ -681,6 +730,9 @@ function fnm
     /usr/local/bin/fnm $argv
 end
 /usr/local/bin/fnm env --use-on-cd --shell fish | source
+# A root shell (docker exec -u root) searches only system directories: the
+# image PATH and the fnm Node directories are vscode-owned.
+test "$EUID" != 0; or set -gx PATH /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin
 FISH_EOF
 
 # Managed launcher for the opt-in personal Claude Code statusline overlay
@@ -713,10 +765,16 @@ run_node() {
 exit 0
 STATUSLINE_EOF
 
+# Ignore only the agent files that Claude Code documents as personal or
+# machine-local. Shared agent config (.claude/settings.json, .claude/skills/,
+# .codex/config.toml, ...) stays visible in `git status`: it can hold hooks
+# that a host AI tool runs, so a human must see and review each change to it.
 RUN cat > /etc/aic/gitignore <<'GITIGNORE_EOF'
 # aicontainer global excludes
-.claude/
-.codex/
+**/.claude/settings.local.json
+**/.claude/agent-memory-local/
+**/.claude/worktrees/
+CLAUDE.local.md
 node_modules/
 .venv/
 __pycache__/
