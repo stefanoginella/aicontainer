@@ -192,6 +192,18 @@ export_runtime_environment () {
     AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID AIC_PROJECT_NAME
 }
 
+# Run the Dev Containers CLI without the .devcontainer/.env values that
+# export_runtime_environment() exported for aic's own Compose calls. Compose in
+# the CLI then reads them from .devcontainer/.env, and its initializeCommand
+# child (`aic initialize`) inherits none of them: that child refuses each one
+# it inherits (check_devcontainer_project_name()). AIC_PROJECT_NAME stays
+# pinned (pin_compose_project_name()).
+# shellcheck disable=SC2154 # aic_runtime_env_keys is set in aic
+without_runtime_environment () {
+  # shellcheck disable=SC2086 # the key list is split on purpose
+  ( unset $aic_runtime_env_keys; exec "$@" )
+}
+
 # A repository must not be able to opt itself into a host callback. The host
 # user does that globally with one exact, non-symlinked marker file:
 #   ~/.config/aicontainer/status-relay  (contents: "enabled\n")

@@ -925,6 +925,72 @@ jobs:
             echo "OK: managed git/shell config is locked and home startup replacements are ignored"
           '
 
+      - name: Smoke test - root processes never search the vscode-owned PATH
+        working-directory: /tmp/proj
+        run: |
+          # Docker gives the image PATH, which starts with the vscode-owned
+          # ~/.local/bin, to root processes too. vscode cannot write to a system
+          # PATH directory. The sudo helpers (called as post-create and the
+          # Compose start command call them) and the startup of a root bash,
+          # zsh, and fish (login or not) never run a binary that an agent put
+          # in ~/.local/bin, and a root shell keeps a PATH with no /home/vscode
+          # directory. A root shell also keeps its history in /root, so it never
+          # writes through a symlink that an agent put in the history volume.
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer \
+            --filter "label=devcontainer.local_folder=$(/bin/pwd -P)")
+          [ "$(printf '%s\n' "$cid" | grep -c .)" = 1 ] \
+            || { echo "FAIL: expected one running devcontainer"; exit 1; }
+          writable=$(docker exec -u vscode "$cid" /usr/bin/find /usr/local/sbin /usr/local/bin \
+            /usr/sbin /usr/bin/ /sbin/ /bin/ -maxdepth 1 -writable -print)
+          [ -z "$writable" ] || { echo "FAIL: vscode can write to a system PATH entry: $writable"; exit 1; }
+          shadows="iptables ip6tables ipset getent curl chown chmod stat id git cat sed mkdir rm grep awk dircolors lesspipe mesg groups whoami tput"
+          cleanup() {
+            docker exec -u vscode "$cid" /bin/sh -c 'cd "$HOME/.local/bin" && /bin/rm -f '"$shadows" || true
+            docker exec -u vscode "$cid" /bin/sh -c 'cd "$HOME/.shell-history" && for f in .zsh_history .bash_history; do
+              /bin/rm -f "$f"; [ ! -e "$f.aic-smoke" ] || /bin/mv "$f.aic-smoke" "$f"; done' || true
+            docker exec -u root "$cid" /bin/sh -c '/bin/rm -f /tmp/aic-root-plant-* /etc/aic-victim-*' || true
+          }
+          trap cleanup EXIT
+          docker exec -u vscode "$cid" /bin/bash -c '
+            set -euo pipefail
+            for bin in '"$shadows"'; do
+              [ ! -e "$HOME/.local/bin/$bin" ] || { echo "precondition: $HOME/.local/bin/$bin exists"; exit 1; }
+              printf "#!/bin/sh\n[ \"\$(/usr/bin/id -u)\" != 0 ] || : > /tmp/aic-root-plant-%s\n" "$bin" \
+                > "$HOME/.local/bin/$bin"
+              /bin/chmod +x "$HOME/.local/bin/$bin"
+            done
+            cd "$HOME/.shell-history"
+            for f in .zsh_history .bash_history; do
+              [ ! -e "$f" ] || /bin/mv "$f" "$f.aic-smoke"
+              /bin/ln -s "/etc/aic-victim-$f" "$f"
+            done'
+          for helper in "aic-firewall status" "aic-firewall block-metadata" aic-chown-volumes; do
+            # shellcheck disable=SC2086 # the helper and its argument are split on purpose
+            docker exec -u vscode "$cid" /usr/bin/sudo -n /usr/local/bin/$helper >/dev/null \
+              || { echo "FAIL: sudo $helper failed"; exit 1; }
+          done
+          for shell in "/bin/bash -ic" "/bin/bash -lic" "/bin/bash -lc" "/bin/sh -lc" \
+              "/usr/bin/zsh -ic" "/usr/bin/zsh -lic" "/usr/bin/fish -c"; do
+            # shellcheck disable=SC2086 # the shell and its flags are split on purpose
+            path=$(docker exec -u root "$cid" $shell 'printf "%s\n" "$PATH"' 2>/dev/null | tr -d '\r' | tail -n 1)
+            [ -n "$path" ] || { echo "FAIL: a root '$shell' printed no PATH"; exit 1; }
+            case ":$path:" in
+              *:/home/vscode*) echo "FAIL: a root '$shell' has PATH $path"; exit 1 ;;
+            esac
+          done
+          # A non-login, non-interactive bash reads no startup file.
+          docker exec -u root "$cid" /bin/bash -c : || { echo "FAIL: a root bash -c failed"; exit 1; }
+          # An interactive root shell saves its history on exit.
+          for shell in "/bin/bash -i" "/bin/bash -li" "/usr/bin/zsh -i" "/usr/bin/zsh -li"; do
+            # shellcheck disable=SC2086 # the shell and its flags are split on purpose
+            printf 'echo aic-history\n' | docker exec -i -u root "$cid" $shell >/dev/null 2>&1 || true
+          done
+          ran=$(docker exec -u root "$cid" /bin/sh -c '/bin/ls /tmp | /bin/grep "^aic-root-plant-" || true')
+          [ -z "$ran" ] || { echo "FAIL: a root process ran a binary from ~/.local/bin: $ran"; exit 1; }
+          victims=$(docker exec -u root "$cid" /bin/sh -c '/bin/ls /etc | /bin/grep "^aic-victim-" || true')
+          [ -z "$victims" ] || { echo "FAIL: a root shell wrote through a history-volume symlink: $victims"; exit 1; }
+          echo "OK: root helpers and root shells never search the vscode-owned PATH or write vscode-owned history"
+
       - name: Smoke test - Git control paths are read-only mount points
         working-directory: /tmp/proj
         run: |

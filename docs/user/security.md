@@ -180,6 +180,14 @@ to the network row.
   process that does not start from a shell can run that Node too. Think of a
   shell in the container as a shell with the authority of the agent. Do not
   type secrets there that the agent must not see.
+- **Root commands in the container.** Docker gives the image `PATH`, which
+  starts with `~/.local/bin`, to root processes too. The sudo helpers, the
+  seed sanitizer, and a root login or interactive bash, sh, zsh, or fish
+  shell use a `PATH` with only system directories, and a root shell keeps its
+  history in `/root`. A command that you start with `docker exec -u root`
+  without one of these shells (for example `bash -c`) still gets the image
+  `PATH`. Give it an absolute path, or add
+  `-e PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.
 - **Network.** All other outbound traffic is open by default. Anything inside
   the container can reach `api.openai.com`, `api.anthropic.com`, and your LAN
   (cloud metadata is blocked, see above).

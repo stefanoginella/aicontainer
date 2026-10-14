@@ -13,7 +13,8 @@ mkdir -p "$HOME"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # A developer's exported name would make every direct-start check below refuse.
-unset COMPOSE_PROJECT_NAME AIC_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
+unset COMPOSE_PROJECT_NAME AIC_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE \
+  AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID
 
 help=$(AIC_NO_UPDATE_CHECK=1 "$ROOT/aic" help)
 [ "$(printf '%s\n' "$help" | grep -c '^  AIC_NO_OVERRIDE_SCAN')" = "1" ] \
@@ -503,6 +504,52 @@ grep -Fqx -- "$fnm_path_line" "$dockerfile" \
   || fail "the fnm default Node is on the image PATH more than once"
 if grep -Ev '^[[:space:]]*#' "$dockerfile" | grep -Eq '(^|[^[:alnum:]_-])ln[[:space:]].*(\.fnm|/node([[:space:]]|$))'; then
   fail "Dockerfile links the vscode-owned Node into another directory"
+fi
+# Docker gives the image PATH, which starts with vscode-owned directories, to
+# root processes too. Each root helper sets a system-only PATH before its first
+# command, the seed sanitizer sets one in post-create.py (its Python test), the
+# managed shells keep one for root, and every sudo call names sudo and the
+# helper by absolute path. The runtime check is the "root processes never
+# search the vscode-owned PATH" smoke.
+for helper in aic-firewall aic-chown-volumes; do
+  [ "$(grep -Ev '^[[:space:]]*(#|$)' "$ROOT/template/$helper" | sed -n '1,2p')" = "set -euo pipefail
+readonly PATH=/usr/sbin:/usr/bin:/sbin:/bin" ] \
+    || fail "$helper runs a command before it sets a system-only PATH"
+done
+root_path='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+[ "$(grep -Fcx "[ \"\$EUID\" -ne 0 ] || PATH=$root_path" "$dockerfile")" = 2 ] \
+  || fail "/etc/bash.bashrc and the managed bashrc do not give a root bash a system-only PATH"
+n=$(grep -nFx "[ \"\$EUID\" -ne 0 ] || PATH=$root_path" "$dockerfile" | tail -n 1 | cut -d: -f1)
+f=$(grep -nFx 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell bash)"' "$dockerfile" | cut -d: -f1)
+[ -n "$f" ] && [ "$n" -gt "$f" ] \
+  || fail "the managed bashrc does not keep a root PATH system-only after fnm loads"
+grep -Fqx "test \"\$EUID\" != 0; or set -gx PATH ${root_path//:/ }" "$dockerfile" \
+  || fail "the managed fish config does not give a root fish a system-only PATH"
+n=$(zshrc_line "(( EUID )) || PATH=$root_path")
+f=$(zshrc_line 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell zsh)"')
+[ -n "$n" ] && [ -n "$f" ] && [ "$n" -gt "$f" ] \
+  || fail ".zshrc does not give a root zsh a system-only PATH after fnm loads"
+# A root login shell runs /etc/profile first; the reset there must survive the
+# Dev Containers CLI rewrite of `PATH=` lines (the image build checks that).
+for line in "        'if [ \"\$(/usr/bin/id -u)\" = 0 ]; then' \\" \
+  "        '  _aic_root_path=$root_path' \\" \
+  "        '  PATH=\$_aic_root_path' \\" \
+  "    && sed -i 's#^mesg n #/usr/bin/mesg n #' /root/.profile \\" \
+  "    && cmp -s /etc/profile /tmp/aic-profile-check \\"; do
+  grep -Fqx -- "$line" "$dockerfile" || fail "Dockerfile lost the root login-shell PATH reset: $line"
+done
+# A root shell keeps its history out of the vscode-owned history volume.
+grep -Fqx '[ "$EUID" -ne 0 ] || HISTFILE=/root/.bash_history' "$dockerfile" \
+  || fail "the managed bashrc writes root history to the vscode-owned volume"
+n=$(zshrc_line '(( EUID )) || HISTFILE=/root/.zsh_history')
+h=$(zshrc_line 'export HISTFILE=/home/vscode/.shell-history/.zsh_history')
+[ -n "$n" ] && [ -n "$h" ] && [ "$n" -gt "$h" ] \
+  || fail ".zshrc writes root history to the vscode-owned volume"
+if grep -n '"sudo"' "$ROOT"/template/*.py; then
+  fail "post-create runs sudo through PATH; use /usr/bin/sudo"
+fi
+if grep -nE 'exec --workspace-folder \. sudo' "$ROOT/aic" "$ROOT"/lib/aic/*.sh; then
+  fail "aic runs sudo through the container PATH; use /usr/bin/sudo and the helper's absolute path"
 fi
 # The global Git excludes must not hide shared agent config. An agent can put
 # hooks in .claude/settings.json or .codex/config.toml, and a host AI tool runs
@@ -2321,6 +2368,13 @@ fi
 if [ "$tool" = devcontainer ] && [ -n "${AIC_TEST_ENV_LOG:-}" ]; then
   printf 'COMPOSE_PROJECT_NAME=%s\n' "${COMPOSE_PROJECT_NAME-<unset>}" >> "$AIC_TEST_ENV_LOG"
   printf 'AIC_PROJECT_NAME=%s\n' "${AIC_PROJECT_NAME-<unset>}" >> "$AIC_TEST_ENV_LOG"
+  # devcontainer up runs `aic initialize`, which refuses these host values
+  # from the environment; aic must not pass them on.
+  if [ "${1:-}" = up ]; then
+    for key in AIC_DOCKER_SOCKET AIC_RUNTIME_USER AIC_STATUS_RELAY AIC_STATUS_PROJECT AIC_STATUS_PROJECT_ID; do
+      [ -z "${!key+set}" ] || printf '%s is set\n' "$key" >> "$AIC_TEST_ENV_LOG"
+    done
+  fi
 fi
 # The trusted template's name line needs AIC_PROJECT_NAME even with -p.
 if [ "$tool" = docker ] && [ "${1:-}" = compose ] && [ -n "${AIC_TEST_COMPOSE_ENV_LOG:-}" ]; then
@@ -2944,13 +2998,13 @@ for command in up rebuild shell run; do
   : > "$env_log"
   (cd "$TMP/root-env" && PATH="$fakebin:$PATH" AIC_TEST_LOG="$log" \
     AIC_TEST_ENV_LOG="$env_log" COMPOSE_PROJECT_NAME=inherited-other \
-    AIC_PROJECT_NAME=inherited-other \
+    AIC_PROJECT_NAME=inherited-other AIC_DOCKER_SOCKET=/inherited.sock AIC_STATUS_RELAY=1 \
     AIC_REAL_DOCKER="$REAL_DOCKER" DOCKER_CONFIG="$REAL_DOCKER_CONFIG" \
     AIC_HOME="$ROOT" "$ROOT/aic" "${args[@]}" >/dev/null 2>&1) \
     || fail "$command refused a project whose root .env sets COMPOSE_PROJECT_NAME"
   [ "$(cat "$env_log")" = "COMPOSE_PROJECT_NAME=$root_env_name
 AIC_PROJECT_NAME=$root_env_name" ] \
-    || fail "$command did not pin the managed Compose name for the Dev Containers CLI"
+    || fail "$command did not pin the managed Compose name for the Dev Containers CLI, or passed it a host value of .devcontainer/.env"
 done
 
 : > "$log"
@@ -3024,8 +3078,18 @@ echo "$out" | grep -q 'COMPOSE_PROJECT_NAME in the environment' \
 # .env. Each refusal names the variable, never its value, and comes before Docker.
 # doctor exports aic's own AIC_PROJECT_NAME before its identity check; it must
 # still judge the inherited one.
+# Every other key of the generated .devcontainer/.env is a host value that
+# Compose substitutes (the socket, the sidecar user, the status relay), and an
+# inherited value wins over the file. A direct start refuses each one, an
+# empty one too: a repository cannot set them, but a host shell can.
+runtime_keys=$(sed -n 's/^\(AIC_[A-Z_]*\)=.*/\1/p' "$TMP/root-env/.devcontainer/.env" | grep -vx AIC_PROJECT_NAME)
+[ "$(printf '%s\n' "$runtime_keys" | grep -c .)" = 5 ] \
+  || fail "the generated .devcontainer/.env does not hold the five expected host keys"
+runtime_cases=()
+for key in $runtime_keys; do runtime_cases+=("$key=Leaked-Value-$key"); done
 for case in "AIC_PROJECT_NAME=Leaked-Value-1" "AIC_PROJECT_NAME=" \
-    "COMPOSE_ENV_FILES=../Leaked-Value-2.env" "COMPOSE_DISABLE_ENV_FILE=Leaked-Value-3"; do
+    "COMPOSE_ENV_FILES=../Leaked-Value-2.env" "COMPOSE_DISABLE_ENV_FILE=Leaked-Value-3" \
+    "${runtime_cases[@]}" "AIC_STATUS_RELAY="; do
   variable=${case%%=*}
   set +e
   out=$(cd "$TMP/root-env" && env "$case" AIC_HOME="$ROOT" "$ROOT/aic" validate 2>&1)

@@ -29,6 +29,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   install` in the container.** The container mounts `.git/hooks` read-only; the
   README now links to "Git hooks on the host". (template)
 
+### Security
+
+- **Root processes in the container no longer search agent-writable
+  directories.** The image `PATH` starts with `~/.local/bin`, and Docker gives
+  it to root processes too. A root login or interactive shell now gets a PATH
+  with only system directories, so its startup no longer runs an `id`,
+  `mesg`, or `dircolors` that an agent put there. (Dockerfile, .zshrc,
+  post-create.py, aic-lock-user-config)
+
+- **A root shell no longer writes its history to the shared history
+  volume.** That volume is vscode-owned, so an agent symlink there made root
+  write to any file. Root history now stays in `/root`. (Dockerfile, .zshrc)
+
+- **A direct start refuses `AIC_DOCKER_SOCKET`, `AIC_RUNTIME_USER`, and
+  `AIC_STATUS_*` in the environment.** Each one wins over the host value in
+  `.devcontainer/.env`, so an editor that inherits one could mount another
+  socket or change the relay consent. `aic up` and `aic rebuild` no longer
+  pass them to Dev Containers. (aic)
+
+- **`aic status` calls sudo and the firewall helper by absolute path.** An
+  agent could put a `sudo` in `~/.local/bin` that reported the firewall as on.
+  Post-create calls its sudo helpers by absolute path too. (aic,
+  post-create.py)
+
 ## [0.12.0] - 2026-10-14
 
 ### Added

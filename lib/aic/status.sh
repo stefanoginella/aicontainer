@@ -14,7 +14,9 @@
 # with .devcontainer/firewall-enable gets it on every start, so "off"/"unknown"
 # is the safe (network-open) default.
 # `sudo aic-firewall status` is one of the three scoped-sudo scripts, so this
-# read is allowed; when enabled the OUTPUT chain shows `policy DROP`.
+# read is allowed; when enabled the OUTPUT chain shows `policy DROP`. Both
+# paths are absolute: the container PATH starts with the vscode-owned
+# ~/.local/bin, where an agent could put a `sudo` that prints `policy DROP`.
 firewall_live_state () {
   local project template cid devcontainer out
   project="$(project_name)"
@@ -23,7 +25,7 @@ firewall_live_state () {
   [ -n "$cid" ] || { echo unknown; return; }
   [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] || { echo unknown; return; }
   devcontainer="$(resolve_devcontainer 2>/dev/null)" || { echo unknown; return; }
-  out="$(COMPOSE_PROJECT_NAME="$project" AIC_PROJECT_NAME="$(expected_project_name)" "$devcontainer" exec --workspace-folder . sudo aic-firewall status 2>/dev/null)" || { echo unknown; return; }
+  out="$(COMPOSE_PROJECT_NAME="$project" AIC_PROJECT_NAME="$(expected_project_name)" "$devcontainer" exec --workspace-folder . /usr/bin/sudo -n /usr/local/bin/aic-firewall status 2>/dev/null)" || { echo unknown; return; }
   if grep -q 'policy DROP' <<<"$out"; then echo on; else echo off; fi
 }
 

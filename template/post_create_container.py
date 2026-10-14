@@ -93,7 +93,7 @@ def fix_volume_ownership() -> None:
             needs_chown = True
     if needs_chown:
         try:
-            subprocess.run(["sudo", "/usr/local/bin/aic-chown-volumes"], check=True)
+            subprocess.run(["/usr/bin/sudo", "-n", "/usr/local/bin/aic-chown-volumes"], check=True)
             log("re-owned persistent volumes")
         except subprocess.CalledProcessError as e:
             log(f"warning: aic-chown-volumes failed: {e}")
@@ -121,7 +121,7 @@ def block_metadata() -> None:
     enabled its default-DROP policy covers the same range, so the two compose."""
     try:
         subprocess.run(
-            ["sudo", "/usr/local/bin/aic-firewall", "block-metadata"],
+            ["/usr/bin/sudo", "-n", "/usr/local/bin/aic-firewall", "block-metadata"],
             check=True, capture_output=True, text=True,
         )
         log("blocked cloud metadata / link-local egress (169.254.0.0/16)")

@@ -27,6 +27,28 @@ The managed `template/gitignore` is copied as `.devcontainer/.gitignore`, and it
   - It runs only when `git_control_path_problems()` reports nothing. A planted `.git/commondir` would make host Git read the config of another directory. That problem is already a finding.
   - It runs host Git with `core.fsmonitor` off.
 
+### Host values in the environment
+
+Compose substitutes every key of `.devcontainer/.env`, and a value in the
+environment wins over the file. `aic` commands export their own values
+(`export_runtime_environment()`). A direct Dev Containers start has only the
+environment of the editor. So:
+
+- The `aic` entry script records which of `AIC_DOCKER_SOCKET`,
+  `AIC_RUNTIME_USER`, `AIC_STATUS_RELAY`, `AIC_STATUS_PROJECT`, and
+  `AIC_STATUS_PROJECT_ID` it inherited (`aic_runtime_env_keys`). Keep that
+  list equal to the keys of `write_runtime_environment_file()`.
+- `check_devcontainer_project_name()` refuses each inherited key, an empty one
+  too. It names the key, never the value. The callers are the same as for
+  `AIC_PROJECT_NAME` (see [Project identity](project-identity.md)).
+- `aic up` and `aic rebuild` run `devcontainer up` through
+  `without_runtime_environment()`. Thus the `aic initialize` child inherits
+  none of these keys, and Compose reads them from `.devcontainer/.env`.
+
+Guarded by the inherited-variable cases in `tests/test-aic-host-security.sh`.
+They read the keys from a generated `.env`, so a new key without a refusal
+fails the test.
+
 Hard rules:
 
 - Do not trust `AIC_DOCKER_SOCKET` from the environment or from the repository.

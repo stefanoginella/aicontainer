@@ -76,9 +76,10 @@ cmd_up () {
   # A failure of devcontainer up is a failure of aic up: exit 1, never the
   # code of the Dev Container CLI, so 2 stays the code of a usage error.
   if [ "${#passthrough[@]}" -gt 0 ]; then
-    "$devcontainer" up --workspace-folder . "${passthrough[@]}" || die "devcontainer up failed (exit $?)"
+    without_runtime_environment "$devcontainer" up --workspace-folder . "${passthrough[@]}" \
+      || die "devcontainer up failed (exit $?)"
   else
-    "$devcontainer" up --workspace-folder . || die "devcontainer up failed (exit $?)"
+    without_runtime_environment "$devcontainer" up --workspace-folder . || die "devcontainer up failed (exit $?)"
   fi
   print_boundary_summary up
   warn_compose_drift
@@ -205,11 +206,11 @@ cmd_rebuild () {
   local devcontainer; devcontainer="$(resolve_devcontainer)"
   # Bash 3.2 treats expansion of an empty array as unbound (see cmd_up).
   if [ "${#passthrough[@]}" -gt 0 ]; then
-    "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache "${passthrough[@]}" \
-      || die "devcontainer up failed (exit $?)"
+    without_runtime_environment "$devcontainer" up --workspace-folder . --remove-existing-container \
+      --build-no-cache "${passthrough[@]}" || die "devcontainer up failed (exit $?)"
   else
-    "$devcontainer" up --workspace-folder . --remove-existing-container --build-no-cache \
-      || die "devcontainer up failed (exit $?)"
+    without_runtime_environment "$devcontainer" up --workspace-folder . --remove-existing-container \
+      --build-no-cache || die "devcontainer up failed (exit $?)"
   fi
 }
 
