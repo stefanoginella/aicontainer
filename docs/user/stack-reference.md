@@ -23,7 +23,7 @@ The structure of this page is stable. A tool can find a stack by its heading:
      and `chown-paths` lines.
   4. `### Post-create`: the `post-create.project.sh` steps.
   5. `### Editor`: the `vscode-extensions` and `vscode-settings.json` lines.
-  6. `### Firewall presets`: the `firewall-presets` lines (since Unreleased).
+  6. `### Firewall presets`: the `firewall-presets` lines (since v0.12.0).
   7. `### Trust and caveats`: what needs `aic trust`, the boot command, and
      the risks.
 - The line before each code block names the target file, for example
@@ -47,8 +47,8 @@ change. A tag before this page does not have it: update aic with
 ### Version markers
 
 An item that needs a newer aic than the page baseline has a marker:
-`(since vX.Y.Z)`, or `(since Unreleased)` before a release. The release
-writes the version into each `(since Unreleased)` marker.
+`(since vX.Y.Z)`, or `(since v0.12.0)` before a release. The release
+writes the version into each `(since v0.12.0)` marker.
 
 - The baseline is aic v0.11.0. An item with no marker works in v0.11.0 and
   later.
@@ -59,8 +59,8 @@ writes the version into each `(since Unreleased)` marker.
 
 | Item | Marker |
 |---|---|
-| `.devcontainer/firewall-presets` | (since Unreleased) |
-| `.devcontainer/firewall-enable` | (since Unreleased) |
+| `.devcontainer/firewall-presets` | (since v0.12.0) |
+| `.devcontainer/firewall-enable` | (since v0.12.0) |
 
 ## Rules for every stack
 
@@ -112,7 +112,7 @@ docker volume rm "${project}_<volume>"   # one name for each volume, for example
 | `vscode-extensions`, `vscode-settings.json` | Yes, for each entry |
 | `chown-paths` | No |
 | `firewall-allowlist` | No |
-| `firewall-enable`, `firewall-presets` (since Unreleased) | No |
+| `firewall-enable`, `firewall-presets` (since v0.12.0) | No |
 
 `aic trust` needs a terminal (TTY). Only the user can run it. Trust is for the
 exact config: each later edit of a file in this table that needs trust asks
@@ -319,7 +319,7 @@ See [Recipe: TypeScript and JavaScript LSP](customization.md#recipe-typescript-a
 ### Firewall presets
 
 The default allowlist has the npm registry. Add `nodejs` to `firewall-presets`
-(since Unreleased) only when the project pins a Node.js version (`.nvmrc` or
+(since v0.12.0) only when the project pins a Node.js version (`.nvmrc` or
 `.node-version`): fnm downloads it from `nodejs.org`.
 
 `.devcontainer/firewall-presets`:
@@ -533,7 +533,7 @@ No `vscode-settings.json` lines.
 
 ### Firewall presets
 
-Add the preset to `firewall-presets` (since Unreleased).
+Add the preset to `firewall-presets` (since v0.12.0).
 
 `.devcontainer/firewall-presets`:
 
@@ -636,7 +636,7 @@ No `vscode-settings.json` lines.
 
 ### Firewall presets
 
-Add the preset to `firewall-presets` (since Unreleased).
+Add the preset to `firewall-presets` (since v0.12.0).
 
 `.devcontainer/firewall-presets`:
 
@@ -729,7 +729,7 @@ No `vscode-settings.json` lines.
 
 ### Firewall presets
 
-Add the preset to `firewall-presets` (since Unreleased).
+Add the preset to `firewall-presets` (since v0.12.0).
 
 `.devcontainer/firewall-presets`:
 
@@ -815,7 +815,7 @@ No `vscode-settings.json` lines.
 
 ### Firewall presets
 
-Add the preset to `firewall-presets` (since Unreleased).
+Add the preset to `firewall-presets` (since v0.12.0).
 
 `.devcontainer/firewall-presets`:
 
@@ -904,7 +904,7 @@ server.
 
 ### Firewall presets
 
-Add the preset to `firewall-presets` (since Unreleased).
+Add the preset to `firewall-presets` (since v0.12.0).
 
 `.devcontainer/firewall-presets`:
 
@@ -1008,7 +1008,7 @@ Each file exists one time. To combine two or more stacks:
 - **`docker-compose.override.yml`**: write one `services.devcontainer` key and
   one top-level `volumes:` key. Put all `volumes:` entries in one list and all
   `environment:` entries in one map. Write `image:` and `build:` one time.
-- **`chown-paths`, `firewall-presets` (since Unreleased), `vscode-extensions`**: put all lines in
+- **`chown-paths`, `firewall-presets` (since v0.12.0), `vscode-extensions`**: put all lines in
   one file. Remove duplicate lines.
 - **`vscode-settings.json`**: merge the objects into one JSON object.
 - **`post-create.project.sh`**: write the header one time. Then add the steps
