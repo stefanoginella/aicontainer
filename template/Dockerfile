@@ -94,7 +94,7 @@ COPY --from=uv /uv /usr/local/bin/uv
 # fzf (GitHub release is newer than apt and includes shell integration). Only
 # the fzf binary is installed, root-owned: the archive's own owner is not kept.
 # renovate: datasource=github-releases depName=junegunn/fzf
-ARG FZF_VERSION=0.74.5
+ARG FZF_VERSION=0.75.0
 ARG FZF_SHA256_AMD64=d47d7f882972c7d674dbbba998ffa4116e68379616ffac7695d0671e9a722c5f
 ARG FZF_SHA256_ARM64=cf058001da21724a469b714a29cf4aab9cbe860d218a0d6c1b5b661efad7784c
 RUN set -eu; \
