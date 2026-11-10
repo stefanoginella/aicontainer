@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The image now ships Node 26 LTS instead of Node 24.** The default
+  `node`, `npm`, and `npx` come from the newest signed 26.x release. To keep
+  Node 24 in a project, pin it in `.nvmrc`. (Dockerfile)
+
 ## [0.12.1] - 2026-10-14
 
 ### Fixed

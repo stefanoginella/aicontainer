@@ -142,7 +142,7 @@ in `Dockerfile.project`.
   not the default.
 - **Runtimes:**
   - Python 3.13 through [`uv`](https://github.com/astral-sh/uv).
-  - Node 24 LTS through [`fnm`](https://github.com/Schniz/fnm). Thus a project
+  - Node 26 LTS through [`fnm`](https://github.com/Schniz/fnm). Thus a project
     can override the version with `.nvmrc`.
   - The default Node of fnm (`node`, `npm`, `npx`) is also the last entry on
     the image `PATH`. Thus Claude Code hooks, MCP servers, and `docker exec`
