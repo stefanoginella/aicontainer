@@ -6,8 +6,8 @@
 # versions stay current.
 # =============================================================================
 
-FROM ghcr.io/astral-sh/uv:0.13@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 AS uv
-FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04@sha256:21e9e3275736cb3bc33a2904b279a2ab292c51fedd53c2963463627d4586c3e6
+FROM ghcr.io/astral-sh/uv:0.13@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
+FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04@sha256:ec556aed93f62aa6d13fe72c5db09da4e29a7c9b87c568dbca0ee5717466926a
 
 # OCI labels: lets GitHub auto-link the GHCR package back to this repo.
 LABEL org.opencontainers.image.source="https://github.com/stefanoginella/aicontainer" \
@@ -467,7 +467,7 @@ ARG FNM_SHA256_ARM64=4eaff58b2c5bf30d0934027572dd0b5bbb60d2a1af309230b53662d4b1d
 ARG NODE_RELEASE_KEYS_COMMIT=481637f813e912c4aa3622d7964ab426c97b8e8d
 ARG NODE_RELEASE_KEYS_SHA256=140f2ad5260fd62773b6243ce8e1d3009645d558f121b8262c55e383dc285932
 # renovate: datasource=node-version depName=node
-ARG NODE_MIN_VERSION=24.21.0
+ARG NODE_MIN_VERSION=24.22.2
 ENV FNM_DIR="/home/vscode/.fnm"
 RUN set -eu; \
     arch="$TARGETARCH"; \
@@ -537,7 +537,7 @@ RUN uv tool install semgrep \
 # The theme commit also pins gitstatusd: its installer (root stage below)
 # checks the download against the sha256 in that commit's install.info.
 # renovate: datasource=git-refs depName=https://github.com/romkatv/powerlevel10k branch=master
-ARG POWERLEVEL10K_COMMIT=d05a1b00f9a61f9578bf9dc19b8451942dde8734
+ARG POWERLEVEL10K_COMMIT=433bb250037d1baf479adf06ce78b3a338c574a4
 # renovate: datasource=git-refs depName=https://github.com/zsh-users/zsh-autosuggestions branch=master
 ARG ZSH_AUTOSUGGESTIONS_COMMIT=85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5
 # renovate: datasource=git-refs depName=https://github.com/zsh-users/zsh-syntax-highlighting branch=master
