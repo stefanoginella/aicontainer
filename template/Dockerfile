@@ -537,7 +537,7 @@ RUN uv tool install semgrep \
 # The theme commit also pins gitstatusd: its installer (root stage below)
 # checks the download against the sha256 in that commit's install.info.
 # renovate: datasource=git-refs depName=https://github.com/romkatv/powerlevel10k branch=master
-ARG POWERLEVEL10K_COMMIT=d05a1b00f9a61f9578bf9dc19b8451942dde8734
+ARG POWERLEVEL10K_COMMIT=433bb250037d1baf479adf06ce78b3a338c574a4
 # renovate: datasource=git-refs depName=https://github.com/zsh-users/zsh-autosuggestions branch=master
 ARG ZSH_AUTOSUGGESTIONS_COMMIT=85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5
 # renovate: datasource=git-refs depName=https://github.com/zsh-users/zsh-syntax-highlighting branch=master
