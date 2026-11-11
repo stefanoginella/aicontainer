@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `node`, `npm`, and `npx` come from the newest signed 26.x release. To keep
   Node 24 in a project, pin it in `.nvmrc`. (Dockerfile)
 
+### Fixed
+
+- **`Cmd+C` and `Cmd+V` work in Claude Code in the VS Code terminal.** The
+  template sent all shortcuts to the terminal, and Claude Code consumed the
+  `Cmd` keys. Run `aic sync` and `aic rebuild` to get the fix. (template)
+
 ## [0.12.1] - 2026-10-14
 
 ### Fixed
