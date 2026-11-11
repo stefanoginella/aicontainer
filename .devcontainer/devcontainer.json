@@ -34,6 +34,12 @@
         // Keep false: with true, Cmd+C/Cmd+V go to the terminal program, and
         // Claude Code (kitty keyboard protocol) consumes them.
         "terminal.integrated.sendKeybindingsToShell": false,
+        // On Linux/Windows these default skip-shell commands take Ctrl+G and
+        // (accessibility mode) Ctrl+R. Give the keys back to Claude Code.
+        "terminal.integrated.commandsToSkipShell": [
+          "-workbench.action.terminal.goToRecentDirectory",
+          "-workbench.action.terminal.runRecentCommand"
+        ],
         "terminal.integrated.rightClickBehavior": "paste",
         // Prevent file:/// OSC 8 links from triggering "No application found"
         // in devcontainers (microsoft/vscode#211443). VS Code's built-in file
