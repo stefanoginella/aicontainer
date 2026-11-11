@@ -108,6 +108,19 @@ you just started. See
 This is expected. See [Installing extra tools](extra-tools.md). Move the
 tools to `Dockerfile.project`.
 
+### Chromium does not start: `libglib-2.0.so.0: cannot open shared object file`
+
+This applies when Playwright, Puppeteer, or a different tool starts a headless
+Chromium (for example `chrome-headless-shell`) and the start fails with
+`error while loading shared libraries`.
+
+The base image does not contain the system libraries for Chromium. You cannot
+install them in the running container, because aic blocks `sudo apt`.
+
+1. Put Chromium and its libraries in a `Dockerfile.project`. Follow
+   [Recipe: Playwright](extra-tools.md#recipe-playwright-browser-tests-automation-mcp).
+2. Run `aic sync`, `aic trust`, and `aic rebuild`.
+
 ### Codex asks for approval, but auto-approve is set
 
 Make sure that `~/.codex/config.toml` exists. `post-create.py` writes this

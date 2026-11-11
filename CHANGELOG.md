@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template sent all shortcuts to the terminal, and Claude Code consumed the
   `Cmd` keys. Run `aic sync` and `aic rebuild` to get the fix. (template)
 
+- **Troubleshooting now covers a Chromium start failure on `libglib-2.0.so.0`.**
+  The entry links to the Playwright recipe, which puts the browser and its
+  libraries in `Dockerfile.project`. (docs)
+
 ## [0.12.1] - 2026-10-14
 
 ### Fixed
