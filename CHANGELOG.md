@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Cmd+C` and `Cmd+V` work in Claude Code in the VS Code terminal.** The
+  template sent all shortcuts to the terminal, and Claude Code consumed the
+  `Cmd` keys. Run `aic sync` and `aic rebuild` to get the fix. (template)
+
 ## [0.12.1] - 2026-10-14
 
 ### Fixed

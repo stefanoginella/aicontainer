@@ -31,7 +31,9 @@
           "fish": { "path": "fish", "args": ["--no-config", "-C", "source /etc/fish/conf.d/aic.fish"] }
         },
         "terminal.integrated.fontFamily": "'MesloLGS NF', monospace",
-        "terminal.integrated.sendKeybindingsToShell": true,
+        // Keep false: with true, Cmd+C/Cmd+V go to the terminal program, and
+        // Claude Code (kitty keyboard protocol) consumes them.
+        "terminal.integrated.sendKeybindingsToShell": false,
         "terminal.integrated.rightClickBehavior": "paste",
         // Prevent file:/// OSC 8 links from triggering "No application found"
         // in devcontainers (microsoft/vscode#211443). VS Code's built-in file

@@ -169,6 +169,9 @@ in `Dockerfile.project`.
   - The default profile and the font family follow the `AIC_SHELL` of the
     project (zsh → `MesloLGS NF`; bash/fish → `monospace`).
   - A right-click pastes.
+  - VS Code keeps its own shortcuts, for example `Cmd+C` and `Cmd+V`
+    (`sendKeybindingsToShell` is `false`). Thus copy and paste also work in
+    Claude Code. All other keys go to the program in the terminal.
   - The terminal opens only the `http/https/mailto/vscode` link schemes. It
     suppresses `file://` OSC 8 links to prevent
     [microsoft/vscode#211443](https://github.com/microsoft/vscode/issues/211443).
