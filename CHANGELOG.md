@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `node`, `npm`, and `npx` come from the newest signed 26.x release. To keep
   Node 24 in a project, pin it in `.nvmrc`. (Dockerfile)
 
+- **Refreshed bundled tools and base image.** fzf 0.75.0, uv 0.13, and
+  current Ubuntu 24.04 base-image and powerlevel10k digests. (Dockerfile)
+
+- **Dev Container CLI dependency updated to 0.90.** The npm package now
+  installs `@devcontainers/cli` ^0.90.0. (package.json)
+
 ### Fixed
 
 - **`Cmd+C` and `Cmd+V` work in Claude Code in the VS Code terminal.** The
