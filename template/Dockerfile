@@ -94,9 +94,9 @@ COPY --from=uv /uv /usr/local/bin/uv
 # fzf (GitHub release is newer than apt and includes shell integration). Only
 # the fzf binary is installed, root-owned: the archive's own owner is not kept.
 # renovate: datasource=github-releases depName=junegunn/fzf
-ARG FZF_VERSION=0.74.5
-ARG FZF_SHA256_AMD64=d47d7f882972c7d674dbbba998ffa4116e68379616ffac7695d0671e9a722c5f
-ARG FZF_SHA256_ARM64=cf058001da21724a469b714a29cf4aab9cbe860d218a0d6c1b5b661efad7784c
+ARG FZF_VERSION=0.75.0
+ARG FZF_SHA256_AMD64=0d6640f83582d991cf429754baad64b07e3a4e439a6019670f4b91da1314141c
+ARG FZF_SHA256_ARM64=bd0717badb6a5620387e014bb94209aac4d9eab6ab77b5348eabb0833aeb4d59
 RUN set -eu; \
     arch="$TARGETARCH"; \
     case "$arch" in \
@@ -467,7 +467,7 @@ ARG FNM_SHA256_ARM64=4eaff58b2c5bf30d0934027572dd0b5bbb60d2a1af309230b53662d4b1d
 ARG NODE_RELEASE_KEYS_COMMIT=481637f813e912c4aa3622d7964ab426c97b8e8d
 ARG NODE_RELEASE_KEYS_SHA256=140f2ad5260fd62773b6243ce8e1d3009645d558f121b8262c55e383dc285932
 # renovate: datasource=node-version depName=node
-ARG NODE_MIN_VERSION=24.22.2
+ARG NODE_MIN_VERSION=26.13.0
 ENV FNM_DIR="/home/vscode/.fnm"
 RUN set -eu; \
     arch="$TARGETARCH"; \
