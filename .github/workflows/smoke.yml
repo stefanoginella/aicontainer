@@ -1639,18 +1639,24 @@ jobs:
           ' "$GITHUB_WORKSPACE/aic" trust
           out=$(devcontainer up --workspace-folder . 2>&1) \
             || { echo "$out"; echo "FAIL: a direct start of a trusted project build failed"; exit 1; }
-          if echo "$out" | grep -q 'docker-compose.devcontainer.build-'; then
+          # Here-strings, not `echo "$out" | grep -q`: grep -q exits at the
+          # first match, echo of the long log then gets SIGPIPE, and pipefail
+          # turns that into a failed (or, inside `if`, a missed) match.
+          if grep -Fq 'docker-compose.devcontainer.build-' <<<"$out"; then
             echo "$out"; echo "FAIL: the Dev Containers CLI built the devcontainer service itself"; exit 1
           fi
-          devcontainer exec --workspace-folder . cat /etc/aic-smoke-dockerfile-project \
-            | grep -qx aic-smoke-dockerfile-project \
+          marker=$(devcontainer exec --workspace-folder . cat /etc/aic-smoke-dockerfile-project) || marker=""
+          [ "$marker" = aic-smoke-dockerfile-project ] \
             || { echo "FAIL: the direct start did not run the image built from Dockerfile.project"; exit 1; }
           out=$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" rebuild </dev/null 2>&1) \
             || { echo "$out"; echo "FAIL: aic rebuild of a trusted project build failed"; exit 1; }
-          echo "$out" | grep -q 'aic: building the devcontainer image without the cache' \
+          grep -Fq 'aic: building the devcontainer image without the cache' <<<"$out" \
             || { echo "$out"; echo "FAIL: aic rebuild did not build the devcontainer image without the cache"; exit 1; }
-          devcontainer exec --workspace-folder . cat /etc/aic-smoke-dockerfile-project \
-            | grep -qx aic-smoke-dockerfile-project \
+          if grep -Fq 'docker-compose.devcontainer.build-' <<<"$out"; then
+            echo "$out"; echo "FAIL: on aic rebuild, the Dev Containers CLI built the devcontainer service itself"; exit 1
+          fi
+          marker=$(devcontainer exec --workspace-folder . cat /etc/aic-smoke-dockerfile-project) || marker=""
+          [ "$marker" = aic-smoke-dockerfile-project ] \
             || { echo "FAIL: aic rebuild did not run the image built from Dockerfile.project"; exit 1; }
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" destroy --yes >/dev/null
           echo "OK: a project Dockerfile build starts through Dev Containers; aic builds the image, the CLI does not"
