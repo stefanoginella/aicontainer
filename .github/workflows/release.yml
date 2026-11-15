@@ -190,7 +190,9 @@ jobs:
             fi
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "${package}@${TAG_VERSION} already exists with matching integrity; preserving it."
-          elif { printf '%s\n' "$remote_json"; cat "$err"; } | grep -Eqi 'E404|404 Not Found'; then
+          # No pipe into `grep -q` under pipefail: grep exits at the first
+          # match, the writer gets SIGPIPE, and the test fails on a real 404.
+          elif grep -Eqi 'E404|404 Not Found' "$err" || grep -Eqi 'E404|404 Not Found' <<<"$remote_json"; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
           else
             echo "Unable to determine whether ${package}@${TAG_VERSION} exists; refusing to publish blindly." >&2
@@ -290,7 +292,8 @@ jobs:
           if current_json=$(npm view "$package" dist-tags.latest --json 2>"$err"); then
             current=$(printf '%s' "$current_json" \
               | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)||""))')
-          elif { printf '%s\n' "$current_json"; cat "$err"; } | grep -Eqi 'E404|404 Not Found'; then
+          # No pipe into `grep -q` under pipefail (see "Check immutable npm version").
+          elif grep -Eqi 'E404|404 Not Found' "$err" || grep -Eqi 'E404|404 Not Found' <<<"$current_json"; then
             current=
           else
             echo "Unable to read npm's current latest dist-tag; refusing to publish blindly." >&2
