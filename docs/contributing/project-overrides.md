@@ -41,14 +41,64 @@ environment variables, `extra_hosts`, mounts, and a `build:` block for
 `Dockerfile.project`.
 
 The template `devcontainer.json` contains
-`"dockerComposeFile": ["docker-compose.yml"]` (one entry).
-`patch_devcontainer_json()` adds the override to that array **only when the
-file exists**. A guard prevents a second entry, so the operation is
-idempotent.
+`"dockerComposeFile": ["docker-compose.yml", "docker-compose.prebuilt.yml"]`.
+`patch_devcontainer_json()` inserts the override between the two entries
+**only when the file exists**. A guard prevents a second entry, so the
+operation is idempotent.
 
-Keep one entry in the template array. If the template lists the override
-before the file exists, `devcontainer up` fails on projects without the file.
-A missing `dockerComposeFile` entry is a hard error.
+Do not list the override in the template array. If the template lists the
+override before the file exists, `devcontainer up` fails on projects without
+the file. A missing `dockerComposeFile` entry is a hard error.
+
+## The prebuilt Compose file
+
+aic builds the devcontainer image itself. The Dev Containers CLI only starts
+it.
+
+The reason: when the devcontainer service has a `build:`, the CLI writes a
+generated `Dockerfile-with-features` into the OS temp folder and gives it to
+`docker compose build`. Compose 5 builds through buildx bake. Bake refuses a
+file outside the working directory without an `fs.read` entitlement. Do not
+grant that entitlement (`--allow`, `BUILDX_BAKE_ENTITLEMENTS_FS`): it opens a
+host path to a build that the project controls.
+
+The parts:
+
+- `template/docker-compose.prebuilt.yml` sets `build: !reset null` on the
+  devcontainer service. It is always the **last** `dockerComposeFile` entry.
+  So the model that the CLI starts has no devcontainer build, and the CLI
+  starts the image that aic built.
+- `build_devcontainer_image()` in `lib/aic/lifecycle.sh` resolves
+  `docker-compose.yml` and the override. When that model gives the
+  devcontainer service a `build`, it runs `docker compose build devcontainer`
+  with the same files.
+- `aic initialize` runs it with the cache, after the gate. The CLI runs the
+  initializeCommand before it reads the Compose model. Thus the image is there
+  for `aic up`, `aic rebuild`, and a VS Code Reopen or Rebuild.
+- `aic rebuild` runs it without the cache first, after the gate and the pull.
+  Its `--build-no-cache` still rebuilds the build-mode sidecars, which the CLI
+  builds.
+- The build-mode template names the devcontainer image explicitly
+  (`${AIC_PROJECT_NAME}-devcontainer`, the Compose default). A service with
+  neither `image` nor `build` is not valid.
+
+Rules:
+
+- The validated Compose models leave the prebuilt file out. The gate
+  validates the model that aic builds. The trust hash covers the bytes of the
+  prebuilt file, through the walk of the `.devcontainer/` tree.
+- The prebuilt file must be byte-equal to the template, in both modes
+  (`validate_managed_build_files()`). Other content would reach the started
+  model without validation.
+- The validator refuses (MANAGED) a devcontainer build whose `pull_policy` is
+  not `missing`, `if_not_present`, or `never`. After the reset, any other
+  policy can pull a registry image with the build tag and run it instead of
+  the reviewed build.
+
+Guarded by the "docker-compose.prebuilt.yml" cases in
+`tests/test-aic-host-security.sh`, the pull-policy and `dockerComposeFile`
+cases in `tests/test-aic-validate.mjs`, and the "project Dockerfile build
+starts through Dev Containers" smoke.
 
 ## The raw scan is not the security boundary
 

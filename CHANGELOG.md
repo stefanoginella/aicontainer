@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: every project needs `aic sync` once, with the new managed Compose file.**
+  This aic refuses the project files of an older aic, also in pull mode
+  without a build, and an older aic refuses the new files. Run `aic sync` one
+  time and commit the result, and give the whole team this aic version. Then
+  run `aic trust` again if the project has a trusted build. (aic, template)
+
+- **A devcontainer build now refuses a `pull_policy` that pulls a present image.**
+  `always`, `build`, `daily`, `weekly`, and `every_*` would replace the image
+  that aic builds with a registry image. Remove the key, or use `missing`.
+  (validator)
+
+### Fixed
+
+- **A project Dockerfile and `aic init --build` work again on Docker Compose 5.**
+  aic now builds the devcontainer image itself, so the Dev Containers CLI no
+  longer asks buildx bake for a file entitlement. (aic, template)
+
 ## [0.13.0] - 2026-11-11
 
 ### Changed

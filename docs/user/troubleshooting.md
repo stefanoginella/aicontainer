@@ -121,6 +121,26 @@ install them in the running container, because aic blocks `sudo apt`.
    [Recipe: Playwright](extra-tools.md#recipe-playwright-browser-tests-automation-mcp).
 2. Run `aic sync`, `aic trust`, and `aic rebuild`.
 
+### The build stops: `additional privileges requested: pass "--allow=fs.read=..."`
+
+This applies when the project has a `build:` (a `Dockerfile.project` or
+`aic init --build`) and Docker Compose 5 or later builds through buildx bake.
+The message names a `Dockerfile-with-features` file in a temporary folder.
+
+The project files come from an aic version before the fix. Current aic builds
+the image itself, so the Dev Containers CLI does not build it.
+
+1. Run `aic sync`.
+2. If the project has a trusted build, run `aic trust` again.
+3. Run `aic rebuild`.
+
+Do not pass the `--allow` option: it gives the build read access to a host
+path.
+
+Each start of a project with a build runs a cached build of the devcontainer
+image. A failed build stops the start, and VS Code "Rebuild Without Cache"
+still uses the cache: run `aic rebuild` for a build without the cache.
+
 ### Codex asks for approval, but auto-approve is set
 
 Make sure that `~/.codex/config.toml` exists. `post-create.py` writes this

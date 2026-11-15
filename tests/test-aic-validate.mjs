@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  activeInterpolations, analyzeResolvedConfig, FIREWALL_PRESETS, firewallPresetsProblems,
+  activeInterpolations, analyzeResolvedConfig, composeServiceHasBuild, FIREWALL_PRESETS, firewallPresetsProblems,
   formatFindings, parseJsonc, safeDiagnostic,
 } from '../lib/validate.mjs';
 
@@ -69,10 +69,10 @@ function scenario(edit = () => {}) {
   ctx.rawFinal = structuredClone(ctx.rawBase);
   edit(ctx);
   if (ctx.hasOverride && ctx.wireOverride !== false) {
-    const single = '"dockerComposeFile": ["docker-compose.yml"]';
-    assert.ok(ctx.devcontainer.includes(single), 'fixture devcontainer.json has no single dockerComposeFile');
+    const single = '"dockerComposeFile": ["docker-compose.yml", "docker-compose.prebuilt.yml"]';
+    assert.ok(ctx.devcontainer.includes(single), 'fixture devcontainer.json has no managed dockerComposeFile');
     ctx.devcontainer = ctx.devcontainer.replace(single,
-      '"dockerComposeFile": ["docker-compose.yml", "docker-compose.override.yml"]');
+      '"dockerComposeFile": ["docker-compose.yml", "docker-compose.override.yml", "docker-compose.prebuilt.yml"]');
   }
   return ctx;
 }
@@ -210,6 +210,22 @@ test('devcontainer.json: an existing override must be wired', () => {
   expectOnly(analyze(ctx => { ctx.hasOverride = true; ctx.wireOverride = false; }),
     'MANAGED', /dockerComposeFile must be exactly/);
   expectNone(analyze(ctx => { ctx.hasOverride = true; }));
+});
+
+test('devcontainer.json: docker-compose.prebuilt.yml is the last Compose file', () => {
+  const managedList = '"dockerComposeFile": ["docker-compose.yml", "docker-compose.prebuilt.yml"]';
+  // Without it, Dev Containers builds the devcontainer image itself.
+  expectOnly(analyze(editDevcontainer(managedList, '"dockerComposeFile": ["docker-compose.yml"]')),
+    'MANAGED', /dockerComposeFile must be exactly/);
+  // Another file after it can add a build back, or change the started model.
+  expectOnly(analyze(editDevcontainer(managedList,
+    '"dockerComposeFile": ["docker-compose.yml", "docker-compose.prebuilt.yml", "docker-compose.override.yml"]')),
+  'MANAGED', /dockerComposeFile must be exactly/);
+  expectOnly(analyze(ctx => {
+    ctx.hasOverride = true; ctx.wireOverride = false;
+    ctx.devcontainer = ctx.devcontainer.replace(managedList,
+      '"dockerComposeFile": ["docker-compose.yml", "docker-compose.prebuilt.yml", "docker-compose.override.yml"]');
+  }), 'MANAGED', /dockerComposeFile must be exactly/);
 });
 
 // --- resolved Compose: managed invariants -----------------------------------
@@ -452,6 +468,61 @@ test('a devcontainer build needs trust and must end on the aicontainer base', ()
   expectFinding(analyze(build('ubuntu:24.04')), 'UNSAFE', /final FROM is not the aicontainer base/);
   expectFinding(analyze(build('ghcr.io/stefanoginella/aicontainer:v0.0.0', root => root)),
     'VOLATILE', /build context extends outside \.devcontainer/);
+});
+
+test('a devcontainer build keeps a pull policy that never replaces the built image', () => {
+  // aic builds the image and docker-compose.prebuilt.yml removes the build
+  // from the started model, so a policy that pulls a present image would run a
+  // registry image instead of the reviewed build. Trust cannot approve it.
+  const build = policy => overrideDev((dev, ctx) => {
+    const dir = path.join(ctx.root, '.devcontainer');
+    fs.writeFileSync(path.join(dir, 'Dockerfile.project'), 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.0\n');
+    dev.image = 'fixture-devcontainer:v0.0.0';
+    dev.build = { context: dir, dockerfile: 'Dockerfile.project' };
+    if (policy === undefined) delete dev.pull_policy; else dev.pull_policy = policy;
+  });
+  for (const policy of [undefined, 'missing', 'if_not_present', 'never']) {
+    const findings = analyze(build(policy));
+    assert.ok(!findings.some(f => /pull_policy/.test(f.message)), `pull_policy ${policy} was refused`);
+    assert.ok(!findings.some(f => f.kind === 'MANAGED'), `pull_policy ${policy}: ${JSON.stringify(findings)}`);
+  }
+  for (const policy of ['always', 'build', 'daily', 'weekly', 'every_12h']) {
+    expectFinding(analyze(build(policy)), 'MANAGED',
+      new RegExp(`pull_policy ${policy} would replace the image that aic builds`));
+  }
+  // Without a build, the policy is not this rule's concern.
+  const plain = analyze(overrideDev(dev => { dev.pull_policy = 'always'; }));
+  assert.ok(!plain.some(f => /would replace the image that aic builds/.test(f.message)));
+});
+
+test('a devcontainer build needs an image name', () => {
+  // A pull-mode override can reset the managed image (image: !reset null) and
+  // add a build. After docker-compose.prebuilt.yml removes the build, the
+  // started service has neither an image nor a build.
+  const build = image => overrideDev((dev, ctx) => {
+    const dir = path.join(ctx.root, '.devcontainer');
+    fs.writeFileSync(path.join(dir, 'Dockerfile.project'), 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.0\n');
+    if (image === undefined) delete dev.image; else dev.image = image;
+    dev.build = { context: dir, dockerfile: 'Dockerfile.project' };
+  });
+  for (const image of [undefined, '']) {
+    expectFinding(analyze(build(image)), 'MANAGED', /a build needs an image: name/);
+  }
+  const named = analyze(build('fixture-devcontainer:v0.0.0'));
+  assert.ok(!named.some(f => /a build needs an image: name/.test(f.message)), JSON.stringify(named));
+  // Without a build, the managed image stays the concern of other rules.
+  const plain = analyze(overrideDev(dev => { delete dev.image; }));
+  assert.ok(!plain.some(f => /a build needs an image: name/.test(f.message)));
+});
+
+test('composeServiceHasBuild reads the build of one service', () => {
+  const model = services => JSON.stringify({ services });
+  assert.equal(composeServiceHasBuild(model({ devcontainer: { build: { context: '.' } } }), 'devcontainer'), true);
+  assert.equal(composeServiceHasBuild(model({ devcontainer: { image: 'x' } }), 'devcontainer'), false);
+  assert.equal(composeServiceHasBuild(model({ other: { build: { context: '.' } } }), 'devcontainer'), false);
+  assert.equal(composeServiceHasBuild(JSON.stringify({}), 'devcontainer'), false);
+  assert.equal(composeServiceHasBuild(model({}), 'constructor'), false);
+  assert.throws(() => composeServiceHasBuild('{', 'devcontainer'));
 });
 
 // --- output safety and the CLI -----------------------------------------------

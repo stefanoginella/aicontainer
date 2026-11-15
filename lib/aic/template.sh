@@ -180,11 +180,14 @@ patch_devcontainer_json () {
         sub(/:[[:space:]]*"[^"]*"/, ": \"" font "\"")
       }
 
-      # Append the override to the dockerComposeFile array. Docker Compose
-      # merges files left-to-right, so the override wins. Guarded so a file
-      # that already lists it (or a hand-edited multi-entry array) is a no-op.
+      # Insert the override into the dockerComposeFile array, after
+      # docker-compose.yml and before docker-compose.prebuilt.yml. Docker
+      # Compose merges files left-to-right, so the override wins over the
+      # managed file, and the prebuilt file stays last: it removes the
+      # devcontainer build that aic runs itself. Guarded so a file that
+      # already lists the override is a no-op.
       if (ov == 1 && $0 ~ /"dockerComposeFile"/ && $0 !~ /docker-compose\.override\.yml/) {
-        sub(/\]/, ", \"docker-compose.override.yml\"]")
+        sub(/"docker-compose\.prebuilt\.yml"/, "\"docker-compose.override.yml\", \"docker-compose.prebuilt.yml\"")
       }
 
       print
@@ -300,6 +303,10 @@ apply_template () {
   # The template ships it without the dot: npm 12 leaves a .gitignore out of
   # the package even when package.json "files" names it.
   atomic_copy_file "$src/gitignore" "$dst/.gitignore"
+  # Copied in both modes: the last dockerComposeFile entry. It removes the
+  # devcontainer build from the model that Dev Containers starts, because aic
+  # builds that image itself (build_devcontainer_image). Itself aic-managed.
+  atomic_copy_file "$src/docker-compose.prebuilt.yml" "$dst/docker-compose.prebuilt.yml"
   case "$mode" in
     pull)
       atomic_copy_file "$src/docker-compose.pull.yml" "$dst/docker-compose.yml"

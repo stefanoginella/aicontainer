@@ -160,7 +160,7 @@ while IFS= read -r name; do
   fi
   has "template/$name" || fail "package is missing template/$name, which aic reads"
 done < "$TMP/aic-reads.list"
-for path in template/gitignore template/devcontainer.json template/docker-compose.pull.yml \
+for path in template/gitignore template/devcontainer.json template/docker-compose.pull.yml template/docker-compose.prebuilt.yml \
   template/docker-compose.build.yml template/README.md template/.zshrc template/post-create.py \
   template/Dockerfile template/aic-firewall template/aic-chown-volumes template/aic-lock-user-config \
   template/hooks/pre-tool-use.sh template/hooks/opencode-guardrail.js \
@@ -207,7 +207,7 @@ for mode in pull build; do
     || fail "aic init ($mode) .devcontainer/.gitignore does not ignore .env"
   [ ! -e "$project/.devcontainer/gitignore" ] \
     || fail "aic init ($mode) left the template name .devcontainer/gitignore"
-  for name in devcontainer.json docker-compose.yml README.md .env; do
+  for name in devcontainer.json docker-compose.yml docker-compose.prebuilt.yml README.md .env; do
     [ -f "$project/.devcontainer/$name" ] || fail "aic init ($mode) wrote no .devcontainer/$name"
   done
   if [ "$mode" = build ]; then

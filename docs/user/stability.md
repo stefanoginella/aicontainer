@@ -257,6 +257,7 @@ them again:
 
 - `devcontainer.json`
 - `docker-compose.yml`
+- `docker-compose.prebuilt.yml`
 - `.gitignore`
 - `.env` (host state: do not read it, edit it, or commit it)
 - `README.md`

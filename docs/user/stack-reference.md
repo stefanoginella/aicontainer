@@ -157,8 +157,10 @@ Keep `context: .`. See
 [Installing extra tools](extra-tools.md#install-a-tool-persistently-in-a-project-dockerfile)
 for the reasons.
 
-With a `Dockerfile.project`, start the container with `aic rebuild`, not with
-`aic up`. `aic up` uses the cached base image and does not build.
+With a `Dockerfile.project`, start the container with `aic rebuild` after
+each change to the Dockerfile. `aic up` builds the image with the Docker
+cache, but it can keep a container that already exists. `aic rebuild` builds
+without the cache and makes a new container.
 
 ### Start `post-create.project.sh`
 

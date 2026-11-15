@@ -1,0 +1,19 @@
+# =============================================================================
+# aicontainer — managed file. Do not edit: aic refuses any other content.
+# =============================================================================
+# This file is always the last entry of dockerComposeFile in devcontainer.json.
+# It removes the build of the devcontainer service from the model that the
+# Dev Containers CLI starts.
+#
+# aic builds the devcontainer image itself, from docker-compose.yml and
+# docker-compose.override.yml, before Dev Containers reads this model:
+# `aic initialize` builds with the cache, `aic rebuild` builds without it.
+# The Dev Containers CLI then only starts that image.
+#
+# Without this file, the CLI builds a generated Dockerfile from the OS temp
+# folder. Compose 5 builds through buildx bake, and bake refuses that file
+# without an extra file-system entitlement.
+# =============================================================================
+services:
+  devcontainer:
+    build: !reset null
