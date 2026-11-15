@@ -32,6 +32,10 @@ x-aic-build: &aic-build
 services:
   devcontainer:
     build: *aic-build
+    # The Compose default name of this build, written out. aic builds this
+    # image itself, and docker-compose.prebuilt.yml removes the build from the
+    # model that Dev Containers starts; a service then needs an image: name.
+    image: ${AIC_PROJECT_NAME:?run aic up or aic sync}-devcontainer
     # Opt-in declarative firewall. When the project has
     # .devcontainer/firewall-enable (on the read-only mount below), every start
     # enables the allowlist, and a failure stops the container (fail closed).

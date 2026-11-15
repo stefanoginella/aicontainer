@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
   "name": "aicontainer",
-  "dockerComposeFile": ["docker-compose.yml"],
+  "dockerComposeFile": ["docker-compose.yml", "docker-compose.prebuilt.yml"],
   "service": "devcontainer",
   "workspaceFolder": "/workspace",
   "remoteUser": "vscode",

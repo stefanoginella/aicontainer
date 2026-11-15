@@ -54,6 +54,54 @@ up_parse_args () {
   done
 }
 
+# build_devcontainer_image [--no-cache]: build the devcontainer image of this
+# project when the validated Compose model (docker-compose.yml and the
+# override) gives the devcontainer service a build. Call it only after the
+# gate. The Dev Containers CLI never builds this image:
+# docker-compose.prebuilt.yml, the last dockerComposeFile entry, removes the
+# build from the model that it starts. Its own build writes a generated
+# Dockerfile to the OS temp folder, and Compose 5 (buildx bake) refuses that
+# file without an fs.read entitlement. aic never grants one: this build reads
+# only the files of the validated model. Compose stderr of the model probe is
+# never printed, because it can hold resolved host values.
+build_devcontainer_image () {
+  local no_cache="${1:-}" project model has_build="" rc=0
+  local -a files=(-f .devcontainer/docker-compose.yml)
+  case "$no_cache" in
+    ""|--no-cache) ;;
+    *) die "internal error: unknown build_devcontainer_image option '$no_cache'" ;;
+  esac
+  [ -f .devcontainer/docker-compose.override.yml ] \
+    && files+=(-f .devcontainer/docker-compose.override.yml)
+  project="$(project_name)" || die "could not read the Compose project name"
+  model="$(mktemp "${TMPDIR:-/tmp}/aic-build-model.XXXXXX")"
+  # All profiles, like every validation model: the gate judged this one.
+  if ! without_runtime_environment docker compose -p "$project" --profile '*' "${files[@]}" \
+      config --format json > "$model" 2>/dev/null; then
+    rm -f "$model"
+    die "could not resolve the Compose model of the devcontainer image (run 'aic validate')"
+  fi
+  # Fail closed: only exit 0 with the exact word `build` or `none` counts.
+  # Node exits 1 on a load error, so a status alone never means "no build".
+  has_build="$(aic_helper service-has-build "$model" devcontainer)" || rc=$?
+  rm -f "$model"
+  [ "$rc" -eq 0 ] || die "could not read the Compose model of the devcontainer image"
+  case "$has_build" in
+    build) ;;
+    none) return 0 ;;
+    *) die "could not read the Compose model of the devcontainer image" ;;
+  esac
+  if [ -n "$no_cache" ]; then
+    echo "aic: building the devcontainer image without the cache"
+    without_runtime_environment docker compose -p "$project" "${files[@]}" build --no-cache devcontainer \
+      || die "devcontainer image build failed (exit $?)"
+  else
+    echo "aic: building the devcontainer image"
+    without_runtime_environment docker compose -p "$project" "${files[@]}" build devcontainer \
+      || die "devcontainer image build failed (exit $?)"
+  fi
+}
+
 cmd_up () {
   local allow_unsafe=0
   local -a passthrough=()
@@ -165,6 +213,12 @@ cmd_initialize () {
   migrate_legacy_session_volume strict
   stop_owned_legacy_stack
   initialize_managed_volumes
+  # The Dev Containers CLI reads the Compose model only after this
+  # initializeCommand, so the image is there before it starts the service.
+  # This covers aic up, aic rebuild, and a VS Code Reopen or Rebuild. The
+  # cache keeps an unchanged image fast; aic rebuild builds without it first.
+  # stdin stays closed, like the gate above: a build must never prompt.
+  build_devcontainer_image </dev/null
   warn_compose_drift
 }
 
@@ -190,9 +244,9 @@ cmd_rebuild () {
   # Pull-mode compose pins `pull_policy: missing`, so `devcontainer up` reuses
   # the cached image even with --remove-existing-container — meaning newer
   # GHCR releases would be silently ignored. Force a pull so `aic rebuild`
-  # actually refreshes the image. In --build mode the devcontainer service
-  # has a `build:` block (no top-level `image:` on it), so we skip the pull
-  # branch entirely; --build-no-cache below does the refresh for that path.
+  # actually refreshes the image (and the base of a Dockerfile.project build).
+  # In --build mode the devcontainer service has a `build:` block, so we skip
+  # the pull branch entirely; the uncached build below does the refresh.
   # Detect mode via presence of Dockerfile, which apply_template only copies
   # in --build mode.
   if [ ! -f .devcontainer/Dockerfile ]; then
@@ -203,6 +257,11 @@ cmd_rebuild () {
       docker pull "$image" || echo "aic: docker pull failed; continuing with cached image" >&2
     fi
   fi
+  # Build the devcontainer image without the cache, before Dev Containers
+  # starts. The initializeCommand child then builds it again with the cache,
+  # which reuses this image. --build-no-cache below still rebuilds the
+  # build-mode sidecar images, which the Dev Containers CLI builds.
+  build_devcontainer_image --no-cache
   local devcontainer; devcontainer="$(resolve_devcontainer)"
   # Bash 3.2 treats expansion of an empty array as unbound (see cmd_up).
   if [ "${#passthrough[@]}" -gt 0 ]; then

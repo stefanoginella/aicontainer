@@ -42,15 +42,15 @@ that silently gets wiped or breaks `aic sync`.
   `post-create.project.sh`, `vscode-extensions`, `vscode-settings.json`,
   `firewall-allowlist`, `firewall-enable`, `firewall-presets`, `shell-rc.zsh`,
   `p10k.zsh`, `statusline.{sh,mjs,js,py}`. These are opt-in by presence.
-- **`aic rebuild` is the verb that builds — `aic up` is not.** `aic up` runs a
-  plain `devcontainer up`, and the managed pull-mode Compose sets
-  `pull_policy: missing`: when the resolved image tag is already cached, Compose
-  reuses it and **never runs your `Dockerfile.project`**. The stack comes up
-  looking healthy on the plain base image, with every baked tool missing and
-  every named volume still `root:root`. `aic rebuild` adds
-  `--remove-existing-container --build-no-cache`, which is what actually builds.
-  So: if the plan writes a `Dockerfile.project`, the first boot is `aic rebuild`,
-  and so is every boot after you edit it.
+- **`aic rebuild` is the verb that rebuilds — `aic up` only reuses.** aic
+  builds the devcontainer image itself (the Dev Containers CLI never does:
+  `docker-compose.prebuilt.yml` removes the build from the model it starts).
+  Every start, `aic up` and VS Code Reopen included, runs a **cached** build,
+  but `aic up` can keep a container that already exists, so an edited
+  `Dockerfile.project` may not reach it. `aic rebuild` builds **without** the
+  cache and recreates the container. So: if the plan writes a
+  `Dockerfile.project`, the first boot is `aic rebuild`, and so is every boot
+  after you edit it. A failed build stops the start.
 - **Host-boundary trust is the user's to grant — you can't, and shouldn't.** A
   `Dockerfile.project` (or an added mount, a protected env key, Docker socket
   exposure) makes `aic validate` / `up` / `rebuild` fail closed until the human
@@ -504,11 +504,15 @@ Order matters (so the override gets wired into `dockerComposeFile`):
 2. **Read the pinned tag** from `.devcontainer/docker-compose.yml` if you're
    writing a `Dockerfile.project`, and use it in its `FROM`.
 3. **Write the project-owned files** from the approved plan.
-4. **Re-wire:** run `aic sync` once more so the freshly-created
-   `docker-compose.override.yml` gets appended to `dockerComposeFile` in
+4. **Re-wire:** run `aic sync` once more so a freshly-created
+   `docker-compose.override.yml` gets inserted into `dockerComposeFile` in
    `devcontainer.json` (it's wired only when the file is present). Verify with
-   `grep dockerComposeFile .devcontainer/devcontainer.json` — both files should
-   appear.
+   `grep dockerComposeFile .devcontainer/devcontainer.json`. With an override,
+   it must list exactly three files, in this order: `docker-compose.yml`,
+   `docker-compose.override.yml`, `docker-compose.prebuilt.yml`. Without an
+   override, it lists exactly two: `docker-compose.yml`,
+   `docker-compose.prebuilt.yml`. The managed prebuilt file is always last;
+   never edit or reorder it.
 5. **Validate, and stop the hash from moving.** Run `aic validate` — it applies
    the same gate as `up`/`rebuild` but never prompts and never writes trust, so
    it's the one safe way for *you* to read the findings. Fix everything

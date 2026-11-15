@@ -156,6 +156,10 @@ project. It is the source of truth for what lands in user repositories.
     disagree.
 - `docker-compose.pull.yml` is for the default mode.
   `docker-compose.build.yml` is for the `--build` mode.
+- `docker-compose.prebuilt.yml` is copied in both modes. It is the last
+  `dockerComposeFile` entry, and it removes the devcontainer build from the
+  model that Dev Containers starts. See
+  [The prebuilt Compose file](project-overrides.md#the-prebuilt-compose-file).
 - `README.md` is copied into the `.devcontainer/` of every project in **both**
   modes. It is a managed guide to the split between do-not-edit files and
   project-owned files. Keep its two lists in sync with `apply_template()` and

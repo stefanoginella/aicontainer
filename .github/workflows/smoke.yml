@@ -14,15 +14,10 @@ permissions:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    env:
-      # Buildx >= 0.37.2 enforces bake fs entitlements under Compose's
-      # `--progress rawjson`, but Compose only grants the build context. The
-      # Dev Containers CLI points `dockerfile:` at a temp Dockerfile-with-
-      # features outside it, so every build-mode `up` fails. CI-only; inputs
-      # are this repo's fixtures. Remove once docker/compose#14286 ships.
-      # https://github.com/docker/compose/issues/14285
-      # https://github.com/devcontainers/cli/issues/1320
-      BUILDX_BAKE_ENTITLEMENTS_FS: "0"
+    # Do not set BUILDX_BAKE_ENTITLEMENTS_FS here. aic builds the devcontainer
+    # image itself (docker-compose.prebuilt.yml), so the Dev Containers CLI
+    # writes no Dockerfile outside the build context, and bake must keep its fs
+    # entitlement checks on: the project Dockerfile build smoke depends on them.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1584,6 +1579,82 @@ jobs:
               || { echo "FAIL: global Git excludes do not ignore .claude/settings.local.json"; exit 1; }
             echo "OK: shared agent config is visible to Git; settings.local.json is ignored"
           '
+
+      - name: Smoke test - project Dockerfile build starts through Dev Containers
+        run: |
+          # With a devcontainer build, the Dev Containers CLI writes a generated
+          # Dockerfile into the OS temp folder, and Compose 5 (buildx bake)
+          # refuses it without an fs.read entitlement. aic builds the image
+          # itself in `aic initialize`, and docker-compose.prebuilt.yml removes
+          # the build from the started model. A project Dockerfile.project must
+          # start on the direct path (VS Code) and through aic rebuild, and the
+          # CLI must never build the devcontainer service itself.
+          set -euo pipefail
+          base="$(sed -n 's/^AIC_PROJECT_NAME=//p' /tmp/proj/.devcontainer/.env)-devcontainer"
+          docker image inspect "$base" >/dev/null 2>&1 \
+            || { echo "FAIL: the build-mode image has the wrong name (expected $base)"; exit 1; }
+          docker tag "$base" aicontainer-base:latest
+          mkdir -p /tmp/proj-df
+          git -C /tmp/proj-df init -q
+          cd /tmp/proj-df
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init --build
+          printf '%s\n' 'FROM aicontainer-base:latest' 'USER root' \
+            'RUN echo aic-smoke-dockerfile-project > /etc/aic-smoke-dockerfile-project' 'USER vscode' \
+            > .devcontainer/Dockerfile.project
+          printf '%s\n' 'services:' '  devcontainer:' '    build:' '      dockerfile: Dockerfile.project' \
+            > .devcontainer/docker-compose.override.yml
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync
+          grep -Fq '"dockerComposeFile": ["docker-compose.yml", "docker-compose.override.yml", "docker-compose.prebuilt.yml"]' \
+            .devcontainer/devcontainer.json \
+            || { echo "FAIL: sync did not put the override before docker-compose.prebuilt.yml"; exit 1; }
+          # The pty answers the exact-trust prompt for the project build.
+          AIC_HOME="$GITHUB_WORKSPACE" python3 -I -c '
+          import os, pty, select, sys, time
+          pid, fd = pty.fork()
+          if pid == 0:
+              os.execv(sys.argv[1], sys.argv[1:])
+          buf, sent, deadline = b"", False, time.monotonic() + 120
+          while True:
+              left = deadline - time.monotonic()
+              if left <= 0 or not select.select([fd], [], [], left)[0]:
+                  os.kill(pid, 9)
+                  sys.exit("FAIL: aic trust did not finish within 120s")
+              try:
+                  chunk = os.read(fd, 4096)
+              except OSError:
+                  break
+              if not chunk:
+                  break
+              buf += chunk
+              if not sent and b"[y/N]" in buf:
+                  os.write(fd, b"y\n")
+                  sent = True
+          sys.stdout.write(buf.decode(errors="replace"))
+          sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+          ' "$GITHUB_WORKSPACE/aic" trust
+          out=$(devcontainer up --workspace-folder . 2>&1) \
+            || { echo "$out"; echo "FAIL: a direct start of a trusted project build failed"; exit 1; }
+          # Here-strings, not `echo "$out" | grep -q`: grep -q exits at the
+          # first match, echo of the long log then gets SIGPIPE, and pipefail
+          # turns that into a failed (or, inside `if`, a missed) match.
+          if grep -Fq 'docker-compose.devcontainer.build-' <<<"$out"; then
+            echo "$out"; echo "FAIL: the Dev Containers CLI built the devcontainer service itself"; exit 1
+          fi
+          marker=$(devcontainer exec --workspace-folder . cat /etc/aic-smoke-dockerfile-project) || marker=""
+          [ "$marker" = aic-smoke-dockerfile-project ] \
+            || { echo "FAIL: the direct start did not run the image built from Dockerfile.project"; exit 1; }
+          out=$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" rebuild </dev/null 2>&1) \
+            || { echo "$out"; echo "FAIL: aic rebuild of a trusted project build failed"; exit 1; }
+          grep -Fq 'aic: building the devcontainer image without the cache' <<<"$out" \
+            || { echo "$out"; echo "FAIL: aic rebuild did not build the devcontainer image without the cache"; exit 1; }
+          if grep -Fq 'docker-compose.devcontainer.build-' <<<"$out"; then
+            echo "$out"; echo "FAIL: on aic rebuild, the Dev Containers CLI built the devcontainer service itself"; exit 1
+          fi
+          marker=$(devcontainer exec --workspace-folder . cat /etc/aic-smoke-dockerfile-project) || marker=""
+          [ "$marker" = aic-smoke-dockerfile-project ] \
+            || { echo "FAIL: aic rebuild did not run the image built from Dockerfile.project"; exit 1; }
+          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" destroy --yes >/dev/null
+          echo "OK: a project Dockerfile build starts through Dev Containers; aic builds the image, the CLI does not"
 
       - name: CLI test - aic sync warns on / bumps a stale Dockerfile.project base
         run: |

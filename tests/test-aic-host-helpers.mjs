@@ -386,10 +386,35 @@ test('the CLI keeps the exit-status contract of each aic caller', () => {
 
 test('the CLI fails closed on an unknown subcommand or a wrong argument count', () => {
   for (const args of [[], ['nope'], ['__proto__'], ['volume-safe'], ['volume-safe', '{}', 'extra'],
-    ['container-owned', '{}', WS], ['trust-hash'], ['git-control-files', 'x']]) {
+    ['container-owned', '{}', WS], ['trust-hash'], ['git-control-files', 'x'],
+    ['service-has-build', 'x'], ['service-has-build', 'x', 'y', 'z']]) {
     const result = runCli(args);
     assert.equal(result.status, 2, args.join(' '));
     assert.equal(result.stdout, '');
+  }
+});
+
+test('service-has-build prints build or none and fails closed on bad input', () => {
+  // build_devcontainer_image accepts only exit 0 with one of these exact
+  // words. Node exits 1 on a load error, so no status may mean "no build".
+  const dir = newDir();
+  const model = (name, services) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, JSON.stringify({ services }));
+    return file;
+  };
+  let result = runCli(['service-has-build', model('build.json', { devcontainer: { build: { context: '.' } } }), 'devcontainer']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'build');
+  result = runCli(['service-has-build', model('image.json', { devcontainer: { image: 'x' } }), 'devcontainer']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'none');
+  const bad = path.join(dir, 'bad.json');
+  fs.writeFileSync(bad, '{');
+  for (const file of [bad, path.join(dir, 'missing.json')]) {
+    result = runCli(['service-has-build', file, 'devcontainer']);
+    assert.equal(result.status, 2, file);
+    assert.equal(result.stdout, '', file);
   }
 });
 

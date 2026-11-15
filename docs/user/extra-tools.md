@@ -84,9 +84,25 @@ runtimes, DB clients, and linters that other team members also need.
 5. Run `aic trust` one time.
 6. Run `aic rebuild`.
 
-> **Note:** `aic up` is not sufficient here. It uses the cached image again
-> (`pull_policy: missing`) and never runs the build. Thus the container starts
-> on the plain base image without your additions.
+> **Note:** aic builds the image itself, before Dev Containers starts the
+> container. Every start runs this build: `aic up`, a VS Code Reopen, and a
+> VS Code Rebuild build with the Docker cache, so an unchanged Dockerfile
+> reuses the image. `aic rebuild` pulls the base image and builds without the
+> cache. Use `aic rebuild` after you change `Dockerfile.project`, so that a new
+> container starts on the new image.
+
+Because every start runs a cached build:
+
+- A failed build stops the start. The container does not start on an old
+  image.
+- An offline start needs the `FROM` image on your machine. The cache keeps the
+  other layers.
+- VS Code "Rebuild Without Cache" still uses the cache for the devcontainer
+  image. For a build without the cache, run `aic rebuild`.
+
+Do not set `pull_policy` on the `devcontainer` service, other than `missing`
+or `never`. aic refuses a policy that pulls a present image, because Compose
+would replace the image that aic built with a registry image of the same tag.
 
 The tools then stay after rebuilds. The project keeps their versions with the
 project files.

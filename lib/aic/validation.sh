@@ -175,7 +175,11 @@ project_trust_matches () {
 # project-owned Dockerfile.project, hand-editing them is unsupported.
 validate_managed_build_files () {
   local out="$1" name src
-  for name in README.md .gitignore; do
+  # docker-compose.prebuilt.yml is in both modes. The validated Compose models
+  # leave it out (it only removes the devcontainer build that aic runs itself),
+  # so it must be byte-equal to the template: other content would reach the
+  # started model without validation.
+  for name in README.md .gitignore docker-compose.prebuilt.yml; do
     # The template's gitignore has no dot (see apply_template).
     case "$name" in
       .gitignore) src=gitignore ;;

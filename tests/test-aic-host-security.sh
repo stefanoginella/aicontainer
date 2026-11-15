@@ -2264,7 +2264,12 @@ if [ "$tool" = docker ]; then
     # the model. Anything else is logged as an execution below.
     [ "${2:-}" = version ] && exec "$AIC_REAL_DOCKER" "$@"
     for arg in "$@"; do
-      if [ "$arg" = config ]; then exec "$AIC_REAL_DOCKER" "$@"; fi
+      if [ "$arg" = config ]; then
+        # A Compose error can hold resolved host values; aic must never print
+        # the stderr of a model probe.
+        [ -z "${AIC_FAKE_CONFIG_STDERR:-}" ] || printf '%s\n' "$AIC_FAKE_CONFIG_STDERR" >&2
+        exec "$AIC_REAL_DOCKER" "$@"
+      fi
     done
   fi
   case "${1:-} ${2:-}" in
@@ -2388,6 +2393,12 @@ if [ "$tool" = devcontainer ] && [ "${AIC_FAKE_FIREWALL_FAIL:-}" = 1 ] \
 fi
 if [ "$tool" = devcontainer ] && [ -n "${AIC_TEST_ONCE_LOG:-}" ]; then
   printf '%s\n' "${AIC_UNSAFE_ONCE_HASH-<unset>}" >> "$AIC_TEST_ONCE_LOG"
+fi
+# A devcontainer image build that fails with a chosen exit code.
+if [ "$tool" = docker ] && [ "${1:-}" = compose ] && [ -n "${AIC_FAKE_BUILD_EXIT:-}" ]; then
+  case " $* " in
+    *" build "*) log_call "$@"; exit "$AIC_FAKE_BUILD_EXIT" ;;
+  esac
 fi
 # A devcontainer up that fails with a chosen exit code.
 if [ "$tool" = devcontainer ] && [ "${1:-}" = up ] && [ -n "${AIC_FAKE_UP_EXIT:-}" ]; then
@@ -2979,6 +2990,169 @@ fi
 grep -q '<volume> <inspect>.*<aic-auth-global>' "$log" \
   || fail "initialize did not inspect the physical auth volume"
 grep -q '<run>' "$log" && fail "root helper ran after unsafe volume detection"
+
+# docker-compose.prebuilt.yml: aic builds the devcontainer image itself, and
+# this managed file, always the last dockerComposeFile entry, removes the
+# build from the model that Dev Containers starts. Compose 5 (buildx bake)
+# refuses the generated Dockerfile that the CLI would build from the OS temp
+# folder. See docs/contributing/project-overrides.md.
+prebuilt_list='"dockerComposeFile": ["docker-compose.yml", "docker-compose.prebuilt.yml"]'
+prebuilt_override_list='"dockerComposeFile": ["docker-compose.yml", "docker-compose.override.yml", "docker-compose.prebuilt.yml"]'
+new_project "$TMP/prebuilt"
+grep -Fq "$prebuilt_list" "$TMP/prebuilt/.devcontainer/devcontainer.json" \
+  || fail "init did not list docker-compose.prebuilt.yml last in dockerComposeFile"
+cmp -s "$ROOT/template/docker-compose.prebuilt.yml" "$TMP/prebuilt/.devcontainer/docker-compose.prebuilt.yml" \
+  || fail "init did not copy the managed docker-compose.prebuilt.yml"
+# Pull mode without a project build: initialize builds nothing.
+: > "$log"
+(cd "$TMP/prebuilt" && PATH="$fakebin:$PATH" XDG_STATE_HOME="$TMP/state" \
+  DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" \
+  AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" initialize >/dev/null) \
+  || fail "initialize failed on a pull-mode project without a build"
+grep -q '<build>' "$log" && fail "initialize ran an image build on a project without a build"
+# The override goes between docker-compose.yml and the prebuilt file, once.
+printf '%s\n' 'services:' '  devcontainer:' '    pids_limit: 2048' \
+  > "$TMP/prebuilt/.devcontainer/docker-compose.override.yml"
+for sync_run in 1 2; do
+  (cd "$TMP/prebuilt" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+  grep -Fq "$prebuilt_override_list" "$TMP/prebuilt/.devcontainer/devcontainer.json" \
+    || fail "sync did not insert the override before docker-compose.prebuilt.yml (run $sync_run)"
+done
+(cd "$TMP/prebuilt" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" validate </dev/null >/dev/null 2>&1) \
+  || fail "validate refused the managed dockerComposeFile with an override"
+: > "$log"
+(cd "$TMP/prebuilt" && PATH="$fakebin:$PATH" XDG_STATE_HOME="$TMP/state" \
+  DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" \
+  AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" initialize >/dev/null) \
+  || fail "initialize failed on a pull-mode override without a build"
+grep -q '<build>' "$log" && fail "initialize ran an image build for an override without a build"
+# The prebuilt file is managed in both modes: any other byte is MANAGED, and
+# trust cannot approve it. aic sync restores it.
+for edit in 'printf "    pull_policy: always\n" >> "$1"' 'rm "$1"' 'printf "services: {}\n" > "$1"'; do
+  sh -c "$edit" sh "$TMP/prebuilt/.devcontainer/docker-compose.prebuilt.yml"
+  rc=0
+  out=$(cd "$TMP/prebuilt" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" validate </dev/null 2>&1) || rc=$?
+  [ "$rc" = 1 ] || fail "validate accepted a changed docker-compose.prebuilt.yml ($edit): $out"
+  echo "$out" | grep -Fq '.devcontainer/docker-compose.prebuilt.yml differs from the managed template; run aic sync' \
+    || fail "validate did not name the changed docker-compose.prebuilt.yml ($edit): $out"
+  : > "$log"
+  if (cd "$TMP/prebuilt" && PATH="$fakebin:$PATH" XDG_STATE_HOME="$TMP/state" \
+      DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" \
+      AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" initialize >/dev/null 2>&1); then
+    fail "initialize accepted a changed docker-compose.prebuilt.yml ($edit)"
+  fi
+  grep -q '<build>' "$log" && fail "initialize built an image with a changed docker-compose.prebuilt.yml ($edit)"
+  (cd "$TMP/prebuilt" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+  cmp -s "$ROOT/template/docker-compose.prebuilt.yml" "$TMP/prebuilt/.devcontainer/docker-compose.prebuilt.yml" \
+    || fail "sync did not restore docker-compose.prebuilt.yml ($edit)"
+done
+# An untrusted project build never runs: the gate of initialize refuses it
+# before any build.
+printf 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.0\nRUN true\n' > "$TMP/prebuilt/.devcontainer/Dockerfile.project"
+printf '%s\n' 'services:' '  devcontainer:' '    image: prebuilt-devcontainer:local' '    build:' \
+  '      context: .' '      dockerfile: Dockerfile.project' > "$TMP/prebuilt/.devcontainer/docker-compose.override.yml"
+: > "$log"
+if (cd "$TMP/prebuilt" && PATH="$fakebin:$PATH" XDG_STATE_HOME="$TMP/state" \
+    DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" \
+    AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" initialize >/dev/null 2>&1); then
+  fail "initialize accepted an untrusted project build"
+fi
+grep -q '<build>' "$log" && fail "initialize built an untrusted project Dockerfile"
+rm "$TMP/prebuilt/.devcontainer/Dockerfile.project" "$TMP/prebuilt/.devcontainer/docker-compose.override.yml"
+(cd "$TMP/prebuilt" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" "$ROOT/aic" sync >/dev/null)
+grep -Fq "$prebuilt_list" "$TMP/prebuilt/.devcontainer/devcontainer.json" \
+  || fail "sync did not remove the override from dockerComposeFile"
+
+# Build mode: the managed devcontainer build. initialize builds it with the
+# cache, with the validated files and the managed name. rebuild first builds it
+# without the cache, then starts Dev Containers. A failed build stops both.
+mkdir -p "$TMP/prebuilt-build"
+git -C "$TMP/prebuilt-build" init -q
+(cd "$TMP/prebuilt-build" && XDG_STATE_HOME="$TMP/state" AIC_HOME="$ROOT" \
+  "$ROOT/aic" init --build --with codex --shell zsh >/dev/null)
+grep -Fq "$prebuilt_list" "$TMP/prebuilt-build/.devcontainer/devcontainer.json" \
+  || fail "build-mode init did not list docker-compose.prebuilt.yml last"
+build_name=$(managed_name "$TMP/prebuilt-build")
+build_call="docker <compose> <-p> <$build_name> <-f> <.devcontainer/docker-compose.yml> <build> <devcontainer>"
+build_call_nocache="docker <compose> <-p> <$build_name> <-f> <.devcontainer/docker-compose.yml> <build> <--no-cache> <devcontainer>"
+: > "$log"
+(cd "$TMP/prebuilt-build" && PATH="$fakebin:$PATH" XDG_STATE_HOME="$TMP/state" \
+  DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" \
+  AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" initialize >/dev/null) \
+  || fail "initialize failed on a build-mode project"
+[ "$(grep -cFx "$build_call" "$log")" = 1 ] \
+  || { cat "$log" >&2; fail "initialize did not build the devcontainer image once with the cache"; }
+grep -q '<--no-cache>' "$log" && fail "initialize built the devcontainer image without the cache"
+: > "$log"
+(cd "$TMP/prebuilt-build" && PATH="$fakebin:$PATH" XDG_STATE_HOME="$TMP/state" \
+  DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" \
+  AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" rebuild </dev/null >/dev/null) \
+  || fail "rebuild failed on a build-mode project"
+build_line=$(grep -nFx "$build_call_nocache" "$log" | cut -d: -f1)
+up_line=$(grep -n '^devcontainer <up> <--workspace-folder> <\.> <--remove-existing-container> <--build-no-cache>$' "$log" | cut -d: -f1)
+[ -n "$build_line" ] && [ -n "$up_line" ] && [ "$build_line" -lt "$up_line" ] \
+  || { cat "$log" >&2; fail "rebuild did not build the devcontainer image without the cache before devcontainer up"; }
+for command in initialize rebuild; do
+  : > "$log"; rc=0
+  out=$(cd "$TMP/prebuilt-build" && PATH="$fakebin:$PATH" XDG_STATE_HOME="$TMP/state" \
+    DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" AIC_FAKE_BUILD_EXIT=7 \
+    AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" "$command" </dev/null 2>&1) || rc=$?
+  [ "$rc" = 1 ] || fail "$command exited $rc, not 1, after a failed devcontainer image build: $out"
+  echo "$out" | grep -q 'devcontainer image build failed' \
+    || fail "$command did not name the failed devcontainer image build: $out"
+  grep -q '^devcontainer <up>' "$log" && fail "$command started Dev Containers after a failed image build"
+done
+
+# A trusted pull-mode override build: initialize and rebuild build exactly the
+# validated files, docker-compose.yml and the override, never the prebuilt
+# file. The sync and the trust run with the fake Docker context, so the
+# generated .env and the trust hash match the starts below.
+new_project "$TMP/prebuilt-trusted"
+printf 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.0\nRUN true\n' \
+  > "$TMP/prebuilt-trusted/.devcontainer/Dockerfile.project"
+printf '%s\n' 'services:' '  devcontainer:' '    image: prebuilt-trusted-devcontainer:local' '    build:' \
+  '      context: .' '      dockerfile: Dockerfile.project' \
+  > "$TMP/prebuilt-trusted/.devcontainer/docker-compose.override.yml"
+trusted_run() {
+  (cd "$TMP/prebuilt-trusted" && PATH="$fakebin:$PATH" XDG_STATE_HOME="$TMP/state" \
+    DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" \
+    AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$@")
+}
+trusted_run "$ROOT/aic" sync >/dev/null
+trusted_run python3 -I "$TMP/pty-yes.py" "$ROOT/aic" trust >/dev/null 2>&1 \
+  || fail "interactive trust of a pull-mode project build failed"
+trusted_name=$(managed_name "$TMP/prebuilt-trusted")
+trusted_files="<-f> <.devcontainer/docker-compose.yml> <-f> <.devcontainer/docker-compose.override.yml>"
+: > "$log"
+trusted_run "$ROOT/aic" initialize </dev/null >/dev/null || fail "initialize refused a trusted project build"
+grep -Fxq "docker <compose> <-p> <$trusted_name> $trusted_files <build> <devcontainer>" "$log" \
+  || { cat "$log" >&2; fail "initialize did not build the trusted override with docker-compose.yml and the override"; }
+grep '<build>' "$log" | grep -Fq 'docker-compose.prebuilt.yml' && fail "the devcontainer image build read docker-compose.prebuilt.yml"
+: > "$log"
+trusted_run "$ROOT/aic" rebuild </dev/null >/dev/null || fail "rebuild refused a trusted project build"
+build_line=$(grep -nFx "docker <compose> <-p> <$trusted_name> $trusted_files <build> <--no-cache> <devcontainer>" "$log" | cut -d: -f1)
+up_line=$(grep -n '^devcontainer <up> <--workspace-folder> <\.> <--remove-existing-container> <--build-no-cache>$' "$log" | cut -d: -f1)
+[ -n "$build_line" ] && [ -n "$up_line" ] && [ "$build_line" -lt "$up_line" ] \
+  || { cat "$log" >&2; fail "rebuild did not build the trusted override without the cache before devcontainer up"; }
+# The model probe never prints Compose stderr: it can hold resolved host values.
+: > "$log"
+probe_secret='AIC_PROBE_SECRET=ghp_must-not-be-printed'
+out=$(cd "$TMP/prebuilt-trusted" && PATH="$fakebin:$PATH" XDG_STATE_HOME="$TMP/state" \
+  DOCKER_CONFIG="$REAL_DOCKER_CONFIG" AIC_REAL_DOCKER="$REAL_DOCKER" AIC_FAKE_CONFIG_STDERR="$probe_secret" \
+  AIC_TEST_LOG="$log" AIC_HOME="$ROOT" "$ROOT/aic" initialize </dev/null 2>&1) \
+  || fail "initialize failed when Compose wrote to stderr: $out"
+grep -q '<build> <devcontainer>' "$log" || fail "initialize did not build when Compose wrote to stderr"
+case "$out" in
+  *"$probe_secret"*) fail "aic printed the stderr of a Compose model probe" ;;
+esac
+# Without trust, rebuild never builds the project Dockerfile.
+trusted_run "$ROOT/aic" trust --revoke >/dev/null
+: > "$log"
+if trusted_run "$ROOT/aic" rebuild </dev/null >/dev/null 2>&1; then
+  fail "rebuild accepted an untrusted project build"
+fi
+grep -q '<build>' "$log" && fail "rebuild built an untrusted project Dockerfile"
+grep -q '^devcontainer <up>' "$log" && fail "rebuild started Dev Containers for an untrusted project build"
 
 # The Dev Containers CLI takes COMPOSE_PROJECT_NAME from its environment, then
 # from the repository-root .env, before the managed Compose `name:`. Either one
