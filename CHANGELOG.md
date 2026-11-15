@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **This release publishes the 0.14.0 changes; 0.14.0 was not published.**
+  The release workflow misread npm's "version not found" answer and stopped
+  before it published 0.14.0. Read the 0.14.0 notes below before you upgrade:
+  every project needs `aic sync` once. (release workflow)
+
 ## [0.14.0] - 2026-11-15
 
 ### Changed
