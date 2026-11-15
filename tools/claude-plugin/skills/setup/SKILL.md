@@ -504,13 +504,15 @@ Order matters (so the override gets wired into `dockerComposeFile`):
 2. **Read the pinned tag** from `.devcontainer/docker-compose.yml` if you're
    writing a `Dockerfile.project`, and use it in its `FROM`.
 3. **Write the project-owned files** from the approved plan.
-4. **Re-wire:** run `aic sync` once more so the freshly-created
+4. **Re-wire:** run `aic sync` once more so a freshly-created
    `docker-compose.override.yml` gets inserted into `dockerComposeFile` in
    `devcontainer.json` (it's wired only when the file is present). Verify with
-   `grep dockerComposeFile .devcontainer/devcontainer.json` — it must list
-   exactly three files, in this order: `docker-compose.yml`,
-   `docker-compose.override.yml`, `docker-compose.prebuilt.yml` (the managed
-   prebuilt file is always last; never edit or reorder it).
+   `grep dockerComposeFile .devcontainer/devcontainer.json`. With an override,
+   it must list exactly three files, in this order: `docker-compose.yml`,
+   `docker-compose.override.yml`, `docker-compose.prebuilt.yml`. Without an
+   override, it lists exactly two: `docker-compose.yml`,
+   `docker-compose.prebuilt.yml`. The managed prebuilt file is always last;
+   never edit or reorder it.
 5. **Validate, and stop the hash from moving.** Run `aic validate` — it applies
    the same gate as `up`/`rebuild` but never prompts and never writes trust, so
    it's the one safe way for *you* to read the findings. Fix everything

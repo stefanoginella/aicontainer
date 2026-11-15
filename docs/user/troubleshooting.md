@@ -134,6 +134,12 @@ the image itself, so the Dev Containers CLI does not build it.
 2. If the project has a trusted build, run `aic trust` again.
 3. Run `aic rebuild`.
 
+If the error stays after these steps, examine the VS Code setting
+`dev.containers.defaultFeatures`. When it adds features, the Dev Containers CLI
+writes a feature build in a temporary folder for each start, also without a
+`build:`. Remove the setting for this workspace. Do not run `aic sync` again:
+it does not change this setting.
+
 Do not pass the `--allow` option: it gives the build read access to a host
 path.
 
