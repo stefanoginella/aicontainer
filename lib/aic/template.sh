@@ -52,11 +52,12 @@ read_compose_docker_mode () {
 # Echoes the (possibly empty) block; warnings go to stderr.
 build_vscode_ext_block () {
   local file="$1" line id block="" seen=","
+  local id_re='^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9._-]+$'
   [ -f "$file" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     id="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     case "$id" in ''|\#*) continue ;; esac
-    if ! printf '%s' "$id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9._-]+$'; then
+    if ! [[ "$id" =~ $id_re ]]; then
       printf 'aic: ignoring invalid vscode-extensions entry: %s\n' "$id" >&2
       continue
     fi

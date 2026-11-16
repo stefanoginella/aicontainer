@@ -249,8 +249,8 @@ for d in "${DEFAULT_ALLOWLIST[@]}"; do
 done
 # normalize_domain needs bash 4 (${x,,}); macOS /bin/bash is 3.2. CI runs this
 # part, and the static check below runs everywhere.
-printf '%s\n' "$(sed -n '/^load_extra_domains() {/,/^}/p' "$FIREWALL")" \
-  | grep -A1 -F 'normalize_domain "$domain") || return 1' | grep -Fq 'if is_internal_name "$domain"; then' \
+grep -Fq 'if is_internal_name "$domain"; then' \
+  <(sed -n '/^load_extra_domains() {/,/^}/p' "$FIREWALL" | grep -A1 -F 'normalize_domain "$domain") || return 1') \
   || fail "load_extra_domains does not refuse internal names right after normalize_domain"
 EXTRA_FILE="$TMP/firewall-allowlist"
 if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
@@ -281,8 +281,18 @@ ipset_members_v4() { printf '%s\n' 172.18.0.2/32; }
 if refuse_internal_addresses_v4 test-set 2>/dev/null; then
   fail "an allowlist set with the socket-proxy address was accepted"
 fi
+# A large set with the internal address first: the match must not depend on
+# a pipe. With pipefail, `printf | grep -q` ends printf with SIGPIPE after
+# the first match, and the check then missed the address.
+ipset_members_v4() {
+  printf '%s\n' 192.168.65.254
+  awk 'BEGIN { for (i = 0; i < 20000; i++) printf "151.101.%d.%d\n", int(i / 250), i % 250 + 1 }'
+}
+if refuse_internal_addresses_v4 test-set 2>/dev/null; then
+  fail "a large allowlist set with the host-gateway address was accepted"
+fi
 enable_body=$(sed -n '/^enable_policy() {/,/^}/p' "$FIREWALL")
-printf '%s\n' "$enable_body" | grep -Fq 'refuse_internal_addresses_v4 "$allow_set" || exit 1' \
+grep -Fq 'refuse_internal_addresses_v4 "$allow_set" || exit 1' <<<"$enable_body" \
   || fail "enable_policy does not refuse internal addresses in the allowlist set"
 echo "OK: internal names and addresses never get the all-port allowlist rule"
 
@@ -328,7 +338,7 @@ cmd_auto >/dev/null || fail "auto with a dangling marker link failed"
 [ "$CALLS" = "lock enable " ] || fail "a dangling marker link did not enable (a marker only restricts): $CALLS"
 
 auto_body=$(sed -n '/^cmd_auto() {/,/^}/p' "$FIREWALL")
-if printf '%s\n' "$auto_body" | grep -Eq '(^|[[:space:]])(ipt|ip6t|iptables|ip6tables|ipset)[[:space:]]'; then
+if grep -Eq '(^|[[:space:]])(ipt|ip6t|iptables|ip6tables|ipset)[[:space:]]' <<<"$auto_body"; then
   fail "cmd_auto changes rules directly; it may only call enable_policy"
 fi
 dispatch=$(sed -n '/^main() {/,/^}/p' "$FIREWALL" | sed -n 's/^[[:space:]]*\([a-z-]*\)) cmd_.*/\1/p' | tr '\n' ' ')

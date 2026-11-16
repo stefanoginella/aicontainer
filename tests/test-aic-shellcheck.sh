@@ -51,6 +51,7 @@ SCRIPTS=(
   tests/test-aic-docker-runtime.sh
   tests/test-aic-firewall-presets.sh
   tests/test-aic-firewall-relay.sh
+  tests/test-aic-grep-pipes.sh
   tests/test-aic-host-security.sh
   tests/test-aic-package.sh
   tests/test-aic-shellcheck.sh
@@ -72,8 +73,8 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     case "$file" in
       *.sh) ;;
       *)
-        head -n1 "$file" 2>/dev/null \
-          | grep -Eq '^(#!.*[/ ]((ba|da|k)?sh)([[:space:]]|$)|# shellcheck shell=)' || continue
+        grep -Eq '^(#!.*[/ ]((ba|da|k)?sh)([[:space:]]|$)|# shellcheck shell=)' \
+          <<<"$(head -n1 "$file" 2>/dev/null)" || continue
         ;;
     esac
     listed=0

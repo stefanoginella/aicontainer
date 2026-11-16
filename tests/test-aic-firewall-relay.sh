@@ -33,7 +33,7 @@ grep -qx 'STATUS_RELAY_HOST="host.docker.internal"' "$FIREWALL" \
 grep -qx 'STATUS_RELAY_PORT=8787' "$FIREWALL" \
   || fail "the relay port is not fixed in aic-firewall"
 enable_body=$(sed -n '/^enable_policy() {/,/^}/p' "$FIREWALL")
-printf '%s\n' "$enable_body" | grep -q 'status_relay_enabled && relay=1' \
+grep -q 'status_relay_enabled && relay=1' <<<"$enable_body" \
   || fail "enable does not take the relay mode from status_relay_enabled"
 rule=$(printf '%s\n' "$enable_body" | grep -n 'accept_set_members_v4 "$out_chain" "$status_set"' || true)
 [ "$(printf '%s\n' "$rule" | grep -c .)" = 1 ] \

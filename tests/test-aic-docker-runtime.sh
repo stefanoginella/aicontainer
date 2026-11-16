@@ -196,7 +196,7 @@ out=$(cd "$project" && PATH="$darwinbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT="$lima
   AIC_FAKE_INFO_MODE=starts AIC_FAKE_INFO="Ubuntu 24.04.2 LTS|lima-docker-rootful|$rootful" \
   "$ROOT/aic" initialize 2>&1 || true)
 [ "$(grep -c -- '^-H ' "$AIC_FAKE_LOG")" = 1 ] || fail "initialize asked the daemon more than once"
-printf '%s\n' "$out" | grep -Fq '.env does not match' && fail "initialize flipped the bind source: $out"
+grep -Fq '.env does not match' <<<"$out" && fail "initialize flipped the bind source: $out"
 rm -f "$AIC_FAKE_LOG.started"
 
 # Detection asks the selected socket itself, never the ambient context.
@@ -239,19 +239,19 @@ python3 -I -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1
 bind_source "unix://$socket" "Docker Desktop|docker-desktop|$rootful" >/dev/null
 out=$(cd "$project" && PATH="$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$socket" \
   AIC_FAKE_INFO="Docker Desktop|docker-desktop|$rootful" "$ROOT/aic" doctor 2>&1 || true)
-printf '%s\n' "$out" | grep -Fq "Docker runtime docker-desktop: managed helpers will bind the VM daemon socket /var/run/docker.sock" \
+grep -Fq "Docker runtime docker-desktop: managed helpers will bind the VM daemon socket /var/run/docker.sock" <<<"$out" \
   || fail "doctor did not report the Docker Desktop bind source: $out"
 out=$(cd "$project" && PATH="$darwinbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$socket" \
   AIC_FAKE_INFO="fedora|localhost.localdomain|$rootful" "$ROOT/aic" doctor 2>&1 || true)
-printf '%s\n' "$out" | grep -Fq "Docker runtime other runs in a VM that aic does not recognize" \
+grep -Fq "Docker runtime other runs in a VM that aic does not recognize" <<<"$out" \
   || fail "doctor did not warn about an unrecognized macOS VM: $out"
 out=$(cd "$project" && PATH="$linuxbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$socket" \
   AIC_FAKE_INFO="Ubuntu 24.04.2 LTS|ci-runner|$rootful" "$ROOT/aic" doctor 2>&1 || true)
-printf '%s\n' "$out" | grep -Fq "Docker runtime other: managed helpers will bind the selected local socket" \
+grep -Fq "Docker runtime other: managed helpers will bind the selected local socket" <<<"$out" \
   || fail "doctor did not keep the host socket for a native Linux daemon: $out"
 out=$(cd "$project" && PATH="$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$socket" \
   AIC_FAKE_INFO="Docker Desktop|docker-desktop|$rootful" "$ROOT/aic" status 2>&1)
-printf '%s\n' "$out" | grep -Fq "socket $socket (docker-desktop; mounts bind /var/run/docker.sock)" \
+grep -Fq "socket $socket (docker-desktop; mounts bind /var/run/docker.sock)" <<<"$out" \
   || fail "status did not report the Docker Desktop bind source: $out"
 
 # Validation needs `config --no-env-resolution` (Compose 2.35+). An older
@@ -267,39 +267,39 @@ run_aic() {
 }
 for good in 2.35.0 v2.40.3 5.1.2; do
   out=$(AIC_FAKE_COMPOSE_VERSION="$good" run_aic doctor || true)
-  printf '%s\n' "$out" | grep -q "^OK    Docker Compose ${good#v} (minimum 2.35)$" \
+  grep -q "^OK    Docker Compose ${good#v} (minimum 2.35)$" <<<"$out" \
     || fail "doctor rejected Compose $good: $out"
-  printf '%s\n' "$out" | grep -q '^OK    Compose accepts config --no-env-resolution --no-interpolate' \
+  grep -q '^OK    Compose accepts config --no-env-resolution --no-interpolate' <<<"$out" \
     || fail "doctor did not probe config --no-env-resolution on Compose $good: $out"
-  printf '%s\n' "$out" | grep -q '^FAIL  .*Compose' && fail "doctor failed a Compose check on $good: $out"
+  grep -q '^FAIL  .*Compose' <<<"$out" && fail "doctor failed a Compose check on $good: $out"
 done
 
 : > "$AIC_FAKE_LOG"
 doctor_rc=0
 out=$(AIC_FAKE_COMPOSE_VERSION=2.29.7 AIC_FAKE_COMPOSE_FLAGS=reject run_aic doctor) || doctor_rc=$?
 [ "$doctor_rc" -ne 0 ] || fail "doctor exited zero with Compose 2.29.7: $out"
-printf '%s\n' "$out" | grep -q '^FAIL  Docker Compose 2.29.7 is too old — install the Compose plugin 2.35+' \
+grep -q '^FAIL  Docker Compose 2.29.7 is too old — install the Compose plugin 2.35+' <<<"$out" \
   || fail "doctor did not fail Compose 2.29.7: $out"
-printf '%s\n' "$out" | grep -q '^FAIL  Compose rejects config --no-env-resolution' \
+grep -q '^FAIL  Compose rejects config --no-env-resolution' <<<"$out" \
   || fail "doctor did not report the missing config flag: $out"
-printf '%s\n' "$out" | grep -q '^Result: ready' && fail "doctor reported ready with Compose 2.29.7: $out"
+grep -q '^Result: ready' <<<"$out" && fail "doctor reported ready with Compose 2.29.7: $out"
 grep -q -- '^compose -f - config .*--no-env-resolution' "$AIC_FAKE_LOG" \
   || fail "doctor did not probe the flag with a stdin-only config"
-grep -- '^compose ' "$AIC_FAKE_LOG" | grep -v -e '^compose -f - config ' -e '^compose version --short$' \
-  | grep -q . && fail "doctor ran a Compose command that is not a stdin-only parse"
-printf '%s\n' "$out" | grep -q 'fake-resolved-secret' && fail "doctor printed Compose stderr: $out"
+awk '/^compose / && !/^compose -f - config / && !/^compose version --short$/ { found = 1 } END { exit !found }' \
+  "$AIC_FAKE_LOG" && fail "doctor ran a Compose command that is not a stdin-only parse"
+grep -q 'fake-resolved-secret' <<<"$out" && fail "doctor printed Compose stderr: $out"
 
 # Too old by version: one finding, no Compose config call, no 'aic sync' hint.
 : > "$AIC_FAKE_LOG"
 rc=0
 out=$(AIC_FAKE_COMPOSE_VERSION=2.29.7 AIC_FAKE_COMPOSE_FLAGS=reject run_aic validate) || rc=$?
 [ "$rc" -ne 0 ] || fail "validate passed with Compose 2.29.7: $out"
-printf '%s\n' "$out" | grep -Fxq '  ! Docker Compose 2.29.7 is too old; aic needs Compose 2.35+ (run aic doctor)' \
+grep -Fxq '  ! Docker Compose 2.29.7 is too old; aic needs Compose 2.35+ (run aic doctor)' <<<"$out" \
   || fail "validate did not name the too-old Compose: $out"
-printf '%s\n' "$out" | grep -Fxq "aic: configuration cannot be validated: upgrade Docker Compose to 2.35+ (see 'aic doctor')" \
+grep -Fxq "aic: configuration cannot be validated: upgrade Docker Compose to 2.35+ (see 'aic doctor')" <<<"$out" \
   || fail "validate did not give the Compose upgrade hint: $out"
-printf '%s\n' "$out" | grep -q 'aic sync' && fail "validate told the user to run aic sync for an old Compose: $out"
-printf '%s\n' "$out" | grep -q 'could not be inspected' && fail "validate kept the misleading Compose findings: $out"
+grep -q 'aic sync' <<<"$out" && fail "validate told the user to run aic sync for an old Compose: $out"
+grep -q 'could not be inspected' <<<"$out" && fail "validate kept the misleading Compose findings: $out"
 grep -q -- '^compose .* config' "$AIC_FAKE_LOG" && fail "validate ran Compose config on a too-old Compose"
 [ "$(printf '%s\n' "$out" | grep -c '^  ! ')" = 1 ] || fail "validate reported more than the Compose finding: $out"
 
@@ -309,9 +309,9 @@ grep -q -- '^compose .* config' "$AIC_FAKE_LOG" && fail "validate ran Compose co
 rc=0
 out=$(AIC_FAKE_COMPOSE_VERSION=2.29.7 AIC_FAKE_COMPOSE_FLAGS=reject run_aic initialize) || rc=$?
 [ "$rc" -ne 0 ] || fail "initialize started a configuration it could not validate: $out"
-printf '%s\n' "$out" | grep -Fxq "aic: refusing to start unverified configuration: upgrade Docker Compose to 2.35+ (see 'aic doctor')" \
+grep -Fxq "aic: refusing to start unverified configuration: upgrade Docker Compose to 2.35+ (see 'aic doctor')" <<<"$out" \
   || fail "initialize did not give the Compose upgrade hint: $out"
-printf '%s\n' "$out" | grep -q 'aic sync' && fail "initialize told the user to run aic sync for an old Compose: $out"
+grep -q 'aic sync' <<<"$out" && fail "initialize told the user to run aic sync for an old Compose: $out"
 grep -q -e '^volume ' -e '^run ' -e '^compose .* up' "$AIC_FAKE_LOG" \
   && fail "initialize changed Docker state after a failed validation"
 
@@ -320,11 +320,11 @@ grep -q -e '^volume ' -e '^run ' -e '^compose .* up' "$AIC_FAKE_LOG" \
 rc=0
 out=$(AIC_FAKE_COMPOSE_VERSION=2.35.0 AIC_FAKE_COMPOSE_FLAGS=reject run_aic validate) || rc=$?
 [ "$rc" -ne 0 ] || fail "validate passed although Compose rejected --no-env-resolution: $out"
-printf '%s\n' "$out" | grep -Fxq '  ! Docker Compose 2.35.0 rejects config --no-env-resolution/--no-interpolate; aic needs Compose 2.35+ (run aic doctor)' \
+grep -Fxq '  ! Docker Compose 2.35.0 rejects config --no-env-resolution/--no-interpolate; aic needs Compose 2.35+ (run aic doctor)' <<<"$out" \
   || fail "validate did not report the rejected Compose flag: $out"
-printf '%s\n' "$out" | grep -q 'aic sync' && fail "validate told the user to run aic sync for a rejected flag: $out"
-printf '%s\n' "$out" | grep -q 'fake-resolved-secret' && fail "validate printed Compose stderr: $out"
-printf '%s\n' "$out" | grep -q 'unknown flag' && fail "validate printed raw Compose stderr: $out"
+grep -q 'aic sync' <<<"$out" && fail "validate told the user to run aic sync for a rejected flag: $out"
+grep -q 'fake-resolved-secret' <<<"$out" && fail "validate printed Compose stderr: $out"
+grep -q 'unknown flag' <<<"$out" && fail "validate printed raw Compose stderr: $out"
 
 # aic doctor runs its check groups in a fixed order and reports each one.
 # in_order <text> <substring>... fails unless each substring is on a later line.
@@ -372,15 +372,15 @@ in_order "$out" 'FAIL  Node.js 18+ is required' 'FAIL  Docker CLI not found' \
 # Context endpoints: remote, not inspectable, and a missing socket.
 out=$(cd "$project" && PATH="$darwinbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT=tcp://10.0.0.1:2375 \
   AIC_FAKE_COMPOSE_VERSION=2.40.0 "$ROOT/aic" doctor 2>&1 || true)
-printf '%s\n' "$out" | grep -Fq 'FAIL  selected Docker context is remote' \
+grep -Fq 'FAIL  selected Docker context is remote' <<<"$out" \
   || fail "doctor did not refuse a remote context: $out"
 out=$(cd "$project" && PATH="$darwinbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT='' \
   AIC_FAKE_COMPOSE_VERSION=2.40.0 "$ROOT/aic" doctor 2>&1 || true)
-printf '%s\n' "$out" | grep -Fq 'WARN  could not inspect the Docker context endpoint' \
+grep -Fq 'WARN  could not inspect the Docker context endpoint' <<<"$out" \
   || fail "doctor did not warn about an endpoint it cannot inspect: $out"
 out=$(cd "$project" && PATH="$darwinbin:$fakebin:$PATH" AIC_FAKE_ENDPOINT="unix://$TMP/no.sock" \
   AIC_FAKE_COMPOSE_VERSION=2.40.0 "$ROOT/aic" doctor 2>&1 || true)
-printf '%s\n' "$out" | grep -Fq "FAIL  Docker context socket is missing ($TMP/no.sock)" \
+grep -Fq "FAIL  Docker context socket is missing ($TMP/no.sock)" <<<"$out" \
   || fail "doctor did not report a missing context socket: $out"
 
 # Project state: not a Git project, not initialized, .env absent or stale, and
@@ -393,18 +393,18 @@ in_order "$out" "WARN  not in a Git project" "WARN  this directory is not initia
 cp "$project/.devcontainer/.env" "$TMP/env.saved"
 rm "$project/.devcontainer/.env"
 out=$(AIC_FAKE_COMPOSE_VERSION=2.40.0 run_aic doctor || true)
-printf '%s\n' "$out" | grep -Fq 'WARN  .devcontainer/.env is absent' \
+grep -Fq 'WARN  .devcontainer/.env is absent' <<<"$out" \
   || fail "doctor did not warn about an absent .env: $out"
 { cat "$TMP/env.saved"; echo 'EXTRA=1'; } > "$project/.devcontainer/.env"
 out=$(AIC_FAKE_COMPOSE_VERSION=2.40.0 run_aic doctor || true)
-printf '%s\n' "$out" | grep -Fq 'FAIL  .devcontainer/.env is stale or modified' \
+grep -Fq 'FAIL  .devcontainer/.env is stale or modified' <<<"$out" \
   || fail "doctor did not fail a modified .env: $out"
 cp "$TMP/env.saved" "$project/.devcontainer/.env"
 sed '/^name:/d' "$project/.devcontainer/docker-compose.yml" > "$TMP/compose.legacy"
 cp "$project/.devcontainer/docker-compose.yml" "$TMP/compose.saved"
 cp "$TMP/compose.legacy" "$project/.devcontainer/docker-compose.yml"
 out=$(AIC_FAKE_COMPOSE_VERSION=2.40.0 run_aic doctor || true)
-printf '%s\n' "$out" | grep -Fq 'FAIL  legacy project identity blocks verified startup' \
+grep -Fq 'FAIL  legacy project identity blocks verified startup' <<<"$out" \
   || fail "doctor did not fail a legacy project identity: $out"
 cp "$TMP/compose.saved" "$project/.devcontainer/docker-compose.yml"
 

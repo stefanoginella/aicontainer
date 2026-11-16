@@ -99,7 +99,8 @@ jobs:
           echo "$SHELLCHECK_SHA256  $dir/shellcheck.tar.xz" | sha256sum -c -
           tar -xJf "$dir/shellcheck.tar.xz" -C "$dir" --strip-components=1 \
             "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
-          "$dir/shellcheck" --version | grep -qx "version: ${SHELLCHECK_VERSION#v}"
+          shellcheck_version=$("$dir/shellcheck" --version)
+          grep -qx "version: ${SHELLCHECK_VERSION#v}" <<<"$shellcheck_version"
           SHELLCHECK="$dir/shellcheck" bash tests/test-aic-shellcheck.sh --require
           # The host tests below run the same check again; give them this copy.
           echo "$dir" >> "$GITHUB_PATH"
@@ -166,7 +167,7 @@ jobs:
           if out=$(devcontainer up --workspace-folder . 2>&1); then
             echo "FAIL: direct start ran untrusted project code"; exit 1
           fi
-          echo "$out" | grep -q 'shell-rc.zsh runs project code in every zsh shell' \
+          grep -q 'shell-rc.zsh runs project code in every zsh shell' <<<"$out" \
             || { echo "FAIL: direct start did not name the untrusted project code"; echo "$out"; exit 1; }
           [ -z "$(docker ps -aq --filter label=com.docker.compose.service=devcontainer)" ] \
             || { echo "FAIL: a refused start still created the devcontainer"; exit 1; }
@@ -479,18 +480,18 @@ jobs:
             }
             v4_output=$(status_section "## iptables OUTPUT chain")
             v4_metadata=$(status_section "## iptables AIC_METADATA chain (always-on metadata/link-local block)")
-            printf "%s\n" "$v4_output" | grep -q "AIC_METADATA" || { echo "FAIL: IPv4 OUTPUT does not jump to AIC_METADATA"; exit 1; }
-            printf "%s\n" "$v4_metadata" | grep -q "169.254.0.0/16" || { echo "FAIL: IPv4 link-local DROP rule missing"; exit 1; }
-            printf "%s\n" "$v4_metadata" | grep -q "100.100.100.200" || { echo "FAIL: Alibaba metadata DROP rule missing"; exit 1; }
+            grep -q "AIC_METADATA" <<<"$v4_output" || { echo "FAIL: IPv4 OUTPUT does not jump to AIC_METADATA"; exit 1; }
+            grep -q "169.254.0.0/16" <<<"$v4_metadata" || { echo "FAIL: IPv4 link-local DROP rule missing"; exit 1; }
+            grep -q "100.100.100.200" <<<"$v4_metadata" || { echo "FAIL: Alibaba metadata DROP rule missing"; exit 1; }
 
-            if printf "%s\n" "$st" | grep -q "^## ip6tables AIC_METADATA chain$"; then
+            if grep -q "^## ip6tables AIC_METADATA chain$" <<<"$st"; then
               v6_output=$(status_section "## ip6tables OUTPUT chain")
               v6_metadata=$(status_section "## ip6tables AIC_METADATA chain")
-              printf "%s\n" "$v6_output" | grep -q "AIC_METADATA" || { echo "FAIL: IPv6 OUTPUT does not jump to AIC_METADATA"; exit 1; }
-              printf "%s\n" "$v6_metadata" | grep -q "fe80::/10" || { echo "FAIL: IPv6 link-local DROP rule missing"; exit 1; }
-              printf "%s\n" "$v6_metadata" | grep -q "fd00:ec2::254" || { echo "FAIL: AWS IMDSv6 DROP rule missing"; exit 1; }
+              grep -q "AIC_METADATA" <<<"$v6_output" || { echo "FAIL: IPv6 OUTPUT does not jump to AIC_METADATA"; exit 1; }
+              grep -q "fe80::/10" <<<"$v6_metadata" || { echo "FAIL: IPv6 link-local DROP rule missing"; exit 1; }
+              grep -q "fd00:ec2::254" <<<"$v6_metadata" || { echo "FAIL: AWS IMDSv6 DROP rule missing"; exit 1; }
               echo "OK: IPv4 and IPv6 metadata/link-local egress is dropped"
-            elif ip -o -6 addr show up 2>/dev/null | grep -vE "^[0-9]+: lo " | grep -q .; then
+            elif grep -Evq "^([0-9]+: lo |\$)" <<<"$(ip -o -6 addr show up 2>/dev/null)"; then
               echo "FAIL: IPv6 is configured but its metadata filter is absent"
               exit 1
             else
@@ -643,22 +644,22 @@ jobs:
             devcontainer exec --workspace-folder . bash -lc '
               set -u
               fw_status=$(sudo -n /usr/local/bin/aic-firewall status)
-              printf "%s\n" "$fw_status" | grep -q "policy DROP" \
+              grep -q "policy DROP" <<<"$fw_status" \
                 || { echo "FAIL: the declared firewall is off after start"; exit 1; }
               # index.crates.io is a CDN name: each resolver can get other
               # valid addresses, with a TTL of seconds. enable pins the
               # allowed addresses in /etc/hosts, so every address that the
               # container resolves for the name is in the active rules.
               pins=$(sed -n "/^# BEGIN aic-firewall/,/^# END aic-firewall/p" /etc/hosts)
-              printf "%s\n" "$pins" | grep -Eq "^[0-9.]+ index\.crates\.io$" \
+              grep -Eq "^[0-9.]+ index\.crates\.io$" <<<"$pins" \
                 || { echo "FAIL: the selected preset host index.crates.io is not pinned"; exit 1; }
-              if printf "%s\n" "$pins" | grep -q "proxy\.golang\.org"; then
+              if grep -q "proxy\.golang\.org" <<<"$pins"; then
                 echo "FAIL: proxy.golang.org is pinned, but the go preset is not selected"; exit 1
               fi
               resolved=$(getent ahostsv4 index.crates.io | awk "{print \$1}" | sort -u)
               [ -n "$resolved" ] || { echo "FAIL: index.crates.io does not resolve"; exit 1; }
               for addr in $resolved; do
-                printf "%s\n" "$fw_status" | grep -Fqx "$addr" \
+                grep -Fqx "$addr" <<<"$fw_status" \
                   || { echo "FAIL: index.crates.io resolves to $addr, which the rules do not allow"; exit 1; }
               done
               if { echo "192.0.2.1 index.crates.io" >> /etc/hosts; } 2>/dev/null; then
@@ -695,7 +696,7 @@ jobs:
             # Read all the output first: with pipefail, `grep -q` can end
             # docker exec with SIGPIPE and hide a firewall that is on.
             st=$(docker exec -u vscode "$cid" sudo -n /usr/local/bin/aic-firewall status 2>/dev/null) || st=""
-            if printf '%s\n' "$st" | grep -q "policy DROP"; then
+            if grep -q "policy DROP" <<<"$st"; then
               on=1; break
             fi
             sleep 1
@@ -716,7 +717,8 @@ jobs:
           done
           [ "${state%% *}" = exited ] && [ "${state##* }" != 0 ] \
             || { echo "FAIL: a failed declared firewall left the container running ($state)"; exit 1; }
-          docker logs "$cid" 2>&1 | grep -q 'firewall-enable is set, but the firewall could not be enabled' \
+          logs=$(docker logs "$cid" 2>&1)
+          grep -q 'firewall-enable is set, but the firewall could not be enabled' <<<"$logs" \
             || { echo "FAIL: the stopped container did not log the firewall failure"; exit 1; }
           if devcontainer up --workspace-folder . >/dev/null 2>&1; then
             echo "FAIL: devcontainer up started a project whose declared firewall fails"; exit 1
@@ -806,7 +808,8 @@ jobs:
         run: |
           devcontainer exec --workspace-folder . bash -lc '
             sudo -n /usr/local/bin/aic-chown-volumes
-            if sudo -nl /usr/bin/chown 2>/dev/null | grep -q chown; then
+            sudo_chown=$(sudo -nl /usr/bin/chown 2>/dev/null) || sudo_chown=""
+            if grep -q chown <<<"$sudo_chown"; then
               echo "FAIL: /usr/bin/chown still in NOPASSWD sudoers"
               exit 1
             fi
@@ -1006,7 +1009,7 @@ jobs:
             done
             if touch .git/hooks/aic-smoke 2>/dev/null; then echo "FAIL: vscode can write .git/hooks"; exit 1; fi
             if out=$(mv .git .git-moved 2>&1); then echo "FAIL: vscode can rename .git"; exit 1; fi
-            echo "$out" | grep -q "Device or resource busy" \
+            grep -q "Device or resource busy" <<<"$out" \
               || { echo "FAIL: .git rename failed for an unexpected reason: $out"; exit 1; }
             git hash-object -w --stdin </dev/null >/dev/null \
               || { echo "FAIL: in-container Git cannot write objects"; exit 1; }
@@ -1280,7 +1283,7 @@ jobs:
           if out=$(devcontainer up --workspace-folder /tmp/proj-b 2>&1); then
             echo "FAIL: direct start accepted a root .env Compose project name"; exit 1
           fi
-          echo "$out" | grep -q 'repository-root .env sets COMPOSE_PROJECT_NAME' \
+          grep -q 'repository-root .env sets COMPOSE_PROJECT_NAME' <<<"$out" \
             || { echo "FAIL: direct start did not explain the root .env refusal"; echo "$out"; exit 1; }
           (cd /tmp/proj-b && AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" up)
           rm /tmp/proj-b/.env
@@ -1550,7 +1553,7 @@ jobs:
               || { echo "FAIL: unexpected credential/url keys in managed gitconfig: $names"; exit 1; }
             out=$(printf "protocol=https\nhost=github.com\n\n" \
               | GH_TOKEN=aic-smoke-dummy-token GIT_TERMINAL_PROMPT=0 git credential fill)
-            printf "%s\n" "$out" | grep -qx "password=aic-smoke-dummy-token" \
+            grep -qx "password=aic-smoke-dummy-token" <<<"$out" \
               || { echo "FAIL: git did not get the github.com credential from gh"; exit 1; }
             if other=$(printf "protocol=https\nhost=gitlab.com\n\n" \
                 | GH_TOKEN=aic-smoke-dummy-token GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= git credential fill 2>/dev/null); then
@@ -1669,7 +1672,7 @@ jobs:
           printf 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.1\nRUN true\n' > .devcontainer/Dockerfile.project
           # 1) plain sync: must WARN and leave the file untouched
           out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync 2>&1)"; echo "$out"
-          echo "$out" | grep -q "Dockerfile.project pins .*:v0.0.1" || { echo "FAIL: no drift warning"; exit 1; }
+          grep -q "Dockerfile.project pins .*:v0.0.1" <<<"$out" || { echo "FAIL: no drift warning"; exit 1; }
           grep -Fxq 'FROM ghcr.io/stefanoginella/aicontainer:v0.0.1' .devcontainer/Dockerfile.project || { echo "FAIL: plain sync edited the file"; exit 1; }
           # 2) sync --bump-base: must rewrite FROM to this aic's version
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync --bump-base >/dev/null
@@ -1694,7 +1697,7 @@ jobs:
           printf 'ms-python.python\ncharliermarsh.ruff\nms-python.python\n# a comment\nnot a valid id!!\n' > .devcontainer/vscode-extensions
           printf '{\n  "python.defaultInterpreterPath": "/workspace/.venv/bin/python",\n  "ruff.importStrategy": "fromEnvironment"\n}\n' > .devcontainer/vscode-settings.json
           out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" sync 2>&1)"; echo "$out"
-          echo "$out" | grep -q "ignoring invalid vscode-extensions entry: not a valid id" || { echo "FAIL: invalid id not rejected"; exit 1; }
+          grep -q "ignoring invalid vscode-extensions entry: not a valid id" <<<"$out" || { echo "FAIL: invalid id not rejected"; exit 1; }
           dc=.devcontainer/devcontainer.json
           grep -q '"ms-python.python"'             "$dc" || { echo "FAIL: extension not merged"; exit 1; }
           grep -q '"charliermarsh.ruff"'           "$dc" || { echo "FAIL: extension not merged"; exit 1; }
@@ -1723,7 +1726,7 @@ jobs:
           # Force drift by repinning the compose tag to a bogus version.
           sed -i -E 's#(aicontainer:)v[0-9]+\.[0-9]+\.[0-9]+#\1v9.9.9#' .devcontainer/docker-compose.yml
           out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"; echo "$out"
-          echo "$out" | grep -q "pins the v9.9.9 image" || { echo "FAIL: check-drift did not warn on drift"; exit 1; }
+          grep -q "pins the v9.9.9 image" <<<"$out" || { echo "FAIL: check-drift did not warn on drift"; exit 1; }
           # AIC_NO_UPDATE_CHECK silences it; exit stays 0 either way.
           out="$(AIC_NO_UPDATE_CHECK=1 AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
           [ -z "$out" ] || { echo "FAIL: AIC_NO_UPDATE_CHECK did not silence check-drift: $out"; exit 1; }
@@ -1785,17 +1788,17 @@ jobs:
           tmp="$(mktemp -d)"; cd "$tmp"; git init -q
           AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" init >/dev/null
           out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
-          echo "$out" | grep -q "request extra host access" && { echo "FAIL: clean project flagged"; echo "$out"; exit 1; }
+          grep -q "request extra host access" <<<"$out" && { echo "FAIL: clean project flagged"; echo "$out"; exit 1; }
           printf 'services:\n  devcontainer:\n    privileged: true\n    cap_add:\n      - SYS_ADMIN\n    volumes:\n      - /:/host\n      - /var/run/docker.sock:/var/run/docker.sock\n' \
             > .devcontainer/docker-compose.override.yml
           out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"; echo "$out"
-          echo "$out" | grep -q "privileged: true"    || { echo "FAIL: privileged not flagged"; exit 1; }
-          echo "$out" | grep -q "cap_add"             || { echo "FAIL: cap_add not flagged"; exit 1; }
-          echo "$out" | grep -q "Docker socket"       || { echo "FAIL: docker.sock not flagged"; exit 1; }
-          echo "$out" | grep -q "sensitive host path" || { echo "FAIL: host mount not flagged"; exit 1; }
+          grep -q "privileged: true" <<<"$out"    || { echo "FAIL: privileged not flagged"; exit 1; }
+          grep -q "cap_add" <<<"$out"             || { echo "FAIL: cap_add not flagged"; exit 1; }
+          grep -q "Docker socket" <<<"$out"       || { echo "FAIL: docker.sock not flagged"; exit 1; }
+          grep -q "sensitive host path" <<<"$out" || { echo "FAIL: host mount not flagged"; exit 1; }
           printf 'FROM ubuntu:24.04\nRUN true\n' > .devcontainer/Dockerfile.project
-          AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1 \
-            | grep -q "not the aicontainer base" || { echo "FAIL: non-aicontainer base not flagged"; exit 1; }
+          out="$(AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
+          grep -q "not the aicontainer base" <<<"$out" || { echo "FAIL: non-aicontainer base not flagged"; exit 1; }
           out="$(AIC_NO_OVERRIDE_SCAN=1 AIC_HOME="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/aic" check-drift 2>&1)"
-          echo "$out" | grep -q "request extra host access" && { echo "FAIL: AIC_NO_OVERRIDE_SCAN did not silence the scan"; exit 1; }
+          grep -q "request extra host access" <<<"$out" && { echo "FAIL: AIC_NO_OVERRIDE_SCAN did not silence the scan"; exit 1; }
           echo "OK: scan flags privileged/caps/socket/host-mount/non-base; clean project silent; opt-out honored"
