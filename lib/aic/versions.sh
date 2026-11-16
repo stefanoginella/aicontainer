@@ -16,7 +16,8 @@ read_aic_version () {
   local pkg="$AIC_HOME/package.json"
   [ -f "$pkg" ] || die "package.json not found at $pkg (set AIC_HOME or reinstall aic)"
   local v
-  v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg" | head -n1)"
+  v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg")"
+  v=${v%%$'\n'*}
   [ -n "$v" ] || die "could not read version from $pkg"
   echo "$v"
 }
@@ -59,8 +60,11 @@ version_gt () {
 read_pinned_compose_version () {
   local f=".devcontainer/docker-compose.yml"
   [ -f "$f" ] || return 0
-  sed -n 's|^[[:space:]]*image:[[:space:]]*ghcr\.io/stefanoginella/aicontainer:v\([0-9][0-9.]*\).*|\1|p' \
-    "$f" | head -n1
+  local v
+  v="$(sed -n 's|^[[:space:]]*image:[[:space:]]*ghcr\.io/stefanoginella/aicontainer:v\([0-9][0-9.]*\).*|\1|p' \
+    "$f")"
+  v=${v%%$'\n'*}
+  [ -z "$v" ] || printf '%s\n' "$v"
 }
 
 # Tier 1. Warn (to stderr, yellow on a TTY) when the project's pinned image tag
@@ -101,11 +105,12 @@ warn_compose_drift () {
 # strict is_semver gate on the result is also the terminal-escape defense: a
 # hostile/garbled registry response can't reach a printf.
 fetch_latest_version () {
-  local out=""
+  local out="" body re='"version"[[:space:]]*:[[:space:]]*"([0-9][0-9.]*)"'
   if command -v curl >/dev/null 2>&1; then
-    out="$(curl -fsS --max-time 3 https://registry.npmjs.org/aicontainer/latest 2>/dev/null \
-      | grep -m1 -o '"version"[[:space:]]*:[[:space:]]*"[0-9][0-9.]*"' \
-      | grep -m1 -o '[0-9][0-9.]*')" || out=""
+    # Capture, then match in bash: in `curl | grep -m1`, grep can exit before
+    # curl ends, and pipefail then drops the result.
+    body="$(curl -fsS --max-time 3 https://registry.npmjs.org/aicontainer/latest 2>/dev/null)" || body=""
+    if [[ $body =~ $re ]]; then out="${BASH_REMATCH[1]}"; fi
   elif command -v npm >/dev/null 2>&1; then
     out="$(npm view aicontainer version 2>/dev/null)" || out=""
   fi

@@ -80,7 +80,8 @@ check_dockerfile_project_base () {
 
   local repo="ghcr.io/stefanoginella/aicontainer"
   local cur_tag
-  cur_tag="$(sed -n "s|^[[:space:]]*FROM[[:space:]]\{1,\}${repo}:\([A-Za-z0-9._-]\{1,\}\).*|\1|p" "$df" | head -n1)"
+  cur_tag="$(sed -n "s|^[[:space:]]*FROM[[:space:]]\{1,\}${repo}:\([A-Za-z0-9._-]\{1,\}\).*|\1|p" "$df")"
+  cur_tag=${cur_tag%%$'\n'*}
   [ -n "$cur_tag" ] || return 0          # no literal FROM <repo>:tag — templated, other repo, or absent
 
   local want="v${ver}"
@@ -159,7 +160,8 @@ sync_detect_legacy_identity () {
   if [ "$was_legacy" = "0" ] && [ -f .devcontainer/docker-compose.yml ] \
       && [ ! -L .devcontainer/docker-compose.yml ]; then
     old_name="$(sed -n 's/^name[[:space:]]*:[[:space:]]*\(aic-[a-z0-9_-]*-[0-9a-f]\{12\}\)[[:space:]]*$/\1/p' \
-      .devcontainer/docker-compose.yml | head -n1)"
+      .devcontainer/docker-compose.yml)"
+    old_name=${old_name%%$'\n'*}
     if [ -n "$old_name" ] && [ "$old_name" != "$(expected_project_name)" ]; then
       was_legacy=1
     fi

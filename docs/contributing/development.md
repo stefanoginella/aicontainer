@@ -113,16 +113,26 @@ these scripts.
   only when the fix cannot change the behavior. Otherwise, add a line-level
   `# shellcheck disable=SCxxxx # <reason>` comment.
 
-Do not pipe a command into a quiet grep (`cmd | grep -q PATTERN`). With
-`pipefail`, `grep -q` exits at the first match, the command gets SIGPIPE, and
-the pipeline fails. A positive check then fails on a real match, and a
-negative check (`if cmd | grep -q x; then fail`) hides a real match. Read the
-output into a variable first, then match it: `grep -q 'text' <<<"$out"`. Use
-`grep -q 'text' <(cmd)` only in a positive check: it ignores the status of
-`cmd`. `tests/test-aic-grep-pipes.sh` fails on the pattern in the shell
-scripts, the workflows, and the Dockerfile. Other readers that exit early
-(`head -n1`, `grep -m1`, `awk '{...; exit}'`) have the same problem, but the
-test does not find them.
+Do not pipe a command into a reader that exits early: a quiet grep
+(`grep -q`, `grep -l`, `grep -L`), `grep -m N`, `head`, `awk` with an `exit`
+or `nextfile` outside `END`, or `sed` with a `q` command. With `pipefail`, the reader exits before
+the end of the input, the command gets SIGPIPE, and the pipeline fails. A
+positive check (`cmd | grep -q x || fail`) then fails on a real match, a
+negative check (`if cmd | grep -q x; then fail`) hides a real match, and a
+lookup (`x=$(cmd | head -n1) || x=""`) silently gives the fallback. Read the
+output into a variable first:
+
+- Match it: `grep -q 'text' <<<"$out"`. Use `grep -q 'text' <(cmd)` only in a
+  positive check: it ignores the status of `cmd`.
+- Take the first line in bash: `out=$(cmd)`, then `out=${out%%$'\n'*}`.
+- Take a value with a bash match: `[[ $out =~ $re ]]`, then
+  `${BASH_REMATCH[1]}`.
+- In awk, use a flag, not `exit`: `!found && /x/ {print; found = 1}`.
+
+A reader on a file (`head -n1 file`, `grep -m1 x file`,
+`awk '{print; exit}' file`) has no pipe and is correct.
+`tests/test-aic-early-exit-pipes.sh` fails on these pipes in the shell
+scripts, the workflows, and the Dockerfile.
 
 The "Static test - shell scripts pass a pinned ShellCheck" step in
 `smoke.yml` downloads a pinned ShellCheck release and checks its sha256
