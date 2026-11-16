@@ -123,7 +123,10 @@ read_aic_tools () {
   # Empty output if the field isn't set (older projects).
   local file=".devcontainer/devcontainer.json"
   [ -f "$file" ] || return 0
-  sed -n 's/.*"AIC_TOOLS"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n1
+  local v
+  v="$(sed -n 's/.*"AIC_TOOLS"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file")"
+  v=${v%%$'\n'*}
+  [ -z "$v" ] || printf '%s\n' "$v"
 }
 
 # ---------------------------------------------------------------------------
@@ -215,5 +218,8 @@ read_aic_shell () {
   # Empty output if the field isn't set (older projects).
   local file=".devcontainer/devcontainer.json"
   [ -f "$file" ] || return 0
-  sed -n 's/.*"AIC_SHELL"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n1
+  local v
+  v="$(sed -n 's/.*"AIC_SHELL"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file")"
+  v=${v%%$'\n'*}
+  [ -z "$v" ] || printf '%s\n' "$v"
 }

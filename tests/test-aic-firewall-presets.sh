@@ -299,7 +299,7 @@ echo "OK: internal names and addresses never get the all-port allowlist rule"
 # Order in enable_policy: remove the old pins before the first lookup (getent
 # reads /etc/hosts), and pin only after the switch to the new rules.
 enable_body=$(sed -n '/^enable_policy() {/,/^}/p' "$FIREWALL")
-line_of() { printf '%s\n' "$enable_body" | grep -n -m1 -- "$1" | cut -d: -f1; }
+line_of() { grep -n -m1 -- "$1" <<<"$enable_body" | cut -d: -f1; }
 unpin_at=$(line_of 'unpin_hosts')
 pin_set_at=$(line_of 'PIN_SET="$allow_set"')
 resolve_at=$(line_of 'resolve_domain_into_set')

@@ -229,7 +229,8 @@ doctor_check_devcontainer_cli () {
     devcontainer_path=""
   fi
   if [ -n "$devcontainer_path" ]; then
-    devcontainer_version="$("$devcontainer_path" --version 2>/dev/null | head -n1)" || devcontainer_version="unknown"
+    devcontainer_version="$("$devcontainer_path" --version 2>/dev/null)" || devcontainer_version="unknown"
+    devcontainer_version=${devcontainer_version%%$'\n'*}
     doctor_ok devcontainer-cli "Dev Container CLI ${devcontainer_version:-unknown} ($devcontainer_path)"
   else
     doctor_fail devcontainer-cli "Dev Container CLI not found — install with: npm install -g @devcontainers/cli"

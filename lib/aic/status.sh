@@ -240,9 +240,12 @@ cmd_status_run () {
 
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     daemon=1
+    # Capture, then take the first line: in `docker ps | head -n1`, head can
+    # exit before docker ends, and pipefail then drops the container id.
     cid="$(docker ps -aq \
       --filter "label=com.docker.compose.project=$project" \
-      --filter 'label=com.docker.compose.service=devcontainer' 2>/dev/null | head -n1)" || cid=""
+      --filter 'label=com.docker.compose.service=devcontainer' 2>/dev/null)" || cid=""
+    cid=${cid%%$'\n'*}
     if [ -n "$cid" ]; then
       runtime_state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || runtime_state="unknown"
       running_image="$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null)" || running_image=""
@@ -251,7 +254,8 @@ cmd_status_run () {
     fi
     auth_cid="$(docker ps -aq \
       --filter "label=com.docker.compose.project=$project" \
-      --filter 'label=com.docker.compose.service=aic-auth-sync' 2>/dev/null | head -n1)" || auth_cid=""
+      --filter 'label=com.docker.compose.service=aic-auth-sync' 2>/dev/null)" || auth_cid=""
+    auth_cid=${auth_cid%%$'\n'*}
     if [ -z "$auth_cid" ]; then
       bridge_state="not created"
     else

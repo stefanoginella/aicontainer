@@ -306,7 +306,8 @@ jobs:
           # stay last, a managed shell must still put the fnm per-directory Node
           # first, and the system-only PATH must find no node: startup and root
           # PATHs never reach the vscode-owned Node.
-          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer | head -n1)
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer)
+          cid=${cid%%$'\n'*}
           [ -n "$cid" ] || { echo "FAIL: no running devcontainer"; exit 1; }
           fnm_bin=/home/vscode/.fnm/aliases/default/bin
           node_path=$(docker exec -u vscode "$cid" /bin/sh -c 'command -v node' | tr -d '\r')
@@ -506,7 +507,8 @@ jobs:
           # network (conntrack only tracks sessions there, as in the real
           # stack). A session that the firewalled container opened to a host
           # that is not on the allowlist must stop passing once `enable` ran.
-          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer | head -n1)
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer)
+          cid=${cid%%$'\n'*}
           [ -n "$cid" ] || { echo "FAIL: no devcontainer to take the image from"; exit 1; }
           img=$(docker inspect -f '{{.Config.Image}}' "$cid")
           net=aic-fw-smoke
@@ -598,7 +600,8 @@ jobs:
           # Relay off: both stay blocked, also with AIC_STATUS_RELAY=1 in the
           # environment.
           set -euo pipefail
-          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer | head -n1)
+          cid=$(docker ps -q --filter label=com.docker.compose.service=devcontainer)
+          cid=${cid%%$'\n'*}
           [ -n "$cid" ] || { echo "FAIL: no devcontainer to take the image from"; exit 1; }
           img=$(docker inspect -f '{{.Config.Image}}' "$cid")
           net=aic-relay-smoke

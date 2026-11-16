@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`aic status` no longer reports an existing container as "not created".**
+  With two or more containers for a project service, `aic status` could
+  report the container or the credential bridge as missing. (aic)
+
 ### Security
 
 - **The firewall now refuses a large allowlist that holds an internal address.**

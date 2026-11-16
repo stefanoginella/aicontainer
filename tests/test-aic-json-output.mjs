@@ -54,7 +54,20 @@ case "\${1:-} \${2:-}" in
   "-H unix://"*) printf '%s\\n' 'Docker Desktop|docker-desktop|["name=seccomp,profile=builtin"]'; exit 0 ;;
   "info "*) exit 0 ;;
   "version --format") echo 29.0.0; exit 0 ;;
-  "ps "*) exit 0 ;;
+  # AIC_FAKE_PS: ps lists this id, then another one after a pause, in a
+  # second write. A reader that stops at the first line (\`| head -n1\`) makes
+  # that write fail, and pipefail then loses the id.
+  "ps "*)
+    [ -n "\${AIC_FAKE_PS:-}" ] || exit 0
+    printf '%s\\n' "$AIC_FAKE_PS"; sleep 0.3; printf 'c0ffee000002\\n' || exit 1; exit 0 ;;
+  "inspect --format")
+    case "$3" in
+      '{{.State.Status}}') echo running ;;
+      '{{.Config.Image}}') echo img:test ;;
+      '{{if .State.Health}}{{.State.Health.Status}}{{end}}') echo healthy ;;
+      *) exit 1 ;;
+    esac
+    exit 0 ;;
 esac
 exit 1
 `, { mode: 0o755 });
@@ -260,6 +273,16 @@ test('status --json reports the same state as the text', () => {
   assert.equal(obj.auth_bridge, 'not-created');
   assert.equal(obj.auth_volume, 'absent');
   assert.equal(obj.sessions_volume, 'absent');
+});
+
+test('status finds the container when docker ps lists more than one', () => {
+  const { text, obj } = both(project, 'status', { AIC_FAKE_PS: 'c0ffee000001' });
+  assert.equal(text.status, 0, text.stderr);
+  assert.match(text.stdout, /^  runtime: +running \(img:test\)$/m);
+  assert.match(text.stdout, /^  auth: +credential bridge healthy$/m);
+  assert.equal(obj.container, 'running');
+  assert.equal(obj.container_image, 'img:test');
+  assert.equal(obj.auth_bridge, 'healthy');
 });
 
 test('status --json outside a project fails with an error and the same exit status', () => {

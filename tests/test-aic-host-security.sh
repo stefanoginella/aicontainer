@@ -452,7 +452,7 @@ done
 # tool earlier in PATH, and it would run in the next human shell.
 zshrc="$ROOT/template/.zshrc"
 dockerfile="$ROOT/template/Dockerfile"
-zshrc_line() { grep -nFx "$1" "$zshrc" | head -n 1 | cut -d: -f1 || true; }
+zshrc_line() { grep -m1 -nFx "$1" "$zshrc" | cut -d: -f1 || true; }
 omz_source=$(zshrc_line 'source "$ZSH/oh-my-zsh.sh"')
 [ -n "$omz_source" ] || fail ".zshrc does not source oh-my-zsh"
 for line in 'export ZSH=/usr/local/share/oh-my-zsh' \
@@ -471,7 +471,7 @@ grep -Fqx 'eval "$(/usr/local/bin/fnm env --use-on-cd --shell zsh)"' "$zshrc" \
 # directory is root-owned, so the managed rc turns it off after the overlays.
 n=$(zshrc_line 'typeset -g POWERLEVEL9K_INSTANT_PROMPT=off')
 for overlay in p10k rc; do
-  o=$(grep -nF "source /etc/aic/user-config/shell/$overlay.zsh" "$zshrc" | head -n 1 | cut -d: -f1 || true)
+  o=$(grep -m1 -nF "source /etc/aic/user-config/shell/$overlay.zsh" "$zshrc" | cut -d: -f1 || true)
   [ -n "$n" ] && [ -n "$o" ] && [ "$n" -gt "$o" ] \
     || fail ".zshrc does not turn off p10k instant prompt after the $overlay.zsh overlay"
 done
