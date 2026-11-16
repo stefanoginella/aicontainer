@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The firewall now refuses a large allowlist that holds an internal address.**
+  On a large allowlist set, the check for the host gateway and the managed
+  service addresses could miss a match, and the firewall then allowed that
+  address. (aic-firewall)
+
 ## [0.14.1] - 2026-11-15
 
 ### Fixed

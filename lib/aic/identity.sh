@@ -115,7 +115,8 @@ compose_name_line_problem () {
   # sed stops at the first line itself. A `grep | head` pipe here wrote
   # "grep: write error: Broken pipe" where SIGPIPE is ignored (CI runners).
   first="$(sed -n -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' -e p -e q "$file")"
-  if ! printf '%s\n' "$first" | grep -qE '^[A-Za-z][A-Za-z0-9_-]*:'; then
+  local key_re='^[A-Za-z][A-Za-z0-9_-]*:'
+  if ! [[ "$first" =~ $key_re ]]; then
     printf '%s\n' ".devcontainer/docker-compose.yml must start its top-level mapping with a plain key at column 0; run aic sync"
   elif [ "$(grep -cE '^name[[:space:]]*:' "$file")" != "1" ] \
       || ! grep -Fqx -- "$AIC_COMPOSE_NAME_LINE" "$file"; then

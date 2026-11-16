@@ -299,14 +299,16 @@ ensure_metadata_v6() {
   [ "$first" = AIC_METADATA ] || ip6t -I OUTPUT 1 -j AIC_METADATA
 }
 
+# awk reads all the input and does not exit at the first match: with
+# pipefail, an early exit can end ipt with SIGPIPE and fail the pipeline.
 active_chain_v4() {
   ipt -L "$1" -n --line-numbers \
-    | awk '$2 == "AIC_OUT_A" || $2 == "AIC_OUT_B" || $2 == "AIC_IN_A" || $2 == "AIC_IN_B" {print $2; exit}'
+    | awk '!found && ($2 == "AIC_OUT_A" || $2 == "AIC_OUT_B" || $2 == "AIC_IN_A" || $2 == "AIC_IN_B") {print $2; found = 1}'
 }
 
 active_chain_v6() {
   ip6t -L "$1" -n --line-numbers \
-    | awk '$2 == "AIC6_OUT_A" || $2 == "AIC6_OUT_B" || $2 == "AIC6_IN_A" || $2 == "AIC6_IN_B" {print $2; exit}'
+    | awk '!found && ($2 == "AIC6_OUT_A" || $2 == "AIC6_OUT_B" || $2 == "AIC6_IN_A" || $2 == "AIC6_IN_B") {print $2; found = 1}'
 }
 
 prepare_chain_v4() {
@@ -330,7 +332,7 @@ prepare_chain_v6() {
 switch_chain_v4() {
   local builtin="$1" old="$2" new="$3" number first
   if [ -n "$old" ]; then
-    number=$(ipt -L "$builtin" -n --line-numbers | awk -v target="$old" '$2 == target {print $1; exit}')
+    number=$(ipt -L "$builtin" -n --line-numbers | awk -v target="$old" '!found && $2 == target {print $1; found = 1}')
     [ -n "$number" ] || { echo "aic-firewall: active $old jump disappeared" >&2; return 1; }
     ipt -R "$builtin" "$number" -j "$new"
   else
@@ -346,7 +348,7 @@ switch_chain_v4() {
 switch_chain_v6() {
   local builtin="$1" old="$2" new="$3" number first
   if [ -n "$old" ]; then
-    number=$(ip6t -L "$builtin" -n --line-numbers | awk -v target="$old" '$2 == target {print $1; exit}')
+    number=$(ip6t -L "$builtin" -n --line-numbers | awk -v target="$old" '!found && $2 == target {print $1; found = 1}')
     [ -n "$number" ] || { echo "aic-firewall: active $old jump disappeared" >&2; return 1; }
     ip6t -R "$builtin" "$number" -j "$new"
   else
@@ -471,12 +473,18 @@ internal_addresses_v4() {
 refuse_internal_addresses_v4() {
   local set="$1" members addr found=0
   members=$(ipset_members_v4 "$set") || return 1
+  # Newline on both ends, so the case below matches whole lines only.
+  members=$'\n'"$members"$'\n'
   while IFS= read -r addr; do
     [[ "$addr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || continue
-    if printf '%s\n' "$members" | grep -Fqx -e "$addr" -e "$addr/32"; then
-      echo "aic-firewall: ERROR — an allowlist name resolved to $addr, the host gateway or a managed service; leaving the allowlist policy unchanged." >&2
-      found=1
-    fi
+    # A whole-line match in bash, not `printf | grep -q`: with pipefail, grep
+    # ends printf with SIGPIPE on a large set, and the if missed the address.
+    case "$members" in
+      *$'\n'"$addr"$'\n'* | *$'\n'"$addr/32"$'\n'*)
+        echo "aic-firewall: ERROR — an allowlist name resolved to $addr, the host gateway or a managed service; leaving the allowlist policy unchanged." >&2
+        found=1
+        ;;
+    esac
   done < <(internal_addresses_v4 | sort -u)
   [ "$found" -eq 0 ]
 }
@@ -818,8 +826,7 @@ cmd_status() {
     echo "(not created yet — run: sudo aic-firewall enable)"
   fi
   echo
-  # One line only: the block is in the world-readable hosts file. Keep the
-  # output short, so `status | grep -q` does not end with SIGPIPE.
+  # One line only: the block is in the world-readable hosts file.
   local pins
   pins=$(awk -v begin="$HOSTS_BEGIN" -v end="$HOSTS_END" '
     $0 == begin { show = 1; next }

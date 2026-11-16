@@ -113,6 +113,17 @@ these scripts.
   only when the fix cannot change the behavior. Otherwise, add a line-level
   `# shellcheck disable=SCxxxx # <reason>` comment.
 
+Do not pipe a command into a quiet grep (`cmd | grep -q PATTERN`). With
+`pipefail`, `grep -q` exits at the first match, the command gets SIGPIPE, and
+the pipeline fails. A positive check then fails on a real match, and a
+negative check (`if cmd | grep -q x; then fail`) hides a real match. Read the
+output into a variable first, then match it: `grep -q 'text' <<<"$out"`. Use
+`grep -q 'text' <(cmd)` only in a positive check: it ignores the status of
+`cmd`. `tests/test-aic-grep-pipes.sh` fails on the pattern in the shell
+scripts, the workflows, and the Dockerfile. Other readers that exit early
+(`head -n1`, `grep -m1`, `awk '{...; exit}'`) have the same problem, but the
+test does not find them.
+
 The "Static test - shell scripts pass a pinned ShellCheck" step in
 `smoke.yml` downloads a pinned ShellCheck release and checks its sha256
 before it runs the test with `--require`. Thus CI never skips the check and
