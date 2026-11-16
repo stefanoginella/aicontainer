@@ -61,18 +61,22 @@ find_early_exit_pipes() {
       sed_quit = "(^|[;{}!/0-9[:space:]])[qQ]([[:space:]]*[0-9]+)?[[:space:]]*(;|[}]|$)"
       # A pipe at the end of a line, then a comment.
       pipe_comment = "(^|[^|])[|][[:space:]]+#[^\"" sq "]*$"
-      # A YAML block scalar (`run: |`) is not a pipe.
-      block_scalar = "^[[:space:]]*(-[[:space:]]+)?[A-Za-z0-9_.-]+:[[:space:]]*[|>][-+0-9]*[[:space:]]*$"
+      # A YAML block scalar (`run: |`, also `run: | # note`) is not a pipe.
+      block_scalar = "^[[:space:]]*(-[[:space:]]+)?[A-Za-z0-9_.-]+:[[:space:]]*[|>][-+0-9]*([[:space:]]+#.*)?[[:space:]]*$"
+      # An awk regexp literal: after the start, an operator, `(`, `,`, `{`,
+      # `}` or `;`. A `/` after a value is a division.
+      awk_regexp = "(^|[(,!~{};&|])[[:space:]]*/([^/\\\\]|\\\\.)+/"
     }
     # Read the arguments at the start of s into args[1..n], without quotes:
-    # the shell removes them, so a quoted "-q" is an option too. Stop at the
-    # next pipe or list operator.
+    # the shell removes them, so a quoted "-q" is an option too. raw[1..n]
+    # keeps the quotes. Stop at the next pipe or list operator.
     function read_args(s,   n, tok) {
       n = 0
       while (match(s, next_arg)) {
         tok = substr(s, RSTART, RLENGTH)
         s = substr(s, RSTART + RLENGTH)
         sub(/^[[:space:]]+/, "", tok)
+        raw[n + 1] = tok
         gsub("[\"" sq "]", "", tok)
         args[++n] = tok
       }
@@ -99,8 +103,8 @@ find_early_exit_pipes() {
       return 0
     }
     # An awk program with `exit` or `nextfile` outside END (in BEGIN too)
-    # stops reading.
-    # A program from a file (-f) is not checked.
+    # stops reading. A string or a regexp literal is not a statement. A
+    # program from a file (-f) is not checked.
     function awk_stops(n,   k, tok, p, out, i, depth, c) {
       for (k = 1; k <= n; k++) {
         tok = args[k]
@@ -110,8 +114,18 @@ find_early_exit_pipes() {
         if (tok !~ /^-/) break
       }
       if (k > n) return 0
+      # The program without its shell quotes, strings, and regexp literals.
+      p = raw[k]
+      if (p ~ "^" sq && p ~ sq "$" || p ~ /^".*"$/) p = substr(p, 2, length(p) - 2)
+      gsub(/"([^"\\]|\\.)*"/, "\"\"", p)
+      p = " " p
+      out = ""
+      while (match(p, awk_regexp)) {
+        out = out substr(p, 1, RSTART) " "
+        p = substr(p, RSTART + RLENGTH)
+      }
+      p = out p
       # Drop each END { ... } block.
-      p = " " args[k]
       out = ""
       while (match(p, /[^A-Za-z0-9_]END[[:space:]]*[{]/)) {
         out = out substr(p, 1, RSTART)
@@ -129,7 +143,7 @@ find_early_exit_pipes() {
       return out ~ /(^|[^A-Za-z0-9_])(exit|nextfile)([^A-Za-z0-9_]|$)/
     }
     # A sed script (each -e value, or the first operand) with a q command.
-    function sed_stops(n,   k, tok, scripts, found) {
+    function sed_stops(n,   k, tok, scripts) {
       scripts = 0
       for (k = 1; k <= n; k++) {
         tok = args[k]
@@ -258,6 +272,9 @@ bad=(
   "x $bar awk --assign k=v '{print; exit}'"
   "x $bar awk --field-separator : '{print; exit}'"
   "x $bar awk '{nextfile}'"
+  "x $bar awk '/x/ { print \"a/b\"; exit }'"
+  "x $bar awk '{ n = \$1 / 2; exit; m = n / 3 }'"
+  "x $bar awk '\$0 ~ /y/ && !/z/ { exit }'"
   "x $bar awk '
     /y/ { print; exit }
   '"
@@ -307,6 +324,9 @@ good=(
   "x $bar awk '{n++} END { if (n) exit 0; exit 1 }'"
   "x $bar awk '{ exit_code = 1 }'"
   "x $bar awk -f prog.awk"
+  "x $bar awk '/exit/ { print }'"
+  "x $bar awk '\$0 ~ /nextfile/'"
+  "x $bar awk '{ print \"exit\" } END { print \"}\" }'"
   "x $bar awk '
     \$0 == begin { skip = 1; next }
     !skip { print }
@@ -324,6 +344,8 @@ good_yaml=(
         grep -qF 'x' file"
   "- run: $bar-
     head -n1 file"
+  "      run: $bar # note
+        head -n1 file"
 )
 i=0
 for case in "${bad[@]}"; do
