@@ -44,8 +44,10 @@ find_quiet_grep_pipes() {
       # `|` or `|&`, not `||`, then grep (with any path) or rg with -q in an
       # option cluster, or --quiet / --silent, before the next pipe or list
       # operator.
+      # The shell removes quotes, so a quoted '-q' is an option too.
+      quiet = "(-[A-Za-z]*q[A-Za-z]*|--quiet|--silent)"
       re = "(^|[^|])[|]&?[[:space:]]*" prefix "(" word "*/)?([ef]?grep|rg)([[:space:]]+" arg ")*" \
-        "[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet|--silent)([[:space:];)|&]|$)"
+        "[[:space:]]+(" quiet "|" sq quiet sq "|\"" quiet "\")([[:space:];)|&]|$)"
       # A pipe at the end of a line, then a comment.
       pipe_comment = "(^|[^|])[|][[:space:]]+#[^\"" sq "]*$"
       # A YAML block scalar (`run: |`) is not a pipe.
@@ -90,6 +92,8 @@ bad=(
   "x $bar timeout 5 grep -q y"
   "x $bar /usr/bin/grep -q y"
   "x $bar rg -q y"
+  "x $bar grep '-q' y"
+  "x $bar grep \"-Fq\" y"
   "x $bar cut -d: $bar
   grep -q y || fail"
   "x $bar # note
