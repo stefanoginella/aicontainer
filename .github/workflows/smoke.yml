@@ -548,6 +548,44 @@ jobs:
             fi
             echo "OK: enable cut the earlier session and blocks new off-list connections"
           '
+      - name: Smoke test - firewall refuses a large allowlist set with the gateway
+        working-directory: /tmp/proj
+        run: |
+          # refuse_internal_addresses_v4 must find an internal address in a
+          # large allowlist set. A `printf | grep -q` there missed it under
+          # pipefail (grep ends printf with SIGPIPE), and enable then allowed
+          # the host gateway. A throwaway container from the image under test
+          # sources the real helper and checks real ipsets of 100,000 members.
+          set -euo pipefail
+          cids=$(docker ps -q --filter label=com.docker.compose.service=devcontainer)
+          cid=${cids%%$'\n'*}
+          [ -n "$cid" ] || { echo "FAIL: no devcontainer to take the image from"; exit 1; }
+          img=$(docker inspect -f '{{.Config.Image}}' "$cid")
+          docker run --rm --cap-drop ALL --cap-add NET_ADMIN --user root \
+            --entrypoint /bin/bash "$img" -c '
+            set -euo pipefail
+            source /usr/local/bin/aic-firewall
+            gw=$(ip -4 route show default | awk "{ for (i = 1; i < NF; i++) if (\$i == \"via\") print \$(i + 1) }")
+            [ -n "$gw" ] || { echo "FAIL: the test container has no default gateway"; exit 1; }
+            awk -v gw="$gw" "BEGIN {
+              for (s = 0; s < 2; s++) {
+                set = s ? \"aic-smoke-internal\" : \"aic-smoke-public\"
+                print \"create \" set \" hash:ip family inet maxelem 131072\"
+                for (i = 0; i < 100000; i++)
+                  printf \"add %s 151.%d.%d.%d\n\", set, 100 + int(i / 65536), int(i / 256) % 256, i % 256
+              }
+              print \"add aic-smoke-internal \" gw
+            }" > /tmp/aic-smoke-sets
+            ipset restore < /tmp/aic-smoke-sets
+            refuse_internal_addresses_v4 aic-smoke-public 2>/dev/null \
+              || { echo "FAIL: a large public allowlist set was refused"; exit 1; }
+            for _ in 1 2 3; do
+              if refuse_internal_addresses_v4 aic-smoke-internal 2>/dev/null; then
+                echo "FAIL: a large allowlist set with the gateway $gw was accepted"; exit 1
+              fi
+            done
+            echo "OK: a large allowlist set with the gateway $gw is refused; a public one is accepted"
+          '
       - name: Smoke test - firewall allows the opted-in status relay on its port only
         working-directory: /tmp/proj
         run: |
