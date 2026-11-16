@@ -41,20 +41,47 @@ find_quiet_grep_pipes() {
       # options and number arguments.
       prefix = "([A-Za-z_][A-Za-z0-9_]*=" word "*[[:space:]]+|(sudo|env|command|exec|nice|xargs|timeout|stdbuf)" \
         "([[:space:]]+(-" word "*|[0-9]" word "*))*[[:space:]]+)*"
-      # `|` or `|&`, not `||`, then grep (with any path) or rg with -q in an
-      # option cluster, or --quiet / --silent, before the next pipe or list
-      # operator.
-      # The shell removes quotes, so a quoted '-q' is an option too.
-      quiet = "(-[A-Za-z]*q[A-Za-z]*|--quiet|--silent)"
-      re = "(^|[^|])[|]&?[[:space:]]*" prefix "(" word "*/)?([ef]?grep|rg)([[:space:]]+" arg ")*" \
-        "[[:space:]]+(" quiet "|" sq quiet sq "|\"" quiet "\")([[:space:];)|&]|$)"
+      # `|` or `|&`, not `||`, then grep (with any path) or rg. quiet_grep()
+      # then reads its arguments up to the next pipe or list operator.
+      cmd = "(^|[^|])[|]&?[[:space:]]*" prefix "(" word "*/)?([ef]?grep|rg)"
+      next_arg = "^[[:space:]]+" arg
+      # Short options that take a value: the rest of the cluster, or the
+      # next argument.
+      takes_value = "efmABCdD"
       # A pipe at the end of a line, then a comment.
       pipe_comment = "(^|[^|])[|][[:space:]]+#[^\"" sq "]*$"
       # A YAML block scalar (`run: |`) is not a pipe.
       block_scalar = "^[[:space:]]*(-[[:space:]]+)?[A-Za-z0-9_.-]+:[[:space:]]*[|>][-+0-9]*[[:space:]]*$"
     }
+    # True when an option of a grep that reads a pipe is -q, --quiet or
+    # --silent. The shell removes quotes, so a quoted "-q" is an option too.
+    # A value (-e PATTERN, -m 1, -eq) and every argument after -- is not.
+    function quiet_grep(s,   rest, tok, skip, i, c) {
+      while (match(s, cmd)) {
+        rest = substr(s, RSTART + RLENGTH)
+        s = rest
+        skip = 0
+        while (match(rest, next_arg)) {
+          tok = substr(rest, RSTART, RLENGTH)
+          rest = substr(rest, RSTART + RLENGTH)
+          sub(/^[[:space:]]+/, "", tok)
+          gsub("[\"" sq "]", "", tok)
+          if (skip) { skip = 0; continue }
+          if (tok == "--") break
+          if (tok == "--quiet" || tok == "--silent") return 1
+          if (tok == "--regexp" || tok == "--file" || tok == "--max-count") { skip = 1; continue }
+          if (tok !~ /^-[A-Za-z]/) continue
+          for (i = 2; i <= length(tok); i++) {
+            c = substr(tok, i, 1)
+            if (c == "q") return 1
+            if (index(takes_value, c)) { if (i == length(tok)) skip = 1; break }
+          }
+        }
+      }
+      return 0
+    }
     function flush() {
-      if (buf ~ re) print name ":" start ": " buf
+      if (quiet_grep(buf)) print name ":" start ": " buf
       buf = ""
     }
     FNR == 1 { flush() }
@@ -94,6 +121,10 @@ bad=(
   "x $bar rg -q y"
   "x $bar grep '-q' y"
   "x $bar grep \"-Fq\" y"
+  "x $bar grep -qe y"
+  "x $bar grep -e y -q"
+  "x $bar grep -m 1 -q y"
+  "x $bar grep -A1 -F a $bar grep -Fq b"
   "x $bar cut -d: $bar
   grep -q y || fail"
   "x $bar # note
@@ -109,6 +140,11 @@ good=(
   "grep -Fq x <(grep y file) && fail"
   "printf '%s\\n' \"\$v\" $bar grep -n -m1 -- x $bar cut -d: -f1"
   "printf '%s\\n' \"\$b\" $bar grep -n 'if [ \"\$r\" -eq 1 ]; then' $bar cut -d: -f1"
+  "x $bar grep -e '-q' $bar wc -l"
+  "x $bar grep -- '-q' $bar wc -l"
+  "x $bar grep -e -q $bar wc -l"
+  "x $bar grep -eq $bar wc -l"
+  "x $bar grep --regexp -q $bar wc -l"
 )
 # Only in a YAML file.
 good_yaml=(
