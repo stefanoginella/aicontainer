@@ -23,8 +23,9 @@ repository is a security boundary. The threat model is
 - `.github/workflows/` — `rebuild.yml` (security-refresh track, `:latest`),
   `release.yml` (release track, `v*` tags), `smoke.yml` (shared smoke suite,
   `workflow_call` only).
-- `tools/claude-plugin/` — the `/aicontainer:setup` Claude Code plugin.
-- `docs/user/` — the user guide. `docs/contributing/` — the contributor guide.
+- `docs/user/` — the user guide. The npm package ships it.
+  `docs/user/agent-setup.md` is the setup procedure for an AI agent on the
+  host. `docs/contributing/` — the contributor guide.
 
 Full layout: [docs/contributing/architecture.md](docs/contributing/architecture.md).
 
@@ -36,7 +37,7 @@ its area and the tests that guard them.
 | When you touch | Read |
 |---|---|
 | Dev setup, conventions, local test runs | [development.md](docs/contributing/development.md) |
-| Repository layout, the `aic` module list and `lib/aic/`, `template/` file list, package contents | [architecture.md](docs/contributing/architecture.md) |
+| Repository layout, the `aic` module list and `lib/aic/`, `template/` file list, package contents, the agent setup page | [architecture.md](docs/contributing/architecture.md) |
 | `template/Dockerfile` downloads, pins, checksums, GHCR tag pinning | [image-integrity.md](docs/contributing/image-integrity.md) |
 | Drift warnings, update checks, `aic initialize` CLI lookup | [version-drift.md](docs/contributing/version-drift.md) |
 | Project name, `COMPOSE_PROJECT_NAME`, path spelling, migration, `.devcontainer/` and `.git` control paths | [project-identity.md](docs/contributing/project-identity.md) |
@@ -111,9 +112,10 @@ Versions and changelog:
   [docs/user/stability.md](docs/user/stability.md). A breaking change goes
   under `### Changed` with a `Breaking:` headline and the migration step.
   `tests/test-aic-stability-contract.mjs` checks the page against the code.
-- Bump `tools/claude-plugin/.claude-plugin/plugin.json` `version` when the
-  plugin skill changes. Validate with `claude plugin validate .` and
-  `claude plugin validate tools/claude-plugin`.
+- Keep `docs/user/agent-setup.md` agent-neutral. When a change alters the
+  setup flow (a command, a project-owned file, the trust or boot sequence),
+  update that page too. See
+  [architecture.md](docs/contributing/architecture.md#agent-setup-page).
 
 Workflows and git:
 

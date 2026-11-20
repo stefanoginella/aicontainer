@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Any AI agent can now set up aicontainer in a project.** Point Claude
+  Code, Codex, OpenCode, or another agent on your host at
+  `docs/user/agent-setup.md`. The npm package now ships the user guide, so
+  the agent follows the docs of your installed version. (docs)
+
+### Removed
+
+- **The Claude Code plugin is gone; use the agent setup page.** Remove it
+  with `/plugin uninstall aicontainer@aicontainer` and
+  `/plugin marketplace remove aicontainer`. (Claude Code plugin)
+
 ## [0.14.2] - 2026-11-16
 
 ### Fixed

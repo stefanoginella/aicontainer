@@ -294,28 +294,29 @@ helpers. They run before the real-devcontainer smoke suite.
 - `.githooks/pre-push` is a local mirror of the CI changelog gate. It is
   opt-in: run `git config core.hooksPath .githooks`.
 
-## Claude Code plugin
+## Agent setup page
 
-- `.claude-plugin/marketplace.json` is the Claude Code marketplace
-  (`aicontainer`).
-  - It must stay at the repository root, because `/plugin marketplace add
-    stefanoginella/aicontainer` reads it from there.
-  - It lists the one plugin by the relative source `./tools/claude-plugin`.
-  - The npm package does not ship it.
-- `tools/claude-plugin/` is the `aicontainer` Claude Code plugin. It holds
-  the host-side `/aicontainer:setup` skill.
-  - Bump the `version` in its `plugin.json` when the skill changes.
-  - Validate both with `claude plugin validate .` and `claude plugin validate
-    tools/claude-plugin`.
-  - The skill gets the stack-to-files mapping from
-    `docs/user/stack-reference.md`. Do not copy the mapping into the skill.
+- `docs/user/agent-setup.md` is the setup procedure for an AI agent on the
+  host (Claude Code, Codex, OpenCode, or another agent). The README and
+  [Usage](../user/usage.md#set-up-a-project-with-an-ai-agent) tell users to
+  point their agent at it.
+  - Keep it agent-neutral: no tool names of one agent, no plugin or skill
+    format.
+  - It gets the stack-to-files mapping from `docs/user/stack-reference.md`.
+    Do not copy the mapping into it.
+  - The npm package ships `docs/user/`. The page tells the agent to find the
+    package root of the installed `aic` and follow the copy there, so the
+    procedure and the stack reference match the installed version. For an
+    aic without `docs/user/`, it reads the pages from the release tag, never
+    from `main`. Guarded by `tests/test-aic-stack-reference.mjs` and
+    `tests/test-aic-package.sh`.
 - `docs/user/stack-reference.md` is also a contract for other tools. Keep
   its structure: one `## Stack: <name>` section for each stack, with the same
   seven level-3 headings in the same order, and a target-file line before
   each code block. When a change to a preset, a mount rule, or the image
   affects a snippet, update the page. Mark an item that needs a new aic
   feature `(since Unreleased)`; the release fills in the version (see
-  [Releasing](releasing.md)). The skill reads the page from the tag of the
+  [Releasing](releasing.md)). The agent setup page reads the copy of the
   installed aic. Guarded by
   `tests/test-aic-stack-reference.mjs`. With Docker Compose, it runs the
   merged snippets through `aic validate`.

@@ -18,6 +18,7 @@
     "!template/**/*.py[cod]",
     "!template/**/.DS_Store",
     "!template/**/Thumbs.db",
+    "docs/user/",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"
