@@ -585,19 +585,7 @@ The sequence is important, because `aic sync` adds the override to
    Fix all mechanical findings now (rejected mount targets, drift in managed
    files, override syntax). Each fix changes the config hash, and the hash
    must stop changing before the user trusts it.
-6. **Test the build before you use the approval of the user.** Do this only
-   when there is a `Dockerfile.project`. A plain `docker build` with the same
-   image tag as the override needs no trust. It proves that the Dockerfile
-   builds, and it fills the layer cache, so the `aic rebuild` after trust is
-   fast:
-
-   ```bash
-   docker build -f .devcontainer/Dockerfile.project -t <image tag of the override> .devcontainer
-   ```
-
-   A Dockerfile bug that you find here costs nothing. After trust, it costs
-   one more round with the user.
-7. **Give the trust step to the user.** When `aic validate` ends with
+6. **Give the trust step to the user.** When `aic validate` ends with
    `unsafe configuration is not trusted`, stop. Show the exact `!` finding
    lines, say in one sentence why the plan needs each one, and ask the user to
    run `aic trust` in their own terminal. Then run `aic validate` again.
@@ -605,6 +593,11 @@ The sequence is important, because `aic sync` adds the override to
    accepted.` confirms the trust. Do not use `--allow-unsafe`. If you edit a
    project-owned file after the approval, tell the user that it needs a new
    approval.
+
+Do not build `Dockerfile.project` yourself (for example with `docker build`)
+before the user trusts the config. Its build runs as root, and the trust gate
+exists so that the user approves it first. The approved `aic rebuild` in
+Step 9 does the build once, without the cache.
 
 The config is on disk and trusted now, but it is not proven to work. Do
 Step 9 before you say that the setup is complete.
@@ -634,7 +627,7 @@ works before you report success.
    the error, and find the project-owned file that probably causes it:
    - `unsafe configuration is not trusted`: the config changed after the
      approval of the user, or the user never approved it. Go back to Step 8,
-     items 5 to 7: validate, stop the changes, and ask again. Never use
+     items 5 and 6: validate, stop the changes, and ask again. Never use
      `--allow-unsafe`.
    - The container boots, but each tool from the build is missing and the
      named volumes are not writable: the build did not run. You used `aic up`
@@ -666,8 +659,9 @@ works before you report success.
    - The LSP binary is on `PATH`: `aic run command -v pyright-langserver` (or
      the server that Step 5 installed).
    - A named volume is writable: `aic run test -w /workspace/.venv && echo ok`.
-   - A host service is available: `aic run curl -sS host.docker.internal:5432`
-     (or the service that the stack needs).
+   - A host service is available. For a TCP service such as PostgreSQL:
+     `aic run bash -c 'timeout 3 bash -c "</dev/tcp/host.docker.internal/5432" && echo ok'`.
+     For an HTTP service: `aic run curl -sS http://host.docker.internal:<port>/`.
    - **The Step 6 overlays are installed** (only the slots that the plan
      filled): `aic run ls -l /etc/aic/user-config/shell /etc/aic/user-config/statusline`
      shows `root … 444` files. Then prove that they *run*:

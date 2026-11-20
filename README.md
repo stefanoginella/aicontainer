@@ -83,7 +83,9 @@ In VS Code, run `aic init` once, then use **Dev Containers: Reopen in
 Container**. See [Usage](docs/user/usage.md).
 
 Or let your AI agent set up the project for its stack. Open Claude Code,
-Codex, or OpenCode **on your host**, in the project directory, and send:
+Codex, or OpenCode **on your host**, in the project directory, in its normal
+approval mode. Do not use bypass or auto-approve mode for this session: the
+agent runs outside the sandbox. Send:
 
 ```text
 Set up aicontainer in this project. Follow
