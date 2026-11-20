@@ -1,6 +1,6 @@
 {
   "name": "aicontainer",
-  "version": "0.14.2",
+  "version": "0.14.3",
   "description": "Sandboxed devcontainer for running Claude Code, Codex, and OpenCode in bypass / auto-approve mode.",
   "scripts": {
     "preversion": "node scripts/promote-changelog.mjs --check",
