@@ -82,6 +82,20 @@ a Git checkout. See [Install](docs/user/install.md) for the details.
 In VS Code, run `aic init` once, then use **Dev Containers: Reopen in
 Container**. See [Usage](docs/user/usage.md).
 
+Or let your AI agent set up the project for its stack. Open Claude Code,
+Codex, or OpenCode **on your host**, in the project directory, in its normal
+approval mode. Do not use bypass or auto-approve mode for this session: the
+agent runs outside the sandbox. Send:
+
+```text
+Set up aicontainer in this project. Follow
+https://github.com/stefanoginella/aicontainer/blob/main/docs/user/agent-setup.md
+```
+
+The agent offers to install `aic` if it is missing. It proposes the project-owned
+files and writes them after you approve. See
+[Set up a project with an AI agent](docs/user/usage.md#set-up-a-project-with-an-ai-agent).
+
 > **Warning:** Do not open an unknown repository's `.devcontainer/` directly
 > with **Reopen in Container**. VS Code runs its host-side command before aic
 > can validate it. Run `aic init --force`, review the diff, then `aic up`.
@@ -108,11 +122,13 @@ contributor guide. Common pages:
 - [Install](docs/user/install.md) — prerequisites, install, first login,
   uninstall.
 - [Usage](docs/user/usage.md) — commands, diagnostics, tools, shells, VS Code,
-  the Claude Code plugin.
+  setup with an AI agent.
 - [Customization](docs/user/customization.md) — project-owned overrides that
   survive `aic sync`.
 - [Stack reference](docs/user/stack-reference.md) — the project-owned files
   for each stack, with copy-ready snippets.
+- [Agent setup](docs/user/agent-setup.md) — the setup procedure for an AI
+  agent on the host.
 - [Installing extra tools](docs/user/extra-tools.md) — `Dockerfile.project`
   and the Playwright recipe.
 - [Updating](docs/user/updating.md) — update the AI tools and aicontainer.
@@ -134,4 +150,4 @@ Do not open a public issue for a security finding. Use the
 
 ## License
 
-[MIT](./LICENSE) © 2026 Stefano Ginella
+[MIT](./LICENSE) © 2026 [Stefano Ginella](https://www.stefanoginella.com)

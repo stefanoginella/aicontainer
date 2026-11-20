@@ -2,7 +2,7 @@
 
 This page shows how to add aicontainer to a project and start the sandbox. It
 also explains validation, the diagnostic commands, the tool and shell options,
-VS Code, and the Claude Code plugin.
+VS Code, and the setup with an AI agent.
 
 ## Start a project
 
@@ -378,7 +378,7 @@ You can use `aic` from a separate terminal at the same time. `aic rebuild`,
 `aic destroy`, and the other commands operate on the same Compose project as
 the editor. Thus the two paths do not conflict.
 
-## Claude Code plugin
+## Set up a project with an AI agent
 
 To connect aicontainer to a project, you add some project-owned files.
 Examples:
@@ -391,42 +391,35 @@ Examples:
 See [Customization](customization.md). The
 [Stack reference](stack-reference.md) lists the files for each stack.
 
-The optional **aicontainer** Claude Code plugin does this work in a
-conversation:
+An AI agent can do this work for you. [Agent setup](agent-setup.md) is a
+procedure for any agent that can read files and run shell commands: Claude
+Code, Codex, OpenCode, and others. The agent:
 
-1. It finds your stack.
-2. It checks whether a headless Linux devcontainer is applicable.
-3. It proposes the files from the [Stack reference](stack-reference.md) and
-   writes them for you.
+1. finds your stack;
+2. checks whether a headless Linux devcontainer is applicable;
+3. proposes the files from the [Stack reference](stack-reference.md), writes
+   them after you approve, and verifies that the container boots.
 
-If the `aic` CLI is missing, the plugin offers to install it first. It can
-also set up a project again: it audits an existing `.devcontainer/` and updates
-only the parts that are missing, old, or drifted. The plugin makes `aic init`
-and `aic sync` easier to use. You do not need it.
+If the `aic` CLI is missing, the agent offers to install it first. The agent
+can also audit a project that has a `.devcontainer/` already. It then updates
+only the parts that are missing, old, or drifted. You do not need an agent:
+`aic init` and `aic sync` do the same work with your own files.
 
-Install it from inside Claude Code:
-
-```text
-/plugin marketplace add stefanoginella/aicontainer
-/plugin install aicontainer@aicontainer
-```
-
-Then run it from a Claude Code session **on your host**:
+Open an agent session **on your host**, in the project directory, and send:
 
 ```text
-/aicontainer:setup
+Set up aicontainer in this project. Follow
+https://github.com/stefanoginella/aicontainer/blob/main/docs/user/agent-setup.md
 ```
 
-> **Note:** Do not run the plugin inside the sandbox. The sandbox mounts
-> `.devcontainer/` read-only.
+The npm package also has the page, at `docs/user/agent-setup.md` in the
+package directory. The agent changes to that copy when `aic` is installed, so
+that it follows the procedure of your aic version.
 
-The plugin shows you the plan. It writes the files after you approve. It stops
-*before* it pulls the image, which is multiple gigabytes. You run `aic up` (or
-"Reopen in Container") yourself.
+> **Warning:** Do not run this agent in the sandbox: the sandbox mounts
+> `.devcontainer/` read-only. Do not run it in bypass or auto-approve mode:
+> it runs on the host, outside the sandbox.
 
-To uninstall the plugin and remove the marketplace:
-
-```text
-/plugin uninstall aicontainer@aicontainer
-/plugin marketplace remove aicontainer
-```
+The agent shows you the plan and writes the files after you approve. It asks
+before it pulls or builds the image, which is multiple gigabytes. You run
+`aic trust` yourself when the plan needs it.

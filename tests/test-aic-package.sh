@@ -141,6 +141,16 @@ while IFS= read -r path; do
   has "$path" || fail "package is missing $path, which aic runs"
 done < "$TMP/aic-runs.list"
 
+# The user guide is in the package. docs/user/agent-setup.md tells an AI agent
+# to follow the copy in the package root of the installed aic, so that the
+# setup procedure and the stack reference match the installed version.
+(cd "$stage" && find docs/user -type f -print | LC_ALL=C sort) > "$TMP/docs.list"
+grep -Fxq docs/user/agent-setup.md "$TMP/docs.list" || fail "repository has no docs/user/agent-setup.md"
+grep -Fxq docs/user/stack-reference.md "$TMP/docs.list" || fail "repository has no docs/user/stack-reference.md"
+while IFS= read -r path; do
+  has "$path" || fail "package is missing $path"
+done < "$TMP/docs.list"
+
 # Every template file in the repository is in the package.
 while IFS= read -r path; do
   has "$path" || fail "package is missing $path"

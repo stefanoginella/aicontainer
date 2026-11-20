@@ -3,9 +3,8 @@
 This page maps the stack of a project (Node.js, Python, Go, Rust, Ruby, PHP,
 Java, C and C++) to the project-owned files that the stack needs in
 `.devcontainer/`. Use it to set up a project by hand. Tools and AI agents can
-also read it to set up a project without the
-[Claude Code plugin](usage.md#claude-code-plugin). The plugin reads this page
-too.
+also read it. [Agent setup](agent-setup.md), the setup procedure for AI
+agents, takes its snippets from this page.
 
 The page gives the *what*. The rules for each file are on
 [Customization](customization.md), [Installing extra tools](extra-tools.md),

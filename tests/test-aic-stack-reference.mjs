@@ -1,6 +1,6 @@
 // Tests for docs/user/stack-reference.md, the stack-to-files reference.
 //
-// Tools and the /aicontainer:setup skill find a stack by its heading and copy
+// Tools and the agent setup page find a stack by its heading and copy
 // its snippets into .devcontainer/. So this test guards two things:
 //   - the structure: each `## Stack: <name>` section has the same level-3
 //     headings in the same order, and each code block names its target file;
@@ -22,7 +22,7 @@ import { FIREWALL_PRESETS, firewallPresetsProblems } from '../lib/validate.mjs';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const AIC = path.join(REPO, 'aic');
 const PAGE = fs.readFileSync(path.join(REPO, 'docs', 'user', 'stack-reference.md'), 'utf8');
-const SKILL = fs.readFileSync(path.join(REPO, 'tools', 'claude-plugin', 'skills', 'setup', 'SKILL.md'), 'utf8');
+const SETUP = fs.readFileSync(path.join(REPO, 'docs', 'user', 'agent-setup.md'), 'utf8');
 
 const SUBHEADINGS = [
   'Detect',
@@ -210,11 +210,19 @@ test('the toolchain snippets start as root and end as vscode', () => {
   }
 });
 
-test('the setup skill reads this page from the tag of the installed aic', () => {
-  assert.match(SKILL, /stack-reference\.md/);
-  assert.match(SKILL, /raw\.githubusercontent\.com\/stefanoginella\/aicontainer\/vX\.Y\.Z\/docs\/user\//);
-  assert.doesNotMatch(SKILL, /aicontainer\/main\/docs/, 'the skill must not fetch the docs from main');
-  assert.match(SKILL, /\(since …\)/, 'the skill must apply the version markers when it reads main');
+test('the agent setup page reads this page from the installed aic', () => {
+  assert.match(SETUP, /stack-reference\.md/);
+  // First choice: the copy in the package root of the installed aic, when its
+  // package.json version is the version that `aic --version` prints.
+  assert.match(SETUP, /realpathSync\(process\.argv\[1\]\)\)' "\$\(command -v aic\)"/,
+    'the page must find the package root of the installed aic');
+  assert.match(SETUP, /<root>\/docs\/user\/stack-reference\.md/);
+  assert.match(SETUP, /<root>\/package\.json/, 'the page must compare the package version with aic --version');
+  assert.match(SETUP, /<root>\/docs\/user\/agent-setup\.md/, 'the page must switch to the installed copy of itself');
+  // Fallback for an aic without docs/user/: the release tag, never main.
+  assert.match(SETUP, /raw\.githubusercontent\.com\/stefanoginella\/aicontainer\/vX\.Y\.Z\/docs\/user\//);
+  assert.doesNotMatch(SETUP, /aicontainer\/main\/docs/, 'the page must not fetch the docs from main');
+  assert.match(SETUP, /\(since …\)/, 'the page must apply the version markers when it reads main');
 });
 
 // --- version markers ----------------------------------------------------------
