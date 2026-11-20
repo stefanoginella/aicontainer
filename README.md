@@ -148,4 +148,4 @@ Do not open a public issue for a security finding. Use the
 
 ## License
 
-[MIT](./LICENSE) © 2026 Stefano Ginella
+[MIT](./LICENSE) © 2026 [Stefano Ginella](https://www.stefanoginella.com)
